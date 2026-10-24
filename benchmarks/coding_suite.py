@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run the 30-task coding-agent comparison against DeepSeek Responses."""
 
 from __future__ import annotations

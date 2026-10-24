@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Small, reproducible Pi vs MinimalCode DeepSeek Responses benchmark."""
 
 from __future__ import annotations
