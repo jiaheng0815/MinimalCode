@@ -123,6 +123,18 @@ class WebToolTests(unittest.TestCase):
             finally:
                 blocked.close()
 
+    def test_fetch_rejects_malformed_urls(self) -> None:
+        client = ProviderWebClient("custom", _web_config())
+        try:
+            with self.assertRaisesRegex(ToolError, "HTTP or HTTPS"):
+                client.fetch("http://[::1")
+            with self.assertRaisesRegex(ToolError, "HTTP or HTTPS"):
+                client.fetch("http://example.com:bad/")
+            with self.assertRaisesRegex(ToolError, "integer"):
+                client.search("query", count="3")  # type: ignore[arg-type]
+        finally:
+            client.close()
+
     def test_fetch_rejects_non_string_response_fields(self) -> None:
         for payload in (
             {"title": ["invalid"], "content": "body"},

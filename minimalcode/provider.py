@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -83,13 +85,50 @@ def _normalize_usage(raw: Any) -> dict[str, int]:
 def _content_text(value: Any) -> str:
     if isinstance(value, str):
         return value
+    if isinstance(value, dict):
+        text = value.get("text")
+        return text if isinstance(text, str) else ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
                 parts.append(item["text"])
         return "".join(parts)
     return ""
+
+
+def _tool_arguments(value: Any) -> str:
+    if isinstance(value, str):
+        return value or "{}"
+    if value is None:
+        return "{}"
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _is_event_stream(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").lower()
+    return "text/event-stream" in content_type
+
+
+def _decode_json_body(body: bytes) -> tuple[bool, Any]:
+    try:
+        return True, json.loads(body)
+    except ValueError:
+        return False, None
+
+
+def _stream_event_error(event: dict[str, Any]) -> ProviderError:
+    error = event.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("type") or error
+    else:
+        message = error or event
+    return ProviderError(f"provider stream returned an error: {message}")
 
 
 class OpenAICompatibleProvider:
@@ -116,8 +155,27 @@ class OpenAICompatibleProvider:
         self.base_url = str(config.get("base_url", "")).rstrip("/")
         if not self.base_url:
             raise ProviderError(f"provider {name!r} requires base_url")
-        self.context_window = int(config.get("context_window", 128_000))
-        self.timeout_seconds = float(config.get("timeout_seconds", 120))
+        try:
+            parsed_base = urlsplit(self.base_url)
+            hostname = parsed_base.hostname
+            _ = parsed_base.port
+        except ValueError as exc:
+            raise ProviderError(f"provider {name!r} has an invalid base_url") from exc
+        if parsed_base.scheme not in {"http", "https"} or not hostname:
+            raise ProviderError(f"provider {name!r} has an invalid base_url")
+        try:
+            self.context_window = int(config.get("context_window", 128_000))
+            self.timeout_seconds = float(config.get("timeout_seconds", 120))
+        except (TypeError, ValueError) as exc:
+            raise ProviderError(
+                f"provider {name!r} has invalid numeric settings"
+            ) from exc
+        if self.context_window < 1:
+            raise ProviderError(f"provider {name!r} requires a positive context_window")
+        if math.isnan(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ProviderError(
+                f"provider {name!r} requires a positive timeout_seconds"
+            )
         self.stream_enabled = bool(config.get("stream", True))
         self.include_usage = bool(config.get("include_usage", True))
         self.send_reasoning_effort = bool(config.get("send_reasoning_effort", False))
@@ -217,7 +275,7 @@ class OpenAICompatibleProvider:
                             "type": "function_call",
                             "call_id": str(call.get("id") or ""),
                             "name": str(function.get("name") or ""),
-                            "arguments": str(function.get("arguments") or "{}"),
+                            "arguments": _tool_arguments(function.get("arguments")),
                         }
                     )
                 continue
@@ -291,10 +349,14 @@ class OpenAICompatibleProvider:
     def _open(self, payload: dict[str, Any]):
         last_error: ProviderError | None = None
         for attempt in range(2):
-            request = self._client.build_request("POST", self._endpoint(), json=payload)
             try:
-                response = self._client.send(request, stream=bool(payload.get("stream")))
-            except httpx.HTTPError as exc:
+                request = self._client.build_request(
+                    "POST", self._endpoint(), json=payload
+                )
+                response = self._client.send(
+                    request, stream=bool(payload.get("stream"))
+                )
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
                 if attempt:
                     break
@@ -302,14 +364,22 @@ class OpenAICompatibleProvider:
                 continue
             if response.status_code < 400:
                 return response
-            body = response.read().decode("utf-8", errors="replace")[:2000]
-            response.close()
-            error = ProviderError(
-                f"provider returned HTTP {response.status_code}: {body}",
-                status_code=response.status_code,
-                body=body,
-            )
-            last_error = error
+            try:
+                body = response.read().decode("utf-8", errors="replace")[:2000]
+            except httpx.HTTPError as exc:
+                body = ""
+                last_error = ProviderError(
+                    f"provider network error while reading response: {exc}",
+                    status_code=response.status_code,
+                )
+            else:
+                last_error = ProviderError(
+                    f"provider returned HTTP {response.status_code}: {body}",
+                    status_code=response.status_code,
+                    body=body,
+                )
+            finally:
+                response.close()
             if response.status_code not in {429, 500, 502, 503, 504} or attempt:
                 break
             retry_after = response.headers.get("Retry-After", "1")
@@ -327,68 +397,106 @@ class OpenAICompatibleProvider:
         *,
         on_text: Callable[[str], None] | None,
     ) -> ProviderReply:
+        response = self._open(payload)
+        try:
+            if not _is_event_stream(response):
+                try:
+                    body = response.read()
+                except httpx.HTTPError as exc:
+                    raise ProviderError(
+                        f"provider stream interrupted: {exc}"
+                    ) from exc
+                parsed, data = _decode_json_body(body)
+                if parsed:
+                    return self._parse_chat_payload(data, on_text=on_text)
+                text = body.decode("utf-8", errors="replace")
+                if "data:" not in text:
+                    raise ProviderError("provider returned an invalid response")
+                lines: Iterable[str] = text.splitlines()
+            else:
+                lines = response.iter_lines()
+            return self._parse_chat_stream(lines, on_text=on_text)
+        finally:
+            response.close()
+
+    def _parse_chat_stream(
+        self,
+        lines: Iterable[str],
+        *,
+        on_text: Callable[[str], None] | None,
+    ) -> ProviderReply:
         content_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
         usage: dict[str, int] = {}
 
-        response = self._open(payload)
         try:
-            try:
-                for line in response.iter_lines():
-                    if not line or line.startswith((":", "event:")):
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+            for line in lines:
+                if not line or line.startswith((":", "event:")):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("error"):
+                    raise _stream_event_error(event)
 
-                    raw_usage = event.get("usage")
-                    if isinstance(raw_usage, dict):
-                        parsed_usage = _normalize_usage(raw_usage)
-                        if parsed_usage:
-                            usage = parsed_usage
+                raw_usage = event.get("usage")
+                if isinstance(raw_usage, dict):
+                    parsed_usage = _normalize_usage(raw_usage)
+                    if parsed_usage:
+                        usage = parsed_usage
 
-                    choices = event.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-                    text = _content_text(delta.get("content"))
-                    if text:
-                        content_parts.append(text)
-                        if on_text is not None:
-                            on_text(text)
+                choices = event.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if not isinstance(delta, dict):
+                    delta = {}
+                text = _content_text(delta.get("content"))
+                if text:
+                    content_parts.append(text)
+                    if on_text is not None:
+                        on_text(text)
 
-                    raw_calls = delta.get("tool_calls")
-                    if isinstance(raw_calls, list):
-                        for raw_call in raw_calls:
-                            if not isinstance(raw_call, dict):
-                                continue
+                raw_calls = delta.get("tool_calls")
+                if isinstance(raw_calls, list):
+                    for raw_call in raw_calls:
+                        if not isinstance(raw_call, dict):
+                            continue
+                        try:
                             index = int(raw_call.get("index", len(calls)))
-                            entry = calls.setdefault(
-                                index,
-                                {"id": "", "name": "", "arguments": ""},
-                            )
-                            if raw_call.get("id"):
-                                entry["id"] = str(raw_call["id"])
-                            function = raw_call.get("function")
-                            if isinstance(function, dict):
-                                if function.get("name"):
-                                    entry["name"] = str(function["name"])
-                                if isinstance(function.get("arguments"), str):
-                                    entry["arguments"] += function["arguments"]
-                    if choice.get("finish_reason"):
-                        finish_reason = str(choice["finish_reason"])
-            except httpx.HTTPError as exc:
-                raise ProviderError(f"provider stream interrupted: {exc}") from exc
-        finally:
-            response.close()
+                        except (TypeError, ValueError):
+                            index = len(calls)
+                        entry = calls.setdefault(
+                            index,
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        if raw_call.get("id"):
+                            entry["id"] = str(raw_call["id"])
+                        function = raw_call.get("function")
+                        if isinstance(function, dict):
+                            if function.get("name"):
+                                entry["name"] = str(function["name"])
+                            arguments = function.get("arguments")
+                            if isinstance(arguments, str):
+                                entry["arguments"] += arguments
+                            elif arguments is not None:
+                                entry["arguments"] = _tool_arguments(arguments)
+                if choice.get("finish_reason"):
+                    finish_reason = str(choice["finish_reason"])
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"provider stream interrupted: {exc}") from exc
 
         tool_calls: list[ToolCall] = []
         for index in sorted(calls):
@@ -402,11 +510,62 @@ class OpenAICompatibleProvider:
                     arguments=entry["arguments"] or "{}",
                 )
             )
+        if not content_parts and not tool_calls and finish_reason is None:
+            raise ProviderError("provider returned an empty stream")
         return ProviderReply(
             content="".join(content_parts),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+        )
+
+    def _parse_chat_payload(
+        self,
+        data: Any,
+        *,
+        on_text: Callable[[str], None] | None,
+    ) -> ProviderReply:
+        if not isinstance(data, dict):
+            raise ProviderError("provider response must be an object")
+        if data.get("error"):
+            raise ProviderError(f"provider response failed: {data['error']}")
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ProviderError("provider response has no choices")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ProviderError("provider response choice must be an object")
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise ProviderError("provider response has no message")
+        content = _content_text(message.get("content"))
+        if content and on_text is not None:
+            on_text(content)
+        calls: list[ToolCall] = []
+        raw_calls = message.get("tool_calls")
+        if isinstance(raw_calls, list):
+            for index, raw_call in enumerate(raw_calls):
+                if not isinstance(raw_call, dict):
+                    continue
+                function = raw_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+                name = str(function.get("name") or "")
+                if not name:
+                    continue
+                calls.append(
+                    ToolCall(
+                        id=str(raw_call.get("id") or f"call_{index}"),
+                        name=name,
+                        arguments=_tool_arguments(function.get("arguments")),
+                    )
+                )
+        finish_reason = choice.get("finish_reason")
+        return ProviderReply(
+            content=content,
+            tool_calls=calls,
+            finish_reason=str(finish_reason) if finish_reason is not None else None,
+            usage=_normalize_usage(data.get("usage")),
         )
 
     def _chat_regular_request(
@@ -417,39 +576,17 @@ class OpenAICompatibleProvider:
     ) -> ProviderReply:
         response = self._open(payload)
         try:
+            if _is_event_stream(response):
+                return self._parse_chat_stream(response.iter_lines(), on_text=on_text)
             try:
                 data = response.json()
             except ValueError as exc:
                 raise ProviderError("provider returned invalid JSON") from exc
+            except httpx.HTTPError as exc:
+                raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ProviderError("provider response has no choices")
-        message = choices[0].get("message") or {}
-        content = _content_text(message.get("content"))
-        if content and on_text is not None:
-            on_text(content)
-        calls: list[ToolCall] = []
-        for index, raw_call in enumerate(message.get("tool_calls") or []):
-            if not isinstance(raw_call, dict):
-                continue
-            function = raw_call.get("function") or {}
-            if not isinstance(function, dict):
-                continue
-            calls.append(
-                ToolCall(
-                    id=str(raw_call.get("id") or f"call_{index}"),
-                    name=str(function.get("name") or ""),
-                    arguments=str(function.get("arguments") or "{}"),
-                )
-            )
-        return ProviderReply(
-            content=content,
-            tool_calls=[call for call in calls if call.name],
-            finish_reason=choices[0].get("finish_reason"),
-            usage=_normalize_usage(data.get("usage")),
-        )
+        return self._parse_chat_payload(data, on_text=on_text)
 
     @staticmethod
     def _parse_responses_output(
@@ -472,16 +609,13 @@ class OpenAICompatibleProvider:
                 if text:
                     content_parts.append(text)
             elif item_type == "function_call":
-                raw_arguments = item.get("arguments", "{}")
-                if not isinstance(raw_arguments, str):
-                    raw_arguments = json.dumps(raw_arguments, ensure_ascii=False)
                 name = str(item.get("name") or "")
                 if name:
                     calls.append(
                         ToolCall(
                             id=str(item.get("call_id") or item.get("id") or ""),
                             name=name,
-                            arguments=raw_arguments or "{}",
+                            arguments=_tool_arguments(item.get("arguments")),
                         )
                     )
         for index, call in enumerate(calls):
@@ -499,6 +633,8 @@ class OpenAICompatibleProvider:
             return "incomplete"
         if status == "failed":
             return "failed"
+        if status and status != "completed":
+            return status
         return "tool_calls" if has_calls else "stop"
 
     @staticmethod
@@ -539,14 +675,35 @@ class OpenAICompatibleProvider:
                 state["name"] = str(item["name"])
             arguments = item.get("arguments")
             if isinstance(arguments, str):
-                state["arguments"] = arguments
+                if arguments or not state["arguments"]:
+                    state["arguments"] = arguments
             elif isinstance(arguments, dict):
-                state["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                state["arguments"] = _tool_arguments(arguments)
+
+        def add_fallback_text(text: str) -> None:
+            if text and text not in fallback_text:
+                fallback_text.append(text)
 
         response = self._open(payload)
         try:
+            if not _is_event_stream(response):
+                try:
+                    body = response.read()
+                except httpx.HTTPError as exc:
+                    raise ProviderError(
+                        f"provider stream interrupted: {exc}"
+                    ) from exc
+                parsed, data = _decode_json_body(body)
+                if parsed:
+                    return self._parse_responses_payload(data, on_text=on_text)
+                text = body.decode("utf-8", errors="replace")
+                if "data:" not in text:
+                    raise ProviderError("provider returned an invalid response")
+                lines: Iterable[str] = text.splitlines()
+            else:
+                lines = response.iter_lines()
             try:
-                for line in response.iter_lines():
+                for line in lines:
                     if not line or line.startswith((":", "event:")):
                         continue
                     if not line.startswith("data:"):
@@ -558,19 +715,21 @@ class OpenAICompatibleProvider:
                         event = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
 
                     event_type = str(event.get("type") or "")
+                    if not event_type and event.get("error"):
+                        raise self._response_error(event)
                     if event_type == "response.output_text.delta":
-                        text = str(event.get("delta") or "")
+                        text = _content_text(event.get("delta"))
                         if text:
                             content_parts.append(text)
                             if on_text is not None:
                                 on_text(text)
                         continue
                     if event_type == "response.output_text.done":
-                        text = str(event.get("text") or "")
-                        if text:
-                            fallback_text.append(text)
+                        add_fallback_text(_content_text(event.get("text")))
                         continue
                     if event_type == "response.output_item.added":
                         item = event.get("item")
@@ -581,17 +740,28 @@ class OpenAICompatibleProvider:
                             update_call(item, key)
                         continue
                     if event_type == "response.function_call_arguments.delta":
-                        raw_key = str(event.get("item_id", event.get("output_index", "0")))
+                        raw_key = str(
+                            event.get("item_id") or event.get("output_index", "0")
+                        )
                         key = output_keys.get(raw_key, raw_key)
                         state = state_for(key)
-                        state["arguments"] += str(event.get("delta") or "")
+                        delta = event.get("delta")
+                        if isinstance(delta, str):
+                            state["arguments"] += delta
+                        elif delta is not None:
+                            state["arguments"] = _tool_arguments(delta)
                         continue
                     if event_type == "response.function_call_arguments.done":
-                        raw_key = str(event.get("item_id", event.get("output_index", "0")))
+                        raw_key = str(
+                            event.get("item_id") or event.get("output_index", "0")
+                        )
                         key = output_keys.get(raw_key, raw_key)
                         state = state_for(key)
-                        if isinstance(event.get("arguments"), str):
-                            state["arguments"] = str(event["arguments"])
+                        arguments = event.get("arguments")
+                        if isinstance(arguments, str) and (
+                            arguments or not state["arguments"]
+                        ):
+                            state["arguments"] = arguments
                         continue
                     if event_type == "response.output_item.done":
                         item = event.get("item")
@@ -603,9 +773,7 @@ class OpenAICompatibleProvider:
                         if item.get("type") == "function_call":
                             update_call(item, key)
                         elif item.get("type") == "message":
-                            text = _content_text(item.get("content"))
-                            if text:
-                                fallback_text.append(text)
+                            add_fallback_text(_content_text(item.get("content")))
                         continue
                     if event_type in {"response.completed", "response.incomplete"}:
                         completed = event.get("response")
@@ -660,6 +828,31 @@ class OpenAICompatibleProvider:
             usage=usage,
         )
 
+    def _parse_responses_payload(
+        self,
+        data: Any,
+        *,
+        on_text: Callable[[str], None] | None,
+    ) -> ProviderReply:
+        if not isinstance(data, dict):
+            raise ProviderError("provider response must be an object")
+        if data.get("status") == "failed" or data.get("error"):
+            raise ProviderError(f"provider response failed: {data.get('error')}")
+        output = data.get("output")
+        if not isinstance(output, list) and not isinstance(data.get("output_text"), str):
+            raise ProviderError("provider response has no output")
+        content, calls = self._parse_responses_output(output)
+        if not content and isinstance(data.get("output_text"), str):
+            content = data["output_text"]
+        if content and on_text is not None:
+            on_text(content)
+        return ProviderReply(
+            content=content,
+            tool_calls=calls,
+            finish_reason=self._response_finish(data, bool(calls)),
+            usage=_normalize_usage(data.get("usage")),
+        )
+
     def _responses_regular_request(
         self,
         payload: dict[str, Any],
@@ -672,23 +865,11 @@ class OpenAICompatibleProvider:
                 data = response.json()
             except ValueError as exc:
                 raise ProviderError("provider returned invalid JSON") from exc
+            except httpx.HTTPError as exc:
+                raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
-        if not isinstance(data, dict):
-            raise ProviderError("provider response must be an object")
-        if data.get("status") == "failed":
-            raise ProviderError(f"provider response failed: {data.get('error')}")
-        content, calls = self._parse_responses_output(data.get("output"))
-        if not content and isinstance(data.get("output_text"), str):
-            content = data["output_text"]
-        if content and on_text is not None:
-            on_text(content)
-        return ProviderReply(
-            content=content,
-            tool_calls=calls,
-            finish_reason=self._response_finish(data, bool(calls)),
-            usage=_normalize_usage(data.get("usage")),
-        )
+        return self._parse_responses_payload(data, on_text=on_text)
 
 
 def create_provider(

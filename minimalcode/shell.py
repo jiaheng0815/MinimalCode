@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -32,7 +33,10 @@ def _kind_for_executable(executable: str) -> tuple[str, str]:
 
 
 def _resolve_override(preferred: str) -> ShellSpec:
-    expanded = str(Path(preferred).expanduser())
+    try:
+        expanded = str(Path(preferred).expanduser())
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ShellError(f"invalid configured shell path: {preferred}") from exc
     resolved = shutil.which(expanded)
     if resolved is None:
         candidate = Path(expanded)
@@ -123,7 +127,13 @@ def run_shell(
         return {"status": "error", "message": "command must be a string"}
     if not command.strip():
         return {"status": "error", "message": "command is empty"}
-    timeout = max(1.0, min(float(timeout), 3600.0))
+    try:
+        requested_timeout = float(timeout)
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "timeout must be a number"}
+    if math.isnan(requested_timeout):
+        return {"status": "error", "message": "timeout must be a number"}
+    timeout = max(1.0, min(requested_timeout, 3600.0))
     process_env = os.environ.copy()
     process_env.update(
         {
@@ -156,7 +166,7 @@ def run_shell(
             "stdout": truncate_text(stdout, max_output_chars)[0],
             "stderr": truncate_text(stderr, max_output_chars)[0],
         }
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return {
             "status": "error",
             "shell": shell.label,

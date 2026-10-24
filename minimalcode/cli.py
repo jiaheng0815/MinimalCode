@@ -163,8 +163,11 @@ def _management_command(argv: Sequence[str]) -> int | None:
 def _resolve_cwd(raw: str | None) -> Path:
     from .errors import ConfigError
 
-    path = Path(raw).expanduser() if raw else Path.cwd()
-    resolved = path.resolve()
+    try:
+        path = Path(raw).expanduser() if raw else Path.cwd()
+        resolved = path.resolve()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid workspace: {raw}") from exc
     if not resolved.is_dir():
         raise ConfigError(f"workspace is not a directory: {resolved}")
     return resolved
@@ -182,14 +185,23 @@ def _load_or_create_session(
 
     if args.continue_session and args.session:
         raise ConfigError("--continue and --session cannot be used together")
+    if args.no_session and (args.continue_session or args.session):
+        raise ConfigError("--no-session cannot be combined with --continue or --session")
     if args.continue_session:
         session = store.latest(cwd)
         if session is None:
             raise FileNotFoundError(f"no saved session for {cwd}")
-        return session, session.cwd if not args.cwd else cwd
+        if args.cwd:
+            session.cwd = cwd
+        return session, session.cwd
     if args.session:
-        session = store.resolve(args.session, cwd)
-        return session, session.cwd if not args.cwd else cwd
+        identifier = args.session.strip()
+        if not identifier:
+            raise ConfigError("--session must not be empty")
+        session = store.resolve(identifier, cwd)
+        if args.cwd:
+            session.cwd = cwd
+        return session, session.cwd
     save = bool(settings.get("session.save", True)) and not args.no_session
     return store.create(cwd, provider=provider, model=model, save=save), cwd
 
@@ -322,8 +334,8 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     parser = _parser()
     args = parser.parse_args(raw_args)
-    if args.max_turns is not None and args.max_turns < 1:
-        parser.error("--max-turns must be at least 1")
+    if args.max_turns is not None and not 1 <= args.max_turns <= 10_000:
+        parser.error("--max-turns must be from 1 to 10000")
     if args.json_output:
         args.print_mode = True
 

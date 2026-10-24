@@ -25,12 +25,17 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def home_dir(path: str | Path | None = None) -> Path:
-    if path is not None:
-        return Path(path).expanduser().resolve()
-    configured = os.environ.get(HOME_ENV)
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return (Path.home() / APP_DIR_NAME).resolve()
+    candidate: Path | None = None
+    try:
+        if path is not None:
+            candidate = Path(path)
+        else:
+            configured = os.environ.get(HOME_ENV)
+            candidate = Path(configured) if configured else Path.home() / APP_DIR_NAME
+        return candidate.expanduser().resolve()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        detail = candidate if candidate is not None else path or "default home"
+        raise ConfigError(f"invalid home directory: {detail}") from exc
 
 
 def settings_path(home: str | Path | None = None) -> Path:
@@ -173,8 +178,11 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     if not isinstance(highlight, bool):
         raise ConfigError(f"{path}: output.markdown_highlight must be a boolean")
     theme = data["output"].get("theme")
-    if theme not in {"dark", "light"}:
+    if not isinstance(theme, str) or theme not in {"dark", "light"}:
         raise ConfigError(f"{path}: output.theme must be 'dark' or 'light'")
+
+    if "thinking" in data and not isinstance(data["thinking"], str):
+        raise ConfigError(f"{path}: thinking must be a string")
 
 
 def _validate_number(
@@ -264,8 +272,8 @@ def load_settings(
         return Settings(data=data, home=root, source=source)
 
     try:
-        raw = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = json.loads(source.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"cannot read {source}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: top-level value must be an object")
@@ -322,9 +330,11 @@ def redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            lowered = key.lower()
+            lowered = key.lower() if isinstance(key, str) else ""
+            compact = re.sub(r"[^a-z0-9]", "", lowered)
             sensitive = (
                 lowered in {"api_key", "authorization", "x-api-key"}
+                or compact in {"apikey", "xapikey"}
                 or "secret" in lowered
                 or "token" in lowered
             )

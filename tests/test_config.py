@@ -45,10 +45,37 @@ class ConfigTests(unittest.TestCase):
         ):
             self.assertEqual(settings_path(), Path(temp).resolve() / "settings.json")
 
+    def test_invalid_home_is_reported_as_config_error(self) -> None:
+        with (
+            patch(
+                "minimalcode.config.Path.expanduser",
+                side_effect=RuntimeError("no home"),
+            ),
+            self.assertRaisesRegex(ConfigError, "invalid home"),
+        ):
+            settings_path("~missing")
+
     def test_environment_expansion(self) -> None:
         with patch.dict(os.environ, {"TEST_PROVIDER_KEY": "secret-value"}):
             self.assertEqual(expand_env("${TEST_PROVIDER_KEY}"), "secret-value")
             self.assertEqual(expand_env("${MISSING_KEY}"), "${MISSING_KEY}")
+
+    def test_utf8_bom_settings_file_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            path.write_bytes(b"\xef\xbb\xbf" + json.dumps(data).encode("utf-8"))
+            loaded = load_settings(home, require_file=True)
+            self.assertEqual(loaded.get("model"), "deepseek-flash")
+
+    def test_non_utf8_settings_file_has_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            path.write_bytes(b"\xff\xfe\x00")
+            with self.assertRaisesRegex(ConfigError, "cannot read"):
+                load_settings(home, require_file=True)
 
     def test_invalid_provider_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -68,6 +95,16 @@ class ConfigTests(unittest.TestCase):
             data["output"]["theme"] = "solarized"
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(ConfigError):
+                load_settings(home, require_file=True)
+
+    def test_non_string_output_theme_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["output"]["theme"] = ["dark"]
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "output.theme"):
                 load_settings(home, require_file=True)
 
     def test_invalid_nested_settings_are_rejected(self) -> None:
@@ -111,11 +148,13 @@ class ConfigTests(unittest.TestCase):
     def test_redaction(self) -> None:
         data = {
             "api_key": "abc",
+            "apiKey": "camel",
             "api_key_env": "SAFE_VARIABLE_NAME",
             "nested": {"authorization": "Bearer x", "name": "ok"},
         }
         redacted = redact_config(data)
         self.assertEqual(redacted["api_key"], "<redacted>")
+        self.assertEqual(redacted["apiKey"], "<redacted>")
         self.assertEqual(redacted["api_key_env"], "SAFE_VARIABLE_NAME")
         self.assertEqual(redacted["nested"]["authorization"], "<redacted>")
         self.assertEqual(redacted["nested"]["name"], "ok")

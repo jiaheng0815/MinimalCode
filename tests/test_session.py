@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from minimalcode.config import ensure_config, load_settings
-from minimalcode.session import SessionStore
+from minimalcode.session import SessionStore, _workspace_key
 
 
 class SessionTests(unittest.TestCase):
@@ -54,6 +55,52 @@ class SessionTests(unittest.TestCase):
             session.append_message({"role": "user", "content": "hello"})
             self.assertIsNone(session.path)
             self.assertEqual(len(session.messages), 1)
+
+    def test_latest_uses_modification_time_not_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            first = store.create(workspace, provider="test", model="model", save=True)
+            second = store.create(workspace, provider="test", model="model", save=True)
+            assert first.path is not None and second.path is not None
+
+            older = first.path.with_name("29991231T235959Z-zzzz.jsonl")
+            newer = second.path.with_name("20000101T000000Z-aaaa.jsonl")
+            os.replace(first.path, older)
+            os.replace(second.path, newer)
+            os.utime(older, (1_000, 1_000))
+            os.utime(newer, (2_000, 2_000))
+
+            latest = store.latest(workspace)
+
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.session_id, second.session_id)
+
+    @unittest.skipIf(os.name == "nt", "Windows paths are case-insensitive")
+    def test_workspace_key_keeps_case_on_case_sensitive_platforms(self) -> None:
+        self.assertNotEqual(_workspace_key(Path("/tmp/Foo")), _workspace_key(Path("/tmp/foo")))
+
+    def test_latest_skips_sessions_without_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            valid = store.create(workspace, provider="test", model="model", save=True)
+            broken = store.create(workspace, provider="test", model="model", save=True)
+            assert valid.path is not None and broken.path is not None
+            broken.path.write_text("not json\n", encoding="utf-8")
+            os.utime(valid.path, (1_000, 1_000))
+            os.utime(broken.path, (2_000, 2_000))
+
+            latest = store.latest(workspace)
+
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.session_id, valid.session_id)
 
     def test_resolve_accepts_full_recorded_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

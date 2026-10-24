@@ -11,6 +11,7 @@ from unittest.mock import patch
 from minimalcode.cli import run
 from minimalcode.config import ensure_config, load_settings
 from minimalcode.provider import ProviderReply
+from minimalcode.session import SessionStore
 
 
 class FakeCliProvider:
@@ -21,8 +22,10 @@ class FakeCliProvider:
     def __init__(self) -> None:
         self.closed = False
         self.config: dict = {}
+        self.messages: list[dict] = []
 
     def stream_chat(self, messages, *, tools=None, on_text=None):
+        self.messages = messages
         if on_text:
             on_text("completed")
         return ProviderReply(
@@ -71,6 +74,47 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["completed"])
             self.assertIsNone(payload["session"])
             self.assertTrue(provider.closed)
+
+    def test_resumed_session_uses_requested_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            original = root / "original"
+            requested = root / "requested"
+            original.mkdir()
+            requested.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            session = SessionStore(settings).create(
+                original,
+                provider="fake",
+                model="fake-model",
+                save=True,
+            )
+            provider = FakeCliProvider()
+            with patch(
+                "minimalcode.provider.create_provider",
+                return_value=(provider, "fake", "fake-model"),
+            ), redirect_stdout(io.StringIO()):
+                code = run(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--session",
+                        session.session_id,
+                        "--cwd",
+                        str(requested),
+                        "say completed",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            system_message = next(
+                message["content"]
+                for message in provider.messages
+                if message["role"] == "system"
+            )
+            self.assertIn(f"Workspace: {requested.resolve()}", system_message)
 
     def test_config_set_model_and_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

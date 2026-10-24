@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -241,6 +242,22 @@ def _clip(value: str, limit: int = 180) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+def _positive_limit(
+    requested: int | None,
+    default: int,
+    maximum: int,
+    label: str,
+) -> int:
+    if requested is not None and (
+        isinstance(requested, bool) or not isinstance(requested, int)
+    ):
+        raise ToolError(f"{label} must be an integer")
+    limit = default if requested is None else requested
+    if limit < 1:
+        raise ToolError(f"{label} must be at least 1")
+    return min(limit, maximum)
+
+
 _UNION_ORIGINS = {Union, UnionType}
 _TYPE_LABELS: dict[Any, str] = {
     str: "a string",
@@ -322,10 +339,13 @@ class ToolRuntime:
     def _path(self, raw: str) -> Path:
         if not isinstance(raw, str) or not raw.strip():
             raise ToolError("path must be a non-empty string")
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = self.cwd / path
-        resolved = path.resolve(strict=False)
+        try:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                path = self.cwd / path
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ToolError(f"invalid path: {raw}") from exc
         if not self.allow_outside:
             try:
                 resolved.relative_to(self.cwd)
@@ -342,8 +362,14 @@ class ToolRuntime:
         target = self._path(path)
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
-        start = max(1, int(start_line))
-        stop = int(end_line) if end_line is not None else None
+        if isinstance(start_line, bool) or not isinstance(start_line, int):
+            raise ToolError("start_line must be an integer")
+        if end_line is not None and (
+            isinstance(end_line, bool) or not isinstance(end_line, int)
+        ):
+            raise ToolError("end_line must be an integer or null")
+        start = max(1, start_line)
+        stop = end_line
         if stop is not None and stop < start:
             raise ToolError("end_line must be greater than or equal to start_line")
 
@@ -422,7 +448,12 @@ class ToolRuntime:
         if len(content) > self.max_file_chars * 8:
             raise ToolError("content is too large for write")
         target = self._path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and target.is_dir():
+            raise ToolError(f"path is a directory: {target}")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ToolError(f"cannot create parent directory: {exc}") from exc
         existed = target.exists()
         mode = target.stat().st_mode & 0o7777 if existed else None
         self._write_atomic(target, content, mode=mode)
@@ -440,10 +471,12 @@ class ToolRuntime:
         new_text: str,
         replace_all: bool = False,
     ) -> dict[str, Any]:
-        if not old_text:
-            raise ToolError("old_text must not be empty")
+        if not isinstance(old_text, str) or not old_text:
+            raise ToolError("old_text must be a non-empty string")
         if not isinstance(new_text, str):
             raise ToolError("new_text must be a string")
+        if not isinstance(replace_all, bool):
+            raise ToolError("replace_all must be a boolean")
         target = self._path(path)
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
@@ -452,9 +485,16 @@ class ToolRuntime:
 
         with target.open("r", encoding="utf-8", errors="strict", newline="") as handle:
             original = handle.read()
-        default_newline = "\r\n" if "\r\n" in original else "\n"
-        needle = old_text.replace("\r\n", "\n")
-        pattern = re.compile(r"\r?\n".join(re.escape(part) for part in needle.split("\n")))
+        if "\r\n" in original:
+            default_newline = "\r\n"
+        elif "\r" in original and "\n" not in original:
+            default_newline = "\r"
+        else:
+            default_newline = "\n"
+        needle = old_text.replace("\r\n", "\n").replace("\r", "\n")
+        pattern = re.compile(
+            r"(?:\r\n|\r|\n)".join(re.escape(part) for part in needle.split("\n"))
+        )
         matches = list(pattern.finditer(original))
         count = len(matches)
         if count == 0:
@@ -465,12 +505,14 @@ class ToolRuntime:
             matches = matches[:1]
 
         # Replace only the matched spans so untouched lines keep their own endings.
-        normalized_new = new_text.replace("\r\n", "\n")
+        normalized_new = new_text.replace("\r\n", "\n").replace("\r", "\n")
         updated = original
         for match in reversed(matches):
             span = match.group(0)
             if "\r\n" in span:
                 span_newline = "\r\n"
+            elif "\r" in span:
+                span_newline = "\r"
             elif "\n" in span:
                 span_newline = "\n"
             else:
@@ -490,9 +532,15 @@ class ToolRuntime:
         workdir = self._path(cwd)
         if not workdir.is_dir():
             raise ToolError(f"working directory not found: {workdir}")
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+        ):
+            raise ToolError("timeout must be a number")
         requested_timeout = float(
             timeout if timeout is not None else self.shell_timeout
         )
+        if math.isnan(requested_timeout):
+            raise ToolError("timeout must be a number")
         effective_timeout = max(1.0, min(requested_timeout, self.shell_timeout))
         return run_shell(
             command,
@@ -509,10 +557,16 @@ class ToolRuntime:
         glob: str | None = None,
         max_results: int | None = None,
     ) -> dict[str, Any]:
-        if not pattern:
-            raise ToolError("pattern must not be empty")
+        if not isinstance(pattern, str) or not pattern:
+            raise ToolError("pattern must be a non-empty string")
+        if glob is not None and not isinstance(glob, str):
+            raise ToolError("glob must be a string or null")
         target = self._path(path)
-        limit = min(int(max_results or self.max_results), 2000)
+        if not target.exists():
+            raise ToolError(f"path not found: {target}")
+        if not target.is_file() and not target.is_dir():
+            raise ToolError(f"path is not a file or directory: {target}")
+        limit = _positive_limit(max_results, self.max_results, 2000, "max_results")
         rg = shutil.which("rg")
         if rg:
             command = [
@@ -591,12 +645,12 @@ class ToolRuntime:
         path: str = ".",
         max_results: int | None = None,
     ) -> dict[str, Any]:
-        if not pattern:
-            raise ToolError("pattern must not be empty")
+        if not isinstance(pattern, str) or not pattern:
+            raise ToolError("pattern must be a non-empty string")
         target = self._path(path)
         if not target.is_dir():
             raise ToolError(f"directory not found: {target}")
-        limit = min(int(max_results or self.max_results), 5000)
+        limit = _positive_limit(max_results, self.max_results, 5000, "max_results")
         rg = shutil.which("rg")
         if rg:
             command = [rg, "--files", "--glob", pattern]

@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from minimalcode.errors import ShellError
 from minimalcode.shell import detect_shell, run_shell, select_shell, truncate_text
 
 
@@ -23,6 +25,19 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(result["status"], "success", result)
         self.assertIn("hello", str(result["stdout"]))
 
+    def test_invalid_timeout_returns_an_error(self) -> None:
+        shell = detect_shell()
+        with tempfile.TemporaryDirectory() as temp:
+            result = run_shell(
+                "echo hello",
+                shell=shell,
+                cwd=Path(temp),
+                timeout=float("nan"),
+                max_output_chars=1000,
+            )
+        self.assertEqual(result["status"], "error")
+        self.assertIn("timeout", str(result["message"]))
+
     def test_truncation_keeps_head_and_tail(self) -> None:
         text = "A" * 100 + "B" * 100
         result, truncated = truncate_text(text, 80)
@@ -31,6 +46,16 @@ class ShellTests(unittest.TestCase):
         self.assertIn("truncated", result)
         self.assertTrue(result.startswith("A"))
         self.assertTrue(result.endswith("B"))
+
+    def test_invalid_configured_shell_path_is_reported(self) -> None:
+        with (
+            patch(
+                "minimalcode.shell.Path.expanduser",
+                side_effect=RuntimeError("no user"),
+            ),
+            self.assertRaisesRegex(ShellError, "invalid configured shell"),
+        ):
+            detect_shell("~missing/pwsh")
 
     def test_platform_fallback_order(self) -> None:
         windows = select_shell(

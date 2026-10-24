@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import ConfigError, load_settings, write_settings
 
@@ -26,14 +27,25 @@ class ImportResult:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
         raise ConfigError(f"Pi config file not found: {path}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: top-level value must be an object")
     return data
+
+
+def _valid_base_url(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+    except ValueError:
+        return False
 
 
 def _choose_model(
@@ -62,11 +74,14 @@ def import_pi_settings(
     include_secrets: bool = True,
     overwrite: bool = False,
 ) -> ImportResult:
-    pi_root = (
-        Path(pi_home).expanduser().resolve()
-        if pi_home
-        else (Path.home() / ".pi" / "agent").resolve()
-    )
+    try:
+        pi_root = (
+            Path(pi_home).expanduser().resolve()
+            if pi_home
+            else (Path.home() / ".pi" / "agent").resolve()
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid Pi config directory: {pi_home or '~/.pi/agent'}") from exc
     models_data = _read_json(pi_root / "models.json")
     settings_data = _read_json(pi_root / "settings.json")
     default_provider = str(settings_data.get("defaultProvider") or "")
@@ -98,7 +113,7 @@ def import_pi_settings(
         api = str(model.get("api") or raw_provider.get("api") or "")
         protocol = PI_PROTOCOLS.get(api)
         base_url = raw_provider.get("baseUrl") or raw_provider.get("base_url")
-        if not protocol or not isinstance(base_url, str) or not base_url:
+        if not protocol or not _valid_base_url(base_url):
             skipped.append(provider_name)
             continue
 
@@ -108,10 +123,20 @@ def import_pi_settings(
             continue
 
         model_id = str(model["id"])
+        try:
+            context_window = int(model.get("contextWindow") or 128_000)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"provider {provider_name!r} has an invalid contextWindow"
+            ) from exc
+        if context_window < 1:
+            raise ConfigError(
+                f"provider {provider_name!r} has an invalid contextWindow"
+            )
         provider_config: dict[str, Any] = {
             "protocol": protocol,
             "base_url": base_url,
-            "context_window": int(model.get("contextWindow") or 128_000),
+            "context_window": context_window,
             "timeout_seconds": 120,
             "stream": True,
             "include_usage": protocol == "openai_chat",

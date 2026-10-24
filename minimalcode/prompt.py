@@ -16,8 +16,10 @@ Shell: {shell}
 
 
 def _read_limited(path: Path, limit: int) -> str:
+    if limit <= 0:
+        return ""
     try:
-        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
             return handle.read(limit)
     except OSError:
         return ""

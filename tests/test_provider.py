@@ -5,7 +5,7 @@ import unittest
 
 import httpx
 
-from minimalcode.provider import OpenAICompatibleProvider
+from minimalcode.provider import OpenAICompatibleProvider, ProviderError
 
 
 class ProviderTests(unittest.TestCase):
@@ -108,6 +108,15 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.tool_calls[0].arguments, '{"path":"README.md"}')
         self.assertEqual(seen_request["model"], "model-a")
         self.assertTrue(seen_request["stream"])
+
+    def test_invalid_base_url_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ProviderError, "base_url"):
+            OpenAICompatibleProvider(
+                name="bad",
+                config={"base_url": "not a url"},
+                model="x",
+                thinking="off",
+            )
 
     def test_unknown_protocol_is_rejected(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "unsupported protocol"):
@@ -251,6 +260,192 @@ class ProviderTests(unittest.TestCase):
         )
         request_tools = seen_request["tools"]
         self.assertEqual(request_tools[0]["name"], "read")
+
+
+    def test_stream_falls_back_to_json_response(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "plain response"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5,
+                    },
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx.MockTransport(handler),
+        )
+        deltas: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}],
+                on_text=deltas.append,
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(deltas, ["plain response"])
+        self.assertEqual(reply.content, "plain response")
+        self.assertEqual(reply.finish_reason, "stop")
+        self.assertEqual(reply.usage["total_tokens"], 5)
+
+    def test_responses_stream_falls_back_to_json_response(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "plain"}],
+                        }
+                    ],
+                    "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": True,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "plain")
+        self.assertEqual(reply.finish_reason, "stop")
+        self.assertEqual(reply.usage["prompt_tokens"], 2)
+
+    def test_responses_output_text_items_are_parsed(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [{"type": "output_text", "text": "plain"}],
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "plain")
+
+    def test_chat_stream_ignores_non_object_events_and_reports_errors(self) -> None:
+        def events(body: str):
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body.encode("utf-8"),
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx.MockTransport(
+                lambda request: events(
+                    "data: []\n\n"
+                    "data: null\n\n"
+                    'data: {"choices":[{"delta":{"content":"ok"},'
+                    '"finish_reason":"stop"}]}\n\n'
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+        self.assertEqual(reply.content, "ok")
+
+        failing = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx.MockTransport(
+                lambda request: events('data: {"error":{"message":"bad key"}}\n\n')
+            ),
+        )
+        try:
+            with self.assertRaisesRegex(ProviderError, "bad key"):
+                failing.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            failing.close()
+
+    def test_responses_stream_does_not_duplicate_fallback_text(self) -> None:
+        events = [
+            {"type": "response.output_text.done", "text": "once"},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "once"}],
+                },
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": True,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body.encode("utf-8"),
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "once")
 
 
 if __name__ == "__main__":

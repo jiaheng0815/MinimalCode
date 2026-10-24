@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from collections.abc import Iterable
@@ -20,7 +21,10 @@ def _utc_now() -> str:
 
 def _workspace_key(cwd: Path) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", cwd.name or "root").strip("-")[:32] or "root"
-    digest = hashlib.sha256(str(cwd).casefold().encode("utf-8")).hexdigest()[:12]
+    key = str(cwd)
+    if os.name == "nt":
+        key = key.casefold()
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return f"{name}-{digest}"
 
 
@@ -52,7 +56,11 @@ class Session:
 
     def append_message(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
-        self.append_event({"type": "message", "message": message})
+        try:
+            self.append_event({"type": "message", "message": message})
+        except (OSError, TypeError, ValueError):
+            self.messages.pop()
+            raise
 
     def replace_messages(
         self,
@@ -61,16 +69,21 @@ class Session:
         summary: str,
         dropped_messages: int,
     ) -> None:
+        previous = self.messages
         self.messages = list(messages)
-        self.append_event(
-            {
-                "type": "compact",
-                "summary": summary,
-                "dropped_messages": dropped_messages,
-                "messages": self.messages,
-                "at": _utc_now(),
-            }
-        )
+        try:
+            self.append_event(
+                {
+                    "type": "compact",
+                    "summary": summary,
+                    "dropped_messages": dropped_messages,
+                    "messages": self.messages,
+                    "at": _utc_now(),
+                }
+            )
+        except (OSError, TypeError, ValueError):
+            self.messages = previous
+            raise
 
     def append_usage(self, usage: dict[str, int]) -> None:
         self.append_event({"type": "usage", "usage": usage, "at": _utc_now()})
@@ -112,15 +125,25 @@ class SessionStore:
         )
         return session
 
+    @staticmethod
+    def _recency_key(path: Path) -> tuple[int, str]:
+        try:
+            modified = path.stat().st_mtime_ns
+        except OSError:
+            modified = 0
+        return modified, path.name
+
     def _candidate_files(self, cwd: Path | None = None) -> list[Path]:
         root = self.workspace_dir(cwd) if cwd is not None else self.root
         if not root.is_dir():
             return []
-        return sorted(root.rglob("*.jsonl"), key=lambda path: path.name, reverse=True)
+        return sorted(root.rglob("*.jsonl"), key=self._recency_key, reverse=True)
 
     def latest(self, cwd: Path) -> Session | None:
-        files = self._candidate_files(cwd)
-        return self.load(files[0]) if files else None
+        for path in self._candidate_files(cwd):
+            if self._first_event(path) is not None:
+                return self.load(path)
+        return None
 
     def resolve(self, identifier: str, cwd: Path) -> Session:
         candidate = Path(identifier).expanduser()
@@ -153,11 +176,13 @@ class SessionStore:
     def _first_event(path: Path) -> dict[str, Any] | None:
         """Return the session's meta event, or None when it is unreadable."""
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
                 event = json.loads(handle.readline())
         except (OSError, json.JSONDecodeError):
             return None
-        return event if isinstance(event, dict) else None
+        if isinstance(event, dict) and event.get("type") == "meta":
+            return event
+        return None
 
     @classmethod
     def _recorded_session_id(cls, path: Path) -> str:
@@ -173,7 +198,7 @@ class SessionStore:
         session_id = path.stem
         workspace = path.parent
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
                 for line in handle:
                     try:
                         event = json.loads(line)
@@ -182,8 +207,12 @@ class SessionStore:
                     if not isinstance(event, dict):
                         continue
                     if event.get("type") == "meta":
-                        session_id = str(event.get("session_id", session_id))
-                        workspace = Path(str(event.get("workspace", workspace)))
+                        recorded_id = event.get("session_id")
+                        if isinstance(recorded_id, str) and recorded_id:
+                            session_id = recorded_id
+                        recorded_workspace = event.get("workspace")
+                        if isinstance(recorded_workspace, str) and recorded_workspace:
+                            workspace = Path(recorded_workspace).expanduser()
                     elif event.get("type") == "message":
                         message = event.get("message")
                         if isinstance(message, dict):
@@ -194,7 +223,16 @@ class SessionStore:
                             messages = [item for item in compacted if isinstance(item, dict)]
         except OSError as exc:
             raise FileNotFoundError(f"cannot read session {path}: {exc}") from exc
-        return Session(session_id=session_id, path=path, cwd=workspace, messages=messages)
+        try:
+            workspace = workspace.resolve()
+        except (OSError, RuntimeError):
+            pass
+        return Session(
+            session_id=session_id,
+            path=path,
+            cwd=workspace,
+            messages=messages,
+        )
 
     def list(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

@@ -118,6 +118,26 @@ class BadArgumentsProvider(ShellProvider):
         ]
 
 
+class TruncatedToolProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.responses = [
+            ProviderReply(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_partial",
+                        name="write",
+                        arguments='{"path":"partial.txt","content":"',
+                    )
+                ],
+                finish_reason="length",
+            )
+        ]
+
+
 class AgentTests(unittest.TestCase):
     def test_tool_loop_writes_file_and_records_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -183,6 +203,36 @@ class AgentTests(unittest.TestCase):
             tool_message = session.messages[2]
             self.assertEqual(tool_message["role"], "tool")
             self.assertIn("invalid arguments", tool_message["content"])
+
+    def test_truncated_tool_call_is_not_executed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=TruncatedToolProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            result = agent.run("write it")
+
+            self.assertFalse(result.completed)
+            self.assertFalse((workspace / "partial.txt").exists())
+            self.assertEqual(session.messages[-1]["role"], "tool")
+            self.assertIn("not executed", session.messages[-1]["content"])
 
     def test_recovers_interrupted_tool_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -33,6 +33,17 @@ def _tool_output_preview(result: dict[str, Any]) -> str:
 
 _ACTIVITY_OUTPUT_MAX_LINES = 12
 _ACTIVITY_OUTPUT_MAX_CHARS = 4000
+_INCOMPLETE_FINISH_REASONS = {
+    "length",
+    "content_filter",
+    "max_output_tokens",
+    "failed",
+    "cancelled",
+    "canceled",
+    "incomplete",
+    "in_progress",
+    "queued",
+}
 
 
 def _clip_activity_output(text: str) -> str:
@@ -145,7 +156,8 @@ class Agent:
         self.tools = tool_runtime
         self.tool_schemas = available_tool_schemas(self.tools.web_client)
         self.shell = shell
-        self.max_turns = int(max_turns or settings.get("max_turns", 1000))
+        configured_turns = settings.get("max_turns", 1000) if max_turns is None else max_turns
+        self.max_turns = max(1, int(configured_turns))
         self.output = output or sys.stdout
         self.error_output = error_output or sys.stderr
         self.quiet = quiet
@@ -278,6 +290,26 @@ class Agent:
                 final_completed = reply.finish_reason in {None, "stop", "completed"}
                 break
 
+            if reply.finish_reason in _INCOMPLETE_FINISH_REASONS:
+                for call in reply.tool_calls:
+                    result = {
+                        "status": "error",
+                        "message": (
+                            "tool call was not executed because the provider "
+                            f"stopped with finish reason {reply.finish_reason!r}"
+                        ),
+                    }
+                    self.session.append_message(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": tool_result_text(result),
+                        }
+                    )
+                    self._activity(f"  {_tool_output_preview(result)}")
+                break
+
             for call in reply.tool_calls:
                 result = self._execute_tool(call.name, call.arguments)
                 tool_message = {
@@ -394,7 +426,11 @@ class Agent:
             calls = message.get("tool_calls")
             if isinstance(calls, list):
                 for call in calls:
-                    function = call.get("function") or {}
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function")
+                    if not isinstance(function, dict):
+                        continue
                     lines.append(
                         f"TOOL_CALL {function.get('name', '')}: "
                         f"{function.get('arguments', '')}"

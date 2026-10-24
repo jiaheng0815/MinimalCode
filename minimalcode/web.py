@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -29,12 +30,24 @@ class ProviderWebClient:
         self._client: httpx.Client | None = None
 
         web = config.get("web_tools")
-        if not isinstance(web, dict) or not web.get("enabled", False):
+        if not isinstance(web, dict):
+            return
+        enabled = web.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ToolError(f"provider {name!r} web_tools.enabled must be a boolean")
+        if not enabled:
             return
 
         base_url = str(web.get("base_url") or "").rstrip("/")
-        parsed = urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        try:
+            parsed = urlsplit(base_url)
+            hostname = parsed.hostname
+            _ = parsed.port
+        except ValueError as exc:
+            raise ToolError(
+                f"provider {name!r} has an invalid web_tools.base_url: {exc}"
+            ) from exc
+        if parsed.scheme not in {"http", "https"} or not hostname:
             raise ToolError(f"provider {name!r} has an invalid web_tools.base_url")
         required = (
             web.get("search_path"),
@@ -50,9 +63,17 @@ class ProviderWebClient:
                 "counts, and max_content_chars"
             )
 
-        self.default_count = int(web["default_count"])
-        self.max_count = int(web["max_count"])
-        self.max_content_chars = int(web["max_content_chars"])
+        try:
+            timeout = float(web["timeout_seconds"])
+            self.default_count = int(web["default_count"])
+            self.max_count = int(web["max_count"])
+            self.max_content_chars = int(web["max_content_chars"])
+        except (TypeError, ValueError) as exc:
+            raise ToolError(
+                f"provider {name!r} has invalid web_tools numeric settings"
+            ) from exc
+        if math.isnan(timeout) or timeout <= 0:
+            raise ToolError(f"provider {name!r} has invalid web_tools timeout")
         if self.default_count < 1 or self.max_count < self.default_count:
             raise ToolError(f"provider {name!r} has invalid web result limits")
         if self.max_content_chars < 1:
@@ -66,7 +87,7 @@ class ProviderWebClient:
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.Client(
-            timeout=float(web["timeout_seconds"]),
+            timeout=timeout,
             headers=headers,
             transport=transport,
             follow_redirects=True,
@@ -83,6 +104,7 @@ class ProviderWebClient:
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled or self._client is None:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
+        response: httpx.Response | None = None
         try:
             response = self._client.post(f"{self._endpoint}/{path}", json=payload)
             if response.status_code >= 400:
@@ -92,10 +114,13 @@ class ProviderWebClient:
                     f"{response.status_code}: {detail}"
                 )
             data = response.json()
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise ToolError(f"provider web request failed: {exc}") from exc
         except ValueError as exc:
             raise ToolError("provider web request returned invalid JSON") from exc
+        finally:
+            if response is not None:
+                response.close()
         if not isinstance(data, dict):
             raise ToolError("provider web request returned an invalid response")
         return data
@@ -112,18 +137,26 @@ class ProviderWebClient:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
         if not isinstance(query, str) or not query.strip() or len(query) > 128:
             raise ToolError("query must contain 1-128 characters")
-        effective_count = self.default_count if count is None else int(count)
+        if count is not None and (not isinstance(count, int) or isinstance(count, bool)):
+            raise ToolError("count must be an integer")
+        if not isinstance(need_content, bool):
+            raise ToolError("need_content must be a boolean")
+        if ori_question is not None and not isinstance(ori_question, str):
+            raise ToolError("ori_question must be a string or null")
+        if localization is not None and not isinstance(localization, str):
+            raise ToolError("localization must be a string or null")
+        effective_count = self.default_count if count is None else count
         if not 1 <= effective_count <= self.max_count:
             raise ToolError(f"count must be from 1 to {self.max_count}")
         payload: dict[str, Any] = {
             "query": query.strip(),
             "count": effective_count,
-            "need_content": bool(need_content),
+            "need_content": need_content,
         }
         if ori_question:
-            payload["ori_question"] = str(ori_question)
+            payload["ori_question"] = ori_question
         if localization:
-            payload["localization"] = str(localization)
+            payload["localization"] = localization
         data = self._post(self._search_path, payload)
         results = data.get("results", [])
         if not isinstance(results, list):
@@ -133,12 +166,14 @@ class ProviderWebClient:
     def fetch(self, url: str) -> dict[str, Any]:
         if not self.enabled:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
-        parsed = urlsplit(url) if isinstance(url, str) else None
-        if (
-            parsed is None
-            or parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-        ):
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            hostname = parsed.hostname if parsed is not None else None
+            if parsed is not None:
+                _ = parsed.port
+        except ValueError as exc:
+            raise ToolError(f"url must be an absolute HTTP or HTTPS URL: {exc}") from exc
+        if parsed is None or parsed.scheme not in {"http", "https"} or not hostname:
             raise ToolError("url must be an absolute HTTP or HTTPS URL")
         data = self._post(self._fetch_path, {"url": url})
         title = data.get("title")

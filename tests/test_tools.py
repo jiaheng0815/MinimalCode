@@ -78,6 +78,12 @@ class ToolTests(unittest.TestCase):
         self.tools.edit("windows.txt", "one\ntwo", "one\nTWO")
         self.assertEqual(target.read_bytes(), b"one\r\nTWO\r\nthree\r\n")
 
+    def test_edit_preserves_cr_only_line_endings(self) -> None:
+        target = self.workspace / "classic.txt"
+        target.write_bytes(b"one\rtwo\rthree\r")
+        self.tools.edit("classic.txt", "one\ntwo", "one\nTWO")
+        self.assertEqual(target.read_bytes(), b"one\rTWO\rthree\r")
+
     @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
     def test_edit_and_write_preserve_file_mode(self) -> None:
         script = self.workspace / "run.sh"
@@ -114,6 +120,21 @@ class ToolTests(unittest.TestCase):
         self.tools.read = broken  # type: ignore[method-assign]
         with self.assertRaisesRegex(TypeError, "internal bug"):
             self.tools.dispatch("read", {"path": "x"})
+
+    def test_unresolvable_path_is_reported_as_tool_error(self) -> None:
+        with (
+            patch(
+                "minimalcode.tools.Path.expanduser",
+                side_effect=RuntimeError("no home"),
+            ),
+            self.assertRaisesRegex(ToolError, "invalid path"),
+        ):
+            self.tools.read("~missing/file")
+
+    def test_write_rejects_directory_target(self) -> None:
+        (self.workspace / "folder").mkdir()
+        with self.assertRaisesRegex(ToolError, "directory"):
+            self.tools.write("folder", "content")
 
     def test_outside_workspace_is_blocked(self) -> None:
         outside = self.root / "outside.txt"
@@ -156,6 +177,27 @@ class ToolTests(unittest.TestCase):
             find_command.index("!**/build/**"),
         )
 
+    def test_grep_rejects_missing_path(self) -> None:
+        with (
+            patch("minimalcode.tools.shutil.which", return_value=None),
+            self.assertRaisesRegex(ToolError, "path not found"),
+        ):
+            self.tools.grep("needle", path="missing")
+
+    def test_search_limits_must_be_positive(self) -> None:
+        self.tools.write("a.py", "needle = 1\n")
+        for name, arguments in (
+            ("grep", {"pattern": "needle", "max_results": 0}),
+            ("grep", {"pattern": "needle", "max_results": -1}),
+            ("find", {"pattern": "*.py", "max_results": 0}),
+            ("find", {"pattern": "*.py", "max_results": -1}),
+        ):
+            with (
+                self.subTest(tool=name, arguments=arguments),
+                self.assertRaisesRegex(ToolError, "max_results"),
+            ):
+                self.tools.dispatch(name, arguments)
+
     def test_python_search_fallback_skips_build_artifacts(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
         self.tools.write("build/lib/stale.py", "needle = 1\n")
@@ -175,6 +217,10 @@ class ToolTests(unittest.TestCase):
         result = self.tools.shell(command, timeout=30)
         self.assertEqual(result["status"], "success", result)
         self.assertIn("tool-shell", str(result["stdout"]))
+
+    def test_shell_rejects_nan_timeout(self) -> None:
+        with self.assertRaisesRegex(ToolError, "timeout"):
+            self.tools.shell("echo hi", timeout=float("nan"))
 
     def test_shell_timeout_is_capped_by_configuration(self) -> None:
         self.tools.shell_timeout = 120

@@ -71,6 +71,38 @@ class ImporterTests(unittest.TestCase):
             self.assertNotIn("api_key", provider)
             self.assertEqual(provider["api_key_env"], "MINIMALCODE_LOCAL_API_KEY")
 
+    def test_invalid_base_url_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            _write_pi_config(pi_home)
+            models_path = pi_home / "models.json"
+            models = json.loads(models_path.read_text(encoding="utf-8"))
+            models["providers"]["local"]["baseUrl"] = "not a url"
+            models_path.write_text(json.dumps(models), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "no compatible"):
+                import_pi_settings(
+                    destination_home=root / ".MinimalCode",
+                    pi_home=pi_home,
+                )
+
+    def test_invalid_context_window_has_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            _write_pi_config(pi_home)
+            models_path = pi_home / "models.json"
+            models = json.loads(models_path.read_text(encoding="utf-8"))
+            models["providers"]["local"]["models"][0]["contextWindow"] = "large"
+            models_path.write_text(json.dumps(models), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "contextWindow"):
+                import_pi_settings(
+                    destination_home=root / ".MinimalCode",
+                    pi_home=pi_home,
+                )
+
     def test_missing_pi_config_has_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
