@@ -25,7 +25,7 @@ class PromptTests(unittest.TestCase):
             self.assertIn("MinimalCode", prompt)
             self.assertIn("global rule", prompt)
             self.assertIn("project rule", prompt)
-            self.assertIn(str(child.resolve()), prompt)
+            self.assertIn(str(child), prompt)
 
 
 if __name__ == "__main__":

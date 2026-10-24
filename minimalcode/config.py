@@ -42,14 +42,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "providers": {
         "deepseek": {
-            "protocol": "openai_chat",
+            "protocol": "openai_responses",
             "base_url": "https://api.deepseek.com/v1",
             "api_key_env": "DEEPSEEK_API_KEY",
             "context_window": 1_000_000,
             "timeout_seconds": 120,
             "stream": True,
-            "include_usage": True,
-            "send_reasoning_effort": False,
+            "include_usage": False,
+            "send_reasoning_effort": True,
             "headers": {},
             "extra_body": {},
         }

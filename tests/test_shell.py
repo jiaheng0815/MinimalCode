@@ -35,7 +35,7 @@ class ShellTests(unittest.TestCase):
     def test_platform_fallback_order(self) -> None:
         windows = select_shell(
             True,
-            lambda name: "C:\\Windows\\powershell.exe" if name == "powershell" else None,
+            lambda name: "C:/Windows/powershell.exe" if name == "powershell" else None,
         )
         self.assertEqual(windows.kind, "windows_powershell")
 

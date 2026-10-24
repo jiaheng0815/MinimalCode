@@ -29,6 +29,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(path, settings_path(home))
             created = load_settings(home, require_file=True)
             self.assertEqual(created.get("model"), "deepseek-flash")
+            _, provider = created.provider_config()
+            self.assertEqual(provider["protocol"], "openai_responses")
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["max_turns"], 50)
 
     def test_home_environment_override(self) -> None:

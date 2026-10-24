@@ -58,8 +58,8 @@ minimalcode
 ```powershell
 minimalcode config show
 minimalcode config path
-minimalcode config set-model my-model
-minimalcode config set-provider local
+minimalcode config set-model deepseek-flash
+minimalcode config set-provider deepseek
 minimalcode shell
 ```
 
@@ -73,24 +73,25 @@ minimalcode import-pi
 
 密钥不会自动写入 `settings.json`。推荐使用 `api_key_env` 指定环境变量名；直接配置 `api_key` 也受支持，但应确保配置文件权限。
 
-## 自定义供应商
+## DeepSeek 配置
 
-编辑 `~/.MinimalCode/settings.json`。下面示例假设服务兼容 OpenAI `/v1/chat/completions`：
+默认供应商是 DeepSeek。下面示例使用 OpenAI Responses 协议、`deepseek-flash` 模型和环境变量中的 API key：
 
 ```json
 {
-  "provider": "local",
-  "model": "my-model",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "thinking": "high",
   "providers": {
-    "local": {
-      "protocol": "openai_chat",
-      "base_url": "http://127.0.0.1:11434/v1",
-      "api_key_env": null,
-      "context_window": 32768,
+    "deepseek": {
+      "protocol": "openai_responses",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "context_window": 1000000,
       "timeout_seconds": 120,
       "stream": true,
-      "include_usage": true,
-      "send_reasoning_effort": false,
+      "include_usage": false,
+      "send_reasoning_effort": true,
       "headers": {},
       "extra_body": {}
     }
@@ -98,18 +99,7 @@ minimalcode import-pi
 }
 ```
 
-使用 OpenAI Responses 协议时，只需修改协议：
-
-```json
-{
-  "protocol": "openai_responses",
-  "base_url": "http://127.0.0.1:8080/v1",
-  "api_key_env": "NINFER_API_KEY",
-  "context_window": 262144
-}
-```
-
-协议值为 `openai_chat` 或 `openai_responses`。Responses 模式下，`thinking` 只有同时设置 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送。
+协议值为 `openai_chat` 或 `openai_responses`。Responses 模式下，`thinking` 只有同时设置 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送。其他兼容供应商可沿用相同结构并替换 `base_url`、模型和密钥环境变量。
 
 环境变量可以写在值中：
 
@@ -157,7 +147,7 @@ minimalcode --json -p "运行测试并总结"
 切换模型或供应商：
 
 ```powershell
-minimalcode --provider local --model qwen-coder
+minimalcode --provider deepseek --model deepseek-v4-pro
 ```
 
 交互命令：
