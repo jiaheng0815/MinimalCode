@@ -56,10 +56,14 @@ def _normalize_usage(raw: Any) -> dict[str, int]:
     completion = raw.get("completion_tokens", raw.get("output_tokens", 0))
     total = raw.get("total_tokens", 0)
     prompt_details = raw.get("prompt_tokens_details") or raw.get("input_tokens_details")
-    completion_details = (
-        raw.get("completion_tokens_details") or raw.get("output_tokens_details")
+    completion_details = raw.get("completion_tokens_details") or raw.get(
+        "output_tokens_details"
     )
-    cached = prompt_details.get("cached_tokens", 0) if isinstance(prompt_details, dict) else 0
+    cached = (
+        prompt_details.get("cached_tokens", 0)
+        if isinstance(prompt_details, dict)
+        else 0
+    )
     reasoning = (
         completion_details.get("reasoning_tokens", 0)
         if isinstance(completion_details, dict)
@@ -193,11 +197,15 @@ class OpenAICompatibleProvider:
         }
         custom_headers = config.get("headers")
         if isinstance(custom_headers, dict):
-            headers.update({str(key): str(value) for key, value in custom_headers.items()})
+            headers.update(
+                {str(key): str(value) for key, value in custom_headers.items()}
+            )
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self.headers = headers
-        timeout = httpx.Timeout(self.timeout_seconds, connect=min(20.0, self.timeout_seconds))
+        timeout = httpx.Timeout(
+            self.timeout_seconds, connect=min(20.0, self.timeout_seconds)
+        )
         self._client = httpx.Client(
             timeout=timeout,
             headers=headers,
@@ -244,7 +252,9 @@ class OpenAICompatibleProvider:
         extra = self.config.get("extra_body")
         if isinstance(extra, dict):
             reserved = {"model", "messages", "stream", "tools", "tool_choice"}
-            payload.update({key: value for key, value in extra.items() if key not in reserved})
+            payload.update(
+                {key: value for key, value in extra.items() if key not in reserved}
+            )
         return payload
 
     def _responses_input(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -322,7 +332,9 @@ class OpenAICompatibleProvider:
         extra = self.config.get("extra_body")
         if isinstance(extra, dict):
             reserved = {"model", "input", "stream", "tools", "tool_choice"}
-            payload.update({key: value for key, value in extra.items() if key not in reserved})
+            payload.update(
+                {key: value for key, value in extra.items() if key not in reserved}
+            )
         return payload
 
     def stream_chat(
@@ -403,9 +415,7 @@ class OpenAICompatibleProvider:
                 try:
                     body = response.read()
                 except httpx.HTTPError as exc:
-                    raise ProviderError(
-                        f"provider stream interrupted: {exc}"
-                    ) from exc
+                    raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = _decode_json_body(body)
                 if parsed:
                     return self._parse_chat_payload(data, on_text=on_text)
@@ -690,9 +700,7 @@ class OpenAICompatibleProvider:
                 try:
                     body = response.read()
                 except httpx.HTTPError as exc:
-                    raise ProviderError(
-                        f"provider stream interrupted: {exc}"
-                    ) from exc
+                    raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = _decode_json_body(body)
                 if parsed:
                     return self._parse_responses_payload(data, on_text=on_text)
@@ -733,7 +741,10 @@ class OpenAICompatibleProvider:
                         continue
                     if event_type == "response.output_item.added":
                         item = event.get("item")
-                        if isinstance(item, dict) and item.get("type") == "function_call":
+                        if (
+                            isinstance(item, dict)
+                            and item.get("type") == "function_call"
+                        ):
                             key = str(item.get("id") or event.get("output_index", "0"))
                             if "output_index" in event:
                                 output_keys[str(event["output_index"])] = key
@@ -839,7 +850,9 @@ class OpenAICompatibleProvider:
         if data.get("status") == "failed" or data.get("error"):
             raise ProviderError(f"provider response failed: {data.get('error')}")
         output = data.get("output")
-        if not isinstance(output, list) and not isinstance(data.get("output_text"), str):
+        if not isinstance(output, list) and not isinstance(
+            data.get("output_text"), str
+        ):
             raise ProviderError("provider response has no output")
         content, calls = self._parse_responses_output(output)
         if not content and isinstance(data.get("output_text"), str):

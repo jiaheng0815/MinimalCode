@@ -33,7 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt", nargs="*", help="Initial message")
     parser.add_argument("-p", "--print", dest="print_mode", action="store_true")
     parser.add_argument("--json", dest="json_output", action="store_true")
-    parser.add_argument("-c", "--continue", dest="continue_session", action="store_true")
+    parser.add_argument(
+        "-c", "--continue", dest="continue_session", action="store_true"
+    )
     parser.add_argument("--session", help="Session ID, partial ID, or JSONL path")
     parser.add_argument("--no-session", action="store_true")
     parser.add_argument("--provider", help="Provider name from settings")
@@ -48,7 +50,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show plain Markdown without terminal highlighting",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     return parser
 
 
@@ -151,9 +155,7 @@ def _management_command(argv: Sequence[str]) -> int | None:
             include_secrets=not args.no_secrets,
             overwrite=args.overwrite,
         )
-        print(
-            f"imported {result.provider}/{result.model} into {result.settings_path}"
-        )
+        print(f"imported {result.provider}/{result.model} into {result.settings_path}")
         if result.skipped:
             print(f"skipped: {', '.join(result.skipped)}")
         return 0
@@ -186,7 +188,9 @@ def _load_or_create_session(
     if args.continue_session and args.session:
         raise ConfigError("--continue and --session cannot be used together")
     if args.no_session and (args.continue_session or args.session):
-        raise ConfigError("--no-session cannot be combined with --continue or --session")
+        raise ConfigError(
+            "--no-session cannot be combined with --continue or --session"
+        )
     if args.continue_session:
         session = store.latest(cwd)
         if session is None:

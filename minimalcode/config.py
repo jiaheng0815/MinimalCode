@@ -322,7 +322,9 @@ def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) ->
     except OSError:
         pass
     if overwrite or not path.exists():
-        _atomic_write(path, json.dumps(DEFAULT_SETTINGS, indent=2, ensure_ascii=False) + "\n")
+        _atomic_write(
+            path, json.dumps(DEFAULT_SETTINGS, indent=2, ensure_ascii=False) + "\n"
+        )
     return path
 
 

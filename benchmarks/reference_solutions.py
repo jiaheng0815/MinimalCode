@@ -5,7 +5,7 @@ from __future__ import annotations
 REFERENCES: dict[str, dict[str, str]] = {}
 
 REFERENCES["merge_intervals"] = {
-    "solution.py": '''\
+    "solution.py": """\
 def merge_intervals(intervals):
     values = []
     for start, end in intervals:
@@ -20,11 +20,11 @@ def merge_intervals(intervals):
         else:
             merged[-1][1] = max(merged[-1][1], end)
     return merged
-''',
+""",
 }
 
 REFERENCES["topological_sort"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import heapq
 
 
@@ -56,11 +56,11 @@ def topological_sort(nodes, edges):
     if len(result) != len(node_list):
         raise CycleError("cycle")
     return result
-''',
+""",
 }
 
 REFERENCES["dijkstra"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import heapq
 
 
@@ -93,11 +93,11 @@ def shortest_path(graph, start, end):
         path.append(previous[path[-1]])
     path.reverse()
     return distance[end], path
-''',
+""",
 }
 
 REFERENCES["lru_cache"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from collections import OrderedDict
 
 
@@ -124,11 +124,11 @@ class LRUCache:
 
     def keys(self):
         return list(reversed(self.data))
-''',
+""",
 }
 
 REFERENCES["ring_buffer"] = {
-    "solution.py": '''\
+    "solution.py": """\
 class RingBuffer:
     def __init__(self, capacity):
         if capacity <= 0:
@@ -150,11 +150,11 @@ class RingBuffer:
 
     def snapshot(self):
         return list(self.items)
-''',
+""",
 }
 
 REFERENCES["union_find"] = {
-    "solution.py": '''\
+    "solution.py": """\
 class UnionFind:
     def __init__(self, n):
         self.parent = list(range(n))
@@ -193,11 +193,11 @@ class UnionFind:
         for item in range(len(self.parent)):
             groups.setdefault(self.find(item), []).append(item)
         return sorted(sorted(group) for group in groups.values())
-''',
+""",
 }
 
 REFERENCES["env_parser"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import re
 
 KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -252,11 +252,11 @@ def parse_env(text):
             value = _single_value(value)
         result[key] = value
     return result
-''',
+""",
 }
 
 REFERENCES["semver"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import re
 
 PATTERN = re.compile(
@@ -297,11 +297,11 @@ def compare_versions(a, b):
             return -1 if x_num else 1
         return (x > y) - (x < y)
     return (len(la) > len(rb)) - (len(la) < len(rb))
-''',
+""",
 }
 
 REFERENCES["url_query"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from urllib.parse import quote_plus, unquote_plus
 
 
@@ -326,11 +326,11 @@ def build_query(pairs):
             raise TypeError("pairs")
         parts.append(quote_plus(key) + "=" + quote_plus(value))
     return "&".join(parts)
-''',
+""",
 }
 
 REFERENCES["unicode_slug"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import re
 import unicodedata
 
@@ -341,11 +341,11 @@ def slugify(text):
     text = unicodedata.normalize("NFKC", text).lower()
     text = re.sub(r"[^\\w]+", "-", text, flags=re.UNICODE)
     return text.strip("-_").replace("_", "-")
-''',
+""",
 }
 
 REFERENCES["safe_join"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from pathlib import Path
 
 
@@ -363,11 +363,11 @@ def safe_join(root, *parts):
     except ValueError as exc:
         raise ValueError("outside root") from exc
     return target
-''',
+""",
 }
 
 REFERENCES["secret_redaction"] = {
-    "solution.py": '''\
+    "solution.py": """\
 SENSITIVE = ("password", "passwd", "secret", "token", "api_key", "authorization")
 
 
@@ -385,11 +385,11 @@ def redact(value):
     if isinstance(value, tuple):
         return tuple(redact(item) for item in value)
     return value
-''',
+""",
 }
 
 REFERENCES["money_allocation"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 
 
@@ -413,11 +413,11 @@ def allocate_money(total, weights):
     for index in order[:remaining]:
         bases[index] += 1
     return [f"{value // 100}.{value % 100:02d}" for value in bases]
-''',
+""",
 }
 
 REFERENCES["duration_format"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import re
 
 UNITS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
@@ -454,11 +454,11 @@ def format_duration(seconds):
         if value:
             parts.append(f"{value}{unit}")
     return " ".join(parts)
-''',
+""",
 }
 
 REFERENCES["business_day"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from datetime import datetime, timedelta
 
 
@@ -472,11 +472,11 @@ def next_business_day(dt, holidays=()):
     while candidate.weekday() >= 5 or candidate.date() in holidays:
         candidate += timedelta(days=1)
     return candidate
-''',
+""",
 }
 
 REFERENCES["deep_merge"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import copy
 
 
@@ -490,11 +490,11 @@ def deep_merge(base, override):
         else:
             result[key] = copy.deepcopy(value)
     return result
-''',
+""",
 }
 
 REFERENCES["json_store"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import json
 import os
 import tempfile
@@ -528,11 +528,11 @@ class JsonStore:
             return json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise StoreError(str(exc)) from exc
-''',
+""",
 }
 
 REFERENCES["log_rotation"] = {
-    "solution.py": '''\
+    "solution.py": """\
 from pathlib import Path
 
 
@@ -558,11 +558,11 @@ def rotate_log(path, max_bytes, backups):
     path.replace(Path(str(path) + ".1"))
     path.touch()
     return True
-''',
+""",
 }
 
 REFERENCES["sqlite_inventory"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -614,11 +614,11 @@ def list_stock(path):
         return connection.execute(
             "SELECT sku, quantity FROM inventory ORDER BY sku"
         ).fetchall()
-''',
+""",
 }
 
 REFERENCES["thread_counter"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import threading
 
 
@@ -642,11 +642,11 @@ class ThreadSafeCounter:
                 self._value += delta
                 return True
             return False
-''',
+""",
 }
 
 REFERENCES["async_map_limited"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import asyncio
 
 
@@ -660,11 +660,11 @@ async def map_limited(items, worker, limit):
             return await worker(item)
 
     return await asyncio.gather(*(run(item) for item in items))
-''',
+""",
 }
 
 REFERENCES["async_retry"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import asyncio
 
 
@@ -683,11 +683,11 @@ async def retry_async(operation, attempts=3, base_delay=0.1, factor=2.0, sleep=N
             if attempt + 1 < attempts:
                 await sleep(base_delay * factor**attempt)
     raise last
-''',
+""",
 }
 
 REFERENCES["sliding_window_bugfix"] = {
-    "solution.py": '''\
+    "solution.py": """\
 def max_sum_fixed(values, k):
     if k <= 0 or k > len(values):
         raise ValueError("invalid window")
@@ -698,11 +698,11 @@ def max_sum_fixed(values, k):
         if window > best:
             best = window
     return best
-''',
+""",
 }
 
 REFERENCES["arithmetic_parser"] = {
-    "solution.py": '''\
+    "solution.py": """\
 class Parser:
     def __init__(self, text):
         self.text = text
@@ -781,11 +781,11 @@ def evaluate(expression):
     if parser.index != len(expression):
         raise ValueError("trailing input")
     return value
-''',
+""",
 }
 
 REFERENCES["schema_validation"] = {
-    "solution.py": '''\
+    "solution.py": """\
 TYPES = {"str": str, "int": int, "float": float, "bool": bool, "list": list, "dict": dict}
 
 
@@ -817,11 +817,11 @@ def validate(data, schema):
         if "choices" in rules and value not in rules["choices"]:
             errors.append(f"{field}: invalid choice")
     return errors
-''',
+""",
 }
 
 REFERENCES["cursor_codec"] = {
-    "solution.py": '''\
+    "solution.py": """\
 import base64
 import hashlib
 import hmac
@@ -868,11 +868,11 @@ class CursorCodec:
             if str(exc) == "expired":
                 raise
             raise ValueError("invalid token") from exc
-''',
+""",
 }
 
 REFERENCES["wordcount_cli"] = {
-    "cli.py": '''\
+    "cli.py": """\
 import argparse
 import json
 import sys
@@ -899,11 +899,11 @@ def main():
 
 if __name__ == "__main__":
     main()
-''',
+""",
 }
 
 REFERENCES["js_cart_pricing"] = {
-    "solution.js": '''\
+    "solution.js": """\
 function calculateCart(items, options = {}) {
   if (!Array.isArray(items)) throw new TypeError("items must be an array");
   const discountCents = options.discountCents ?? 0;
@@ -932,11 +932,11 @@ function calculateCart(items, options = {}) {
 }
 
 module.exports = { calculateCart };
-''',
+""",
 }
 
 REFERENCES["js_debounce"] = {
-    "solution.js": '''\
+    "solution.js": """\
 function debounce(fn, wait) {
   if (typeof fn !== "function") throw new TypeError("fn");
   if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0) throw new RangeError("wait");
@@ -978,11 +978,11 @@ function debounce(fn, wait) {
 }
 
 module.exports = { debounce };
-''',
+""",
 }
 
 REFERENCES["js_stable_stringify"] = {
-    "solution.js": '''\
+    "solution.js": """\
 function stableStringify(value) {
   const stack = new Set();
   function encode(input, inArray = false) {
@@ -1016,5 +1016,5 @@ function stableStringify(value) {
 }
 
 module.exports = { stableStringify };
-''',
+""",
 }

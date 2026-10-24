@@ -133,7 +133,7 @@ def style_activity_tag(text: str, stream: TextIO) -> str:
     if match is None or not _supports_color(stream):
         return text
     tag = match.group(1)
-    return f"{ACTIVITY_TAG}{tag}{RESET}{text[len(tag):]}"
+    return f"{ACTIVITY_TAG}{tag}{RESET}{text[len(tag) :]}"
 
 
 def _supports_color(stream: TextIO) -> bool:
@@ -276,9 +276,7 @@ class MarkdownHighlighter:
             while level_end < len(text) and text[level_end] == "#":
                 level_end += 1
             level = level_end - body_start
-            if level <= 6 and (
-                level_end == len(text) or text[level_end].isspace()
-            ):
+            if level <= 6 and (level_end == len(text) or text[level_end].isspace()):
                 style = self.palette[f"h{level}"]
                 self._emit(segments, level_end, style)
                 self._line_kind = "heading"
@@ -382,11 +380,7 @@ class MarkdownHighlighter:
                 self._end_line()
                 return
 
-            if (
-                self._inline_mode is None
-                and self._line_kind == "list"
-                and char == "["
-            ):
+            if self._inline_mode is None and self._line_kind == "list" and char == "[":
                 if text.startswith(("[x]", "[X]"), start):
                     self._append(segments, "☑", style)
                     self._advance(3)
@@ -405,11 +399,7 @@ class MarkdownHighlighter:
                 self._advance(1)
                 continue
 
-            if (
-                self._inline_mode is None
-                and self._line_kind == "table"
-                and char == "|"
-            ):
+            if self._inline_mode is None and self._line_kind == "table" and char == "|":
                 self._append(segments, char, self.palette["rule"])
                 self._advance(1)
                 continue

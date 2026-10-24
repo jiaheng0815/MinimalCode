@@ -32,7 +32,11 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         )
         if has_tool_result:
             events = [
-                {"choices": [{"delta": {"content": "finished"}, "finish_reason": "stop"}]}
+                {
+                    "choices": [
+                        {"delta": {"content": "finished"}, "finish_reason": "stop"}
+                    ]
+                }
             ]
         else:
             events = [

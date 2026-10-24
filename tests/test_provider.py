@@ -261,7 +261,6 @@ class ProviderTests(unittest.TestCase):
         request_tools = seen_request["tools"]
         self.assertEqual(request_tools[0]["name"], "read")
 
-
     def test_stream_falls_back_to_json_response(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

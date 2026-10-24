@@ -80,7 +80,9 @@ def _shell_output_activity(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _repair_tool_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+def _repair_tool_history(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
     repaired: list[dict[str, Any]] = []
     pending: dict[str, str] = {}
     changed = False
@@ -156,7 +158,9 @@ class Agent:
         self.tools = tool_runtime
         self.tool_schemas = available_tool_schemas(self.tools.web_client)
         self.shell = shell
-        configured_turns = settings.get("max_turns", 1000) if max_turns is None else max_turns
+        configured_turns = (
+            settings.get("max_turns", 1000) if max_turns is None else max_turns
+        )
         self.max_turns = max(1, int(configured_turns))
         self.output = output or sys.stdout
         self.error_output = error_output or sys.stderr
@@ -216,7 +220,9 @@ class Agent:
     def _messages(self) -> list[dict[str, Any]]:
         return [*self._system_messages(), *self.session.messages]
 
-    def _accumulate_usage(self, usage: dict[str, int], messages: list[dict[str, Any]]) -> None:
+    def _accumulate_usage(
+        self, usage: dict[str, int], messages: list[dict[str, Any]]
+    ) -> None:
         if usage:
             normalized = usage
         else:
@@ -244,7 +250,9 @@ class Agent:
 
     def _activity(self, message: str) -> None:
         if not self.quiet:
-            self.error_output.write(style_activity_tag(message, self.error_output) + "\n")
+            self.error_output.write(
+                style_activity_tag(message, self.error_output) + "\n"
+            )
             self.error_output.flush()
 
     def _execute_tool(self, name: str, raw_arguments: str) -> dict[str, Any]:

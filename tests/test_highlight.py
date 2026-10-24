@@ -151,8 +151,7 @@ class HighlightTests(unittest.TestCase):
             "**bold**, `code`, [docs](https://example.com)\n"
         )
         expected = (
-            "snake_case_name, items[0], 2 * 3, "
-            "bold, code, docs (https://example.com)\n"
+            "snake_case_name, items[0], 2 * 3, bold, code, docs (https://example.com)\n"
         )
         outputs = []
         for size in (1, 2, 3, 7, len(sample)):
@@ -190,7 +189,9 @@ class HighlightTests(unittest.TestCase):
         highlighter.feed("indented text\n")
         highlighter.finish()
         elapsed = time.perf_counter() - started
-        self.assertEqual(strip_ansi(stream.getvalue()), " " * indent + "indented text\n")
+        self.assertEqual(
+            strip_ansi(stream.getvalue()), " " * indent + "indented text\n"
+        )
         self.assertLess(elapsed, 5.0)
 
     def test_crlf_and_unclosed_fence_are_preserved(self) -> None:

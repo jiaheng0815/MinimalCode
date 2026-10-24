@@ -81,7 +81,9 @@ class SessionTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows paths are case-insensitive")
     def test_workspace_key_keeps_case_on_case_sensitive_platforms(self) -> None:
-        self.assertNotEqual(_workspace_key(Path("/tmp/Foo")), _workspace_key(Path("/tmp/foo")))
+        self.assertNotEqual(
+            _workspace_key(Path("/tmp/Foo")), _workspace_key(Path("/tmp/foo"))
+        )
 
     def test_latest_skips_sessions_without_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -136,9 +138,11 @@ class SessionTests(unittest.TestCase):
             )
             assert session.path is not None
             lines = session.path.read_text(encoding="utf-8").splitlines(keepends=True)
-            for broken in ("[]\n", "\"meta\"\n", "null\n", "not json\n"):
+            for broken in ("[]\n", '"meta"\n', "null\n", "not json\n"):
                 with self.subTest(broken=broken):
-                    session.path.write_text(broken + "".join(lines[1:]), encoding="utf-8")
+                    session.path.write_text(
+                        broken + "".join(lines[1:]), encoding="utf-8"
+                    )
                     resolved = store.resolve(session.path.stem, workspace)
                     self.assertEqual(resolved.path, session.path)
                     self.assertFalse(

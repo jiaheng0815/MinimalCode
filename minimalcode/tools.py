@@ -35,9 +35,7 @@ IGNORED_DIRECTORIES: tuple[str, ...] = (
     "venv",
 )
 IGNORED_GLOBS: tuple[str, ...] = tuple(
-    glob
-    for name in IGNORED_DIRECTORIES
-    for glob in (f"!{name}/**", f"!**/{name}/**")
+    glob for name in IGNORED_DIRECTORIES for glob in (f"!{name}/**", f"!**/{name}/**")
 )
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -67,7 +65,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path"},
-                    "content": {"type": "string", "description": "Complete file content"},
+                    "content": {
+                        "type": "string",
+                        "description": "Complete file content",
+                    },
                 },
                 "required": ["path", "content"],
                 "additionalProperties": False,
@@ -83,7 +84,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path"},
-                    "old_text": {"type": "string", "description": "Exact text to replace"},
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to replace",
+                    },
                     "new_text": {"type": "string", "description": "Replacement text"},
                     "replace_all": {
                         "type": "boolean",
@@ -131,8 +135,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regular expression"},
-                    "path": {"type": "string", "description": "File or directory, default ."},
-                    "glob": {"type": "string", "description": "Optional glob such as *.py"},
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory, default .",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional glob such as *.py",
+                    },
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
@@ -170,6 +180,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+
 def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
 ) -> list[dict[str, Any]]:
@@ -193,8 +204,7 @@ def available_tool_schemas(
                             "minimum": 1,
                             "maximum": web_client.max_count,
                             "description": (
-                                "Number of results, default "
-                                f"{web_client.default_count}"
+                                f"Number of results, default {web_client.default_count}"
                             ),
                         },
                         "need_content": {
@@ -500,7 +510,9 @@ class ToolRuntime:
         if count == 0:
             raise ToolError("old_text was not found")
         if count > 1 and not replace_all:
-            raise ToolError(f"old_text occurs {count} times; make it unique or set replace_all")
+            raise ToolError(
+                f"old_text occurs {count} times; make it unique or set replace_all"
+            )
         if not replace_all:
             matches = matches[:1]
 
@@ -526,7 +538,9 @@ class ToolRuntime:
             "replacements": count if replace_all else 1,
         }
 
-    def shell(self, command: str, timeout: float | None = None, cwd: str = ".") -> dict[str, Any]:
+    def shell(
+        self, command: str, timeout: float | None = None, cwd: str = "."
+    ) -> dict[str, Any]:
         if not isinstance(command, str):
             raise ToolError("command must be a string")
         workdir = self._path(cwd)
@@ -684,7 +698,9 @@ class ToolRuntime:
                 relative = str(file_path.relative_to(target))
             except ValueError:
                 relative = str(file_path)
-            if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(file_path.name, pattern):
+            if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(
+                file_path.name, pattern
+            ):
                 paths.append(str(file_path))
                 if len(paths) >= limit:
                     return {"status": "success", "files": paths, "truncated": True}

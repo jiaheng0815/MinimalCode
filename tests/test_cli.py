@@ -92,10 +92,13 @@ class CliTests(unittest.TestCase):
                 save=True,
             )
             provider = FakeCliProvider()
-            with patch(
-                "minimalcode.provider.create_provider",
-                return_value=(provider, "fake", "fake-model"),
-            ), redirect_stdout(io.StringIO()):
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
                 code = run(
                     [
                         "--json",

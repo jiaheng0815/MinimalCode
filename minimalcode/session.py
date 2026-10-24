@@ -16,11 +16,15 @@ from .config import Settings
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 def _workspace_key(cwd: Path) -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "-", cwd.name or "root").strip("-")[:32] or "root"
+    name = (
+        re.sub(r"[^A-Za-z0-9._-]+", "-", cwd.name or "root").strip("-")[:32] or "root"
+    )
     key = str(cwd)
     if os.name == "nt":
         key = key.casefold()
@@ -157,7 +161,9 @@ class SessionStore:
         matches = [
             path
             for path, session_id in identities
-            if identifier in session_id or identifier in path.stem or identifier in path.name
+            if identifier in session_id
+            or identifier in path.stem
+            or identifier in path.name
         ]
         if not matches:
             raise FileNotFoundError(f"session not found: {identifier}")
@@ -220,7 +226,9 @@ class SessionStore:
                     elif event.get("type") == "compact":
                         compacted = event.get("messages")
                         if isinstance(compacted, list):
-                            messages = [item for item in compacted if isinstance(item, dict)]
+                            messages = [
+                                item for item in compacted if isinstance(item, dict)
+                            ]
         except OSError as exc:
             raise FileNotFoundError(f"cannot read session {path}: {exc}") from exc
         try:

@@ -50,7 +50,9 @@ class WebToolTests(unittest.TestCase):
                 self.assertEqual(body["count"], 3)
                 return httpx.Response(
                     200,
-                    json={"results": [{"title": "Result", "url": "https://example.com"}]},
+                    json={
+                        "results": [{"title": "Result", "url": "https://example.com"}]
+                    },
                 )
             body = json.loads(request.content)
             self.assertEqual(body["url"], "https://example.com")
@@ -68,7 +70,9 @@ class WebToolTests(unittest.TestCase):
             self.assertTrue(client.enabled)
             result = client.search("minimalcode", count=3)
             self.assertEqual(result["results"][0]["title"], "Result")
-            self.assertEqual(client.fetch("https://example.com")["content"], "Page body")
+            self.assertEqual(
+                client.fetch("https://example.com")["content"], "Page body"
+            )
         finally:
             client.close()
         self.assertEqual(
@@ -85,12 +89,8 @@ class WebToolTests(unittest.TestCase):
                 disabled.search("blocked")
 
             enabled_schemas = available_tool_schemas(enabled)
-            visible = {
-                tool["function"]["name"] for tool in enabled_schemas
-            }
-            hidden = {
-                tool["function"]["name"] for tool in available_tool_schemas()
-            }
+            visible = {tool["function"]["name"] for tool in enabled_schemas}
+            hidden = {tool["function"]["name"] for tool in available_tool_schemas()}
             count_rule = next(
                 tool
                 for tool in enabled_schemas
@@ -145,7 +145,9 @@ class WebToolTests(unittest.TestCase):
                     "custom",
                     _web_config(),
                     transport=httpx.MockTransport(
-                        lambda request, payload=payload: httpx.Response(200, json=payload)
+                        lambda request, payload=payload: httpx.Response(
+                            200, json=payload
+                        )
                     ),
                 )
                 try:

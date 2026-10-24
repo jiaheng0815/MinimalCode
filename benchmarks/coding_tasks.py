@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-TEST_PREFIX = '''\
+TEST_PREFIX = """\
 import traceback
 
 def check(label, actual, expected):
@@ -19,13 +19,13 @@ def raises(exc_type, fn, contains=None):
     raise AssertionError(f"expected {exc_type.__name__}")
 
 try:
-'''
-TEST_SUFFIX = '''\
+"""
+TEST_SUFFIX = """\
 except Exception:
     traceback.print_exc()
     raise SystemExit(1)
 print("HIDDEN TESTS PASSED")
-'''
+"""
 
 
 @dataclass(slots=True)
@@ -78,13 +78,13 @@ def merge_intervals(intervals):
     """Merge overlapping or touching inclusive intervals."""
     raise NotImplementedError
 ''',
-        '''\
+        """\
 from solution import merge_intervals
 
 assert merge_intervals([[1, 3], [2, 4]]) == [[1, 4]]
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import merge_intervals
     check("empty", merge_intervals([]), [])
     source = [[5, 7], [1, 3], [2, 4], [8, 8]]
@@ -92,7 +92,7 @@ print("smoke ok")
     check("input unchanged", source, [[5, 7], [1, 3], [2, 4], [8, 8]])
     check("touching", merge_intervals([[1, 2], [2, 3]]), [[1, 3]])
     raises(ValueError, lambda: merge_intervals([[3, 2]]))
-''',
+""",
     ),
     py_task(
         "topological_sort",
@@ -110,13 +110,13 @@ def topological_sort(nodes, edges):
     """Return the lexicographically smallest topological order."""
     raise NotImplementedError
 ''',
-        '''\
+        """\
 from solution import topological_sort
 
 assert topological_sort(["b", "a"], [("a", "b")]) == ["a", "b"]
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import CycleError, topological_sort
     check("empty", topological_sort([], []), [])
     check(
@@ -127,7 +127,7 @@ print("smoke ok")
     check("duplicates", topological_sort(["a", "b"], [("a", "b"), ("a", "b")]), ["a", "b"])
     raises(CycleError, lambda: topological_sort(["a", "b"], [("a", "b"), ("b", "a")]))
     raises(CycleError, lambda: topological_sort(["a"], [("a", "missing")]))
-''',
+""",
     ),
     py_task(
         "dijkstra",
@@ -141,14 +141,14 @@ def shortest_path(graph, start, end):
     """Return the minimum-cost path in a directed graph."""
     raise NotImplementedError
 ''',
-        '''\
+        """\
 from solution import shortest_path
 
 graph = {"a": [("b", 1)], "b": []}
 assert shortest_path(graph, "a", "b") == (1, ["a", "b"])
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import shortest_path
     graph = {"a": [("b", 3), ("c", 1)], "c": [("b", 1)], "b": [("d", 3)], "d": []}
     check("shortest", shortest_path(graph, "a", "d"), (5, ["a", "c", "b", "d"]))
@@ -156,7 +156,7 @@ print("smoke ok")
     check("unreachable", shortest_path({"a": [], "b": []}, "a", "b"), None)
     raises(ValueError, lambda: shortest_path({"a": [("b", -1)], "b": []}, "a", "b"))
     raises(ValueError, lambda: shortest_path({"a": []}, "a", "x"))
-''',
+""",
     ),
     py_task(
         "lru_cache",
@@ -165,7 +165,7 @@ print("smoke ok")
 `put(key, value)`, and `keys()` returning keys from most to least recently
 used. `get` refreshes recency. `put` on an existing key replaces value and
 refreshes it. Raise ValueError for capacity <= 0. Operations must be O(1).""",
-        '''\
+        """\
 class LRUCache:
     def __init__(self, capacity):
         raise NotImplementedError
@@ -178,16 +178,16 @@ class LRUCache:
 
     def keys(self):
         raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import LRUCache
 
 cache = LRUCache(1)
 cache.put("a", 1)
 assert cache.get("a") == 1
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import LRUCache
     cache = LRUCache(2)
     cache.put("a", 1)
@@ -201,7 +201,7 @@ print("smoke ok")
     check("replace", cache.get("a"), 7)
     check("order", cache.keys(), ["a", "c"])
     raises(ValueError, lambda: LRUCache(0))
-''',
+""",
     ),
     py_task(
         "ring_buffer",
@@ -209,7 +209,7 @@ print("smoke ok")
         """Implement `RingBuffer(capacity)` with `push(value)` returning the
 overwritten value when full, `oldest(count)` and `snapshot()`. Order is oldest
 to newest. Reject capacity <= 0 and count outside 0..size.""",
-        '''\
+        """\
 class RingBuffer:
     def __init__(self, capacity):
         raise NotImplementedError
@@ -222,16 +222,16 @@ class RingBuffer:
 
     def snapshot(self):
         raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import RingBuffer
 
 buffer = RingBuffer(2)
 buffer.push(1)
 assert buffer.snapshot() == [1]
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import RingBuffer
     buffer = RingBuffer(3)
     check("push 1", buffer.push(1), None)
@@ -243,7 +243,7 @@ print("smoke ok")
     check("zero", buffer.oldest(0), [])
     raises(ValueError, lambda: buffer.oldest(4))
     raises(ValueError, lambda: RingBuffer(-1))
-''',
+""",
     ),
     py_task(
         "union_find",
@@ -252,7 +252,7 @@ print("smoke ok")
 components were merged, `connected(a, b)`, `size(a)`, and `components()`
 returning sorted lists of sorted members. Use path compression and union by
 size. Raise IndexError for invalid indices.""",
-        '''\
+        """\
 class UnionFind:
     def __init__(self, n):
         raise NotImplementedError
@@ -268,16 +268,16 @@ class UnionFind:
 
     def components(self):
         raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import UnionFind
 
 uf = UnionFind(3)
 assert uf.union(0, 1) is True
 assert uf.connected(0, 1)
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import UnionFind
     uf = UnionFind(6)
     check("merge", uf.union(0, 1), True)
@@ -288,7 +288,7 @@ print("smoke ok")
     check("size", uf.size(3), 4)
     check("components", uf.components(), [[0, 1, 2, 3], [4], [5]])
     raises(IndexError, lambda: uf.connected(0, 6))
-''',
+""",
     ),
     py_task(
         "env_parser",
@@ -303,12 +303,12 @@ def parse_env(text):
     """Parse a small, deterministic .env subset."""
     raise NotImplementedError
 ''',
-        '''\
+        """\
 from solution import parse_env
 
 assert parse_env("A=1\\nB=two") == {"A": "1", "B": "two"}
 print("smoke ok")
-''',
+""",
         r'''
     from solution import parse_env
     text = """
@@ -339,21 +339,21 @@ A version with no prerelease sorts after the same version with prerelease.
 Numeric prerelease identifiers compare numerically and sort before nonnumeric
 ones; compare identifiers left to right. Raise ValueError for malformed input.
 Build metadata after `+` must be ignored for precedence.""",
-        '''\
+        """\
 def parse_semver(text):
     raise NotImplementedError
 
 
 def compare_versions(a, b):
     raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import compare_versions
 
 assert compare_versions("1.2.3", "1.3.0") == -1
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import compare_versions, parse_semver
     check("parse", parse_semver("1.2.3-alpha.4+build.9")[:3], (1, 2, 3))
     check("release newer", compare_versions("1.0.0", "1.0.0-rc.1"), 1)
@@ -363,7 +363,7 @@ print("smoke ok")
     check("metadata", compare_versions("1.0.0+a", "1.0.0+b"), 0)
     raises(ValueError, lambda: parse_semver("1.2"))
     raises(ValueError, lambda: parse_semver("01.2.3"))
-''',
+""",
     ),
     py_task(
         "url_query",
@@ -373,21 +373,21 @@ tuples in original order, including repeated keys and blank values. Decode
 percent escapes and `+` as spaces. Implement `build_query(pairs)` with
 `urllib.parse.quote_plus`, preserving order. Invalid input types raise
 TypeError.""",
-        '''\
+        """\
 def parse_query(query):
     raise NotImplementedError
 
 
 def build_query(pairs):
     raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import parse_query
 
 assert parse_query("a=1&a=2") == [("a", "1"), ("a", "2")]
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import build_query, parse_query
     check(
         "parse",
@@ -400,7 +400,7 @@ print("smoke ok")
     check("roundtrip", parse_query(build_query(pairs)), pairs)
     raises(TypeError, lambda: parse_query(None))
     raises(TypeError, lambda: build_query([("a", 1)]))
-''',
+""",
     ),
     py_task(
         "unicode_slug",
@@ -410,17 +410,17 @@ lowercasing. Keep Unicode letters and digits, convert maximal runs of other
 characters to one ASCII hyphen, and strip leading/trailing hyphens. Empty or
 punctuation-only input returns an empty string. Raise TypeError for non-string
 input.""",
-        '''\
+        """\
 def slugify(text):
     raise NotImplementedError
-''',
-        '''\
+""",
+        """\
 from solution import slugify
 
 assert slugify("Hello, World!") == "hello-world"
 print("smoke ok")
-''',
-        '''\
+""",
+        """\
     from solution import slugify
     check("ascii", slugify("  Hello,   World!  "), "hello-world")
     check("unicode", slugify("ＡＢＣ 你好"), "abc-你好")
@@ -428,7 +428,7 @@ print("smoke ok")
     check("punct", slugify("---"), "")
     check("empty", slugify(""), "")
     raises(TypeError, lambda: slugify(None))
-''',
+""",
     ),
 ]
 
@@ -441,22 +441,22 @@ TASKS.extend(
 Reject absolute parts and any `..` component. Resolve symlinks and verify the
 final target remains under the resolved root. Violations raise ValueError.
 Reject non-string parts with TypeError.""",
-            '''\
+            """\
 from pathlib import Path
 
 
 def safe_join(root, *parts):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from pathlib import Path
 from solution import safe_join
 
 root = Path.cwd() / "data"
 assert safe_join(root, "a", "b") == (root / "a" / "b").resolve()
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import tempfile
     from pathlib import Path
     from solution import safe_join
@@ -468,7 +468,7 @@ print("smoke ok")
         raises(ValueError, lambda: safe_join(root, "..", "outside"))
         raises(ValueError, lambda: safe_join(root, str(root.resolve())))
         raises(TypeError, lambda: safe_join(root, 3))
-''',
+""",
         ),
         py_task(
             "secret_redaction",
@@ -478,17 +478,17 @@ value with `"[REDACTED]"` when the lowercased key contains `password`,
 `passwd`, `secret`, `token`, `api_key`, or `authorization`. Preserve all other
 values and container types. Strings under ordinary keys remain unchanged.
 The input must not be mutated.""",
-            '''\
+            """\
 def redact(value):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import redact
 
 assert redact({"token": "x", "name": "ok"}) == {"token": "[REDACTED]", "name": "ok"}
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import redact
     source = {
         "name": "service",
@@ -507,7 +507,7 @@ print("smoke ok")
     check("redact", redact(source), expected)
     check("input unchanged", source["db"]["Password"], "p")
     check("tuple", redact(({"secret_value": 1}, "x")), ({"secret_value": "[REDACTED]"}, "x"))
-''',
+""",
         ),
         py_task(
             "money_allocation",
@@ -517,17 +517,17 @@ strings. `total` is a decimal string with at most two fractional digits; all
 weights are positive integers. Allocate integer cents proportionally, then
 assign remaining cents by largest fractional remainder, breaking ties by
 original index. Reject invalid inputs with ValueError. Decimal arithmetic only.""",
-            '''\
+            """\
 def allocate_money(total, weights):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import allocate_money
 
 assert allocate_money("10.00", [1, 1]) == ["5.00", "5.00"]
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import allocate_money
     check("uneven", allocate_money("100.00", [1, 1, 1]), ["33.34", "33.33", "33.33"])
     check("cents", allocate_money("0.05", [1, 1]), ["0.03", "0.02"])
@@ -537,7 +537,7 @@ print("smoke ok")
     raises(ValueError, lambda: allocate_money("-1.00", [1]))
     raises(ValueError, lambda: allocate_money("1.00", [1, 0]))
     raises(ValueError, lambda: allocate_money("1.00", []))
-''',
+""",
         ),
         py_task(
             "duration_format",
@@ -548,22 +548,22 @@ once, in that descending order. Return integer seconds. Format positive
 integer seconds with the largest units, omit zero components, and join with a
 single space. Zero formats as `"0s"`. Reject negative/non-integer seconds and
 malformed durations.""",
-            '''\
+            """\
 def parse_duration(text):
     raise NotImplementedError
 
 
 def format_duration(seconds):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import format_duration, parse_duration
 
 assert parse_duration("1h30m") == 5400
 assert format_duration(5400) == "1h 30m"
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import format_duration, parse_duration
     check("parse all", parse_duration("1w2d3h4m5s"), 788645)
     check("parse spaces", parse_duration(" 2h 5m "), 7500)
@@ -575,7 +575,7 @@ print("smoke ok")
     raises(ValueError, lambda: parse_duration("-1s"))
     raises(ValueError, lambda: format_duration(-1))
     raises(TypeError, lambda: format_duration(1.2))
-''',
+""",
         ),
         py_task(
             "business_day",
@@ -585,19 +585,19 @@ timezone-aware datetime. Add one calendar day repeatedly until the date is
 Monday-Friday and not in the set of holiday `date` objects. Preserve clock time
 and timezone. Return a datetime. Raised errors should be ValueError or
 TypeError for invalid input.""",
-            '''\
+            """\
 def next_business_day(dt, holidays=()):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from datetime import datetime, timezone
 from solution import next_business_day
 
 dt = datetime(2026, 10, 23, 9, 30, tzinfo=timezone.utc)
 assert next_business_day(dt) == datetime(2026, 10, 26, 9, 30, tzinfo=timezone.utc)
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from datetime import date, datetime, timedelta, timezone
     from solution import next_business_day
     tz = timezone(timedelta(hours=8))
@@ -610,7 +610,7 @@ print("smoke ok")
     )
     raises(ValueError, lambda: next_business_day(datetime(2026, 10, 23)))
     raises(TypeError, lambda: next_business_day("2026-10-23"))
-''',
+""",
         ),
         py_task(
             "deep_merge",
@@ -619,17 +619,17 @@ print("smoke ok")
 Merge recursively, replace non-dict values (including lists) wholesale, and
 never mutate either input. Return a new dictionary. Raise TypeError when either
 top-level argument is not a dict.""",
-            '''\
+            """\
 def deep_merge(base, override):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import deep_merge
 
 assert deep_merge({"a": 1}, {"a": 2}) == {"a": 2}
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import deep_merge
     base = {"a": {"x": 1, "y": [1]}, "b": 2, "list": [1, 2]}
     override = {"a": {"y": [3], "z": 4}, "list": [9], "new": True}
@@ -639,7 +639,7 @@ print("smoke ok")
     check("override unchanged", override["a"], {"y": [3], "z": 4})
     raises(TypeError, lambda: deep_merge([], {}))
     raises(TypeError, lambda: deep_merge({}, []))
-''',
+""",
         ),
         py_task(
             "json_store",
@@ -649,7 +649,7 @@ print("smoke ok")
 same directory followed by `os.replace`; create parent directories. A missing
 file returns `default`. Invalid existing JSON raises `StoreError` (a ValueError
 subclass). `StoreError` is already defined in solution.py.""",
-            '''\
+            """\
 class StoreError(ValueError):
     pass
 
@@ -663,8 +663,8 @@ class JsonStore:
 
     def load(self, default=None):
         raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 import tempfile
 from pathlib import Path
 from solution import JsonStore
@@ -674,8 +674,8 @@ with tempfile.TemporaryDirectory() as temp:
     store.save({"ok": True})
     assert store.load() == {"ok": True}
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import tempfile
     from pathlib import Path
     from solution import JsonStore, StoreError
@@ -688,7 +688,7 @@ print("smoke ok")
         path.write_text("{broken", encoding="utf-8")
         raises(StoreError, lambda: store.load())
         check("temp cleanup", list(path.parent.glob(".data.json.*")), [])
-''',
+""",
         ),
         py_task(
             "log_rotation",
@@ -699,14 +699,14 @@ nothing and return False. Otherwise shift `path.1` -> `path.2`, ... up to
 `backups`, move `path` to `path.1`, create an empty `path`, and return True.
 When backups == 0, remove the oversized log and create an empty file. Reject
 max_bytes <= 0 and backups < 0.""",
-            '''\
+            """\
 from pathlib import Path
 
 
 def rotate_log(path, max_bytes, backups):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 import tempfile
 from pathlib import Path
 from solution import rotate_log
@@ -716,8 +716,8 @@ with tempfile.TemporaryDirectory() as temp:
     path.write_text("abc", encoding="utf-8")
     assert rotate_log(path, 2, 1) is True
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import tempfile
     from pathlib import Path
     from solution import rotate_log
@@ -734,7 +734,7 @@ print("smoke ok")
         check("no rotate", rotate_log(path, 10, 2), False)
         raises(ValueError, lambda: rotate_log(path, 0, 2))
         raises(ValueError, lambda: rotate_log(path, 2, -1))
-''',
+""",
         ),
         py_task(
             "sqlite_inventory",
@@ -745,7 +745,7 @@ Quantity cannot become negative; adjustment must be atomic and raise ValueError
 without changing data. SKUs are unique text; list returns sorted `(sku, qty)`
 tuples. Missing SKU adjustment raises KeyError. Use parameterized SQL and close
 every database connection before returning.""",
-            '''\
+            """\
 def init_db(path):
     raise NotImplementedError
 
@@ -760,8 +760,8 @@ def adjust_stock(path, sku, delta):
 
 def list_stock(path):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 import tempfile
 from pathlib import Path
 from solution import adjust_stock, init_db, list_stock, set_stock
@@ -773,8 +773,8 @@ with tempfile.TemporaryDirectory() as temp:
     adjust_stock(db, "apple", 3)
     assert list_stock(db) == [("apple", 5)]
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import sqlite3
     import tempfile
     from pathlib import Path
@@ -792,7 +792,7 @@ print("smoke ok")
         check("unchanged", list_stock(db), [("a", 1), ("b", 5)])
         raises(KeyError, lambda: adjust_stock(db, "missing", 1))
         raises(ValueError, lambda: set_stock(db, "bad", -1))
-''',
+""",
         ),
         py_task(
             "thread_counter",
@@ -801,7 +801,7 @@ print("smoke ok")
 `value()`. Also implement `increment_if_below(limit, delta=1)` which atomically
 increments only when the resulting value would be <= limit and returns whether
 it changed. It must remain correct under many concurrent threads.""",
-            '''\
+            """\
 import threading
 
 
@@ -817,16 +817,16 @@ class ThreadSafeCounter:
 
     def increment_if_below(self, limit, delta=1):
         raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import ThreadSafeCounter
 
 counter = ThreadSafeCounter()
 counter.increment()
 assert counter.value() == 1
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from concurrent.futures import ThreadPoolExecutor
     from solution import ThreadSafeCounter
     counter = ThreadSafeCounter()
@@ -840,7 +840,7 @@ print("smoke ok")
     check("true count", sum(results), 250)
     counter.increment(5)
     check("delta", counter.value(), 2005)
-''',
+""",
         ),
     ]
 )
@@ -854,19 +854,19 @@ TASKS.extend(
 an async callable. Preserve input order, run at most `limit` workers at once,
 and propagate the first exception while awaiting all started tasks. Reject
 limit < 1. Do not depend on `asyncio.TaskGroup` so Python 3.10 remains supported.""",
-            '''\
+            """\
 async def map_limited(items, worker, limit):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 import asyncio
 from solution import map_limited
 
 result = asyncio.run(map_limited([1, 2], lambda x: asyncio.sleep(0, result=x * 2), 1))
 assert result == [2, 4]
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import asyncio
     from solution import map_limited
 
@@ -890,7 +890,7 @@ print("smoke ok")
     check("ordered", result, [x * x for x in range(12)])
     check("limit", maximum, 3)
     raises(ValueError, lambda: asyncio.run(map_limited([], lambda x: x, 0)))
-''',
+""",
         ),
         py_task(
             "async_retry",
@@ -901,11 +901,11 @@ Call the async operation up to `attempts` times. On failure, await the injected
 async sleep with delay `base_delay * factor**retry_index`, then retry. If all
 attempts fail, re-raise the last exception. Validate arguments and support a
 custom sleep coroutine function for deterministic tests.""",
-            '''\
+            """\
 async def retry_async(operation, attempts=3, base_delay=0.1, factor=2.0, sleep=None):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 import asyncio
 from solution import retry_async
 
@@ -914,8 +914,8 @@ async def op():
 
 assert asyncio.run(retry_async(op, attempts=1)) == 7
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import asyncio
     from solution import retry_async
 
@@ -954,7 +954,7 @@ print("smoke ok")
 
     check("last error", asyncio.run(failure()), (2, "fail-2"))
     raises(ValueError, lambda: asyncio.run(retry_async(lambda: None, 0)))
-''',
+""",
         ),
         py_task(
             "sliding_window_bugfix",
@@ -963,7 +963,7 @@ print("smoke ok")
 maximum sum of any contiguous window of exactly k values in O(n) time. Raise
 ValueError for k <= 0 or k > len(values). Empty input is valid only when k is
 invalid. Do not replace it with an O(n*k) implementation and do not edit smoke.py.""",
-            '''\
+            """\
 def max_sum_fixed(values, k):
     if k <= 0 or k > len(values):
         raise ValueError("invalid window")
@@ -973,14 +973,14 @@ def max_sum_fixed(values, k):
         window += values[right]
         best = max(best, window)
     return best
-''',
-            '''\
+""",
+            """\
 from solution import max_sum_fixed
 
 assert max_sum_fixed([1, 2, 3, 4], 2) == 7
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import random
     import time
     from solution import max_sum_fixed
@@ -999,7 +999,7 @@ print("smoke ok")
     actual = max_sum_fixed(values, 17)
     check("large", actual, expected)
     assert time.perf_counter() - started < 3.0
-''',
+""",
         ),
         py_task(
             "arithmetic_parser",
@@ -1008,17 +1008,17 @@ print("smoke ok")
 and minus, parentheses, and left-associative +, -, *, /. Return a float.
 Whitespace is ignored. Raise ValueError for invalid syntax and ZeroDivisionError
 for division by zero. Do not use eval().""",
-            '''\
+            """\
 def evaluate(expression):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import evaluate
 
 assert evaluate("2 + 3 * 4") == 14.0
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import evaluate
     check("precedence", evaluate("2 + 3 * 4"), 14.0)
     check("parens", evaluate("(2 + 3) * 4"), 20.0)
@@ -1029,7 +1029,7 @@ print("smoke ok")
     raises(ValueError, lambda: evaluate("1 +"))
     raises(ValueError, lambda: evaluate("(1 + 2"))
     raises(ValueError, lambda: evaluate("2 ** 3"))
-''',
+""",
         ),
         py_task(
             "schema_validation",
@@ -1041,17 +1041,17 @@ schema insertion order. Error format is `field: required`, `field: expected
 <type>`, `field: below minimum`, `field: above maximum`, `field: too short`, or
 `field: invalid choice`. Treat bool as distinct from int. A non-dict input
 returns `["$: expected object"]`.""",
-            '''\
+            """\
 def validate(data, schema):
     raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import validate
 
 assert validate({"name": "ok"}, {"name": {"type": "str"}}) == []
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import validate
     schema = {
         "name": {"type": "str", "required": True, "min_len": 3},
@@ -1067,7 +1067,7 @@ print("smoke ok")
     check("bool not int", validate({"name": "Ada", "age": True}, schema), ["age: expected int"])
     check("short", validate({"name": "A"}, schema), ["name: too short"])
     check("root", validate([], schema), ["$: expected object"])
-''',
+""",
         ),
         py_task(
             "cursor_codec",
@@ -1078,7 +1078,7 @@ returns a string. `decode(token, max_age=None, now=None)` returns the original
 dict and raises ValueError for invalid/tampered/expired tokens. `now` and
 `max_age` are integer seconds; expire when age > max_age. Reject an empty secret
 and payloads that cannot be JSON encoded.""",
-            '''\
+            """\
 class CursorCodec:
     def __init__(self, secret):
         raise NotImplementedError
@@ -1088,16 +1088,16 @@ class CursorCodec:
 
     def decode(self, token, max_age=None, now=None):
         raise NotImplementedError
-''',
-            '''\
+""",
+            """\
 from solution import CursorCodec
 
 codec = CursorCodec("test-secret")
 token = codec.encode({"page": 2})
 assert codec.decode(token) == {"page": 2}
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     from solution import CursorCodec
     codec = CursorCodec("test-secret")
     payload = {"page": 2, "q": "你好", "items": [1, 2]}
@@ -1112,7 +1112,7 @@ print("smoke ok")
     raises(ValueError, lambda: CursorCodec("").encode({}))
     check("fresh", codec.decode(token, max_age=30, now=now), payload)
     raises(ValueError, lambda: codec.decode(token, max_age=30, now=now + 100))
-''',
+""",
         ),
         py_task(
             "wordcount_cli",
@@ -1122,7 +1122,7 @@ JSON object with integer `lines`, `words`, and `bytes`. Read UTF-8 text;
 `lines` is `len(text.splitlines())`, `words` is `len(text.split())`, and bytes
 is the UTF-8 byte length. On errors, print a JSON object with `error` to stderr
 and exit nonzero. Use argparse. Do not edit smoke.py.""",
-            '''\
+            """\
 import argparse
 
 
@@ -1132,8 +1132,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-''',
-            '''\
+""",
+            """\
 import subprocess
 import sys
 import tempfile
@@ -1150,8 +1150,8 @@ with tempfile.TemporaryDirectory() as temp:
     )
     assert completed.returncode == 0, completed.stderr
 print("smoke ok")
-''',
-            '''\
+""",
+            """\
     import json
     import subprocess
     import sys
@@ -1180,7 +1180,7 @@ print("smoke ok")
         )
         assert missing.returncode != 0
         assert "error" in json.loads(missing.stderr)
-''',
+""",
         ),
         CodingTask(
             id="js_cart_pricing",
@@ -1194,14 +1194,14 @@ the taxable base first, capped at taxable subtotal. Return integer
 `totalCents`. Reject invalid values by throwing TypeError or RangeError.
 Run `node smoke.js`.""",
             files={
-                "solution.js": '''\
+                "solution.js": """\
 function calculateCart(items, options = {}) {
   throw new Error("Not implemented");
 }
 
 module.exports = { calculateCart };
-''',
-                "smoke.js": '''\
+""",
+                "smoke.js": """\
 const assert = require("node:assert");
 const { calculateCart } = require("./solution");
 
@@ -1216,10 +1216,10 @@ assert.deepStrictEqual(
   },
 );
 console.log("smoke ok");
-''',
+""",
                 "README.md": "# JavaScript cart pricing\n\nImplement the documented cart pricing rules.\n",
             },
-            hidden_test='''\
+            hidden_test="""\
 const assert = require("node:assert");
 const { calculateCart } = require("./solution");
 
@@ -1240,7 +1240,7 @@ assert.deepStrictEqual(result, {
 assert.throws(() => calculateCart([{ priceCents: -1, quantity: 1 }]));
 assert.throws(() => calculateCart([], { taxBps: -1 }));
 console.log("HIDDEN TESTS PASSED");
-''',
+""",
             language="javascript",
             visible_command="node smoke.js",
         ),
@@ -1254,14 +1254,14 @@ using the latest arguments and `this`. The wrapper has `cancel()` and `flush()`.
 returns undefined. `cancel()` prevents a pending call. Reject negative/nonfinite
 wait and nonfunction fn. Do not use external packages. Run `node smoke.js`.""",
             files={
-                "solution.js": '''\
+                "solution.js": """\
 function debounce(fn, wait) {
   throw new Error("Not implemented");
 }
 
 module.exports = { debounce };
-''',
-                "smoke.js": '''\
+""",
+                "smoke.js": """\
 const assert = require("node:assert");
 const { debounce } = require("./solution");
 
@@ -1271,10 +1271,10 @@ wrapped();
 assert.strictEqual(wrapped.flush(), undefined);
 assert.strictEqual(calls, 1);
 console.log("smoke ok");
-''',
+""",
                 "README.md": "# JavaScript debounce\n\nImplement trailing-edge debounce with cancel and flush.\n",
             },
-            hidden_test='''\
+            hidden_test="""\
 const assert = require("node:assert");
 const { debounce } = require("./solution");
 
@@ -1305,7 +1305,7 @@ const { debounce } = require("./solution");
   console.error(error);
   process.exit(1);
 });
-''',
+""",
             language="javascript",
             visible_command="node smoke.js",
         ),
@@ -1319,23 +1319,23 @@ object properties the same way JSON.stringify does (omit them), but undefined
 array entries become null and a top-level undefined returns undefined. Do not
 use external packages. Run `node smoke.js`.""",
             files={
-                "solution.js": '''\
+                "solution.js": """\
 function stableStringify(value) {
   throw new Error("Not implemented");
 }
 
 module.exports = { stableStringify };
-''',
-                "smoke.js": '''\
+""",
+                "smoke.js": """\
 const assert = require("node:assert");
 const { stableStringify } = require("./solution");
 
 assert.strictEqual(stableStringify({ b: 1, a: 2 }), '{"a":2,"b":1}');
 console.log("smoke ok");
-''',
+""",
                 "README.md": "# Stable JSON stringify\n\nImplement deterministic compact JSON serialization.\n",
             },
-            hidden_test='''\
+            hidden_test="""\
 const assert = require("node:assert");
 const { stableStringify } = require("./solution");
 
@@ -1351,7 +1351,7 @@ const cyclic = {};
 cyclic.self = cyclic;
 assert.throws(() => stableStringify(cyclic));
 console.log("HIDDEN TESTS PASSED");
-''',
+""",
             language="javascript",
             visible_command="node smoke.js",
         ),

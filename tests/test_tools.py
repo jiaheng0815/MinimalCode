@@ -108,8 +108,9 @@ class ToolTests(unittest.TestCase):
             ("web_search", {"query": "q", "count": [1]}),
         )
         for name, arguments in cases:
-            with self.subTest(tool=name, arguments=arguments), self.assertRaisesRegex(
-                ToolError, "invalid arguments"
+            with (
+                self.subTest(tool=name, arguments=arguments),
+                self.assertRaisesRegex(ToolError, "invalid arguments"),
             ):
                 self.tools.dispatch(name, arguments)
 
@@ -152,7 +153,9 @@ class ToolTests(unittest.TestCase):
 
     def test_ripgrep_paths_apply_the_same_ignore_globs(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
-        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"", stderr=b""
+        )
         with (
             patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
             patch("minimalcode.tools.subprocess.run", return_value=completed) as run,
@@ -205,9 +208,16 @@ class ToolTests(unittest.TestCase):
             grep_result = self.tools.grep("needle", glob="*.py")
             find_result = self.tools.find("*.py")
 
-        self.assertTrue(any("src" in line and "current.py" in line for line in grep_result["matches"]))
+        self.assertTrue(
+            any(
+                "src" in line and "current.py" in line
+                for line in grep_result["matches"]
+            )
+        )
         self.assertFalse(any("build" in path for path in grep_result["matches"]))
-        self.assertTrue(any(path.endswith("current.py") for path in find_result["files"]))
+        self.assertTrue(
+            any(path.endswith("current.py") for path in find_result["files"])
+        )
         self.assertFalse(any("build" in path for path in find_result["files"]))
 
     def test_shell_tool(self) -> None:

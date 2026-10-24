@@ -19,7 +19,9 @@ def _read_limited(path: Path, limit: int) -> str:
     if limit <= 0:
         return ""
     try:
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        with path.open(
+            "r", encoding="utf-8-sig", errors="replace", newline=""
+        ) as handle:
             return handle.read(limit)
     except OSError:
         return ""
@@ -39,10 +41,13 @@ def _agent_files(cwd: Path) -> list[Path]:
 def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:
     max_chars = int(settings.get("context.max_instruction_chars", 60_000))
     custom_prompt = _read_limited(settings.home / "SYSTEM.md", max_chars)
-    base = custom_prompt.strip() or DEFAULT_SYSTEM_PROMPT.format(
-        cwd=cwd,
-        shell=shell.label,
-    ).strip()
+    base = (
+        custom_prompt.strip()
+        or DEFAULT_SYSTEM_PROMPT.format(
+            cwd=cwd,
+            shell=shell.label,
+        ).strip()
+    )
 
     instructions: list[tuple[Path, str]] = []
     seen: set[Path] = set()

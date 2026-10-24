@@ -192,7 +192,9 @@ def _minimal_result(stdout: str) -> dict[str, Any]:
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"MinimalCode returned invalid JSON: {stdout[-4000:]}") from exc
+        raise RuntimeError(
+            f"MinimalCode returned invalid JSON: {stdout[-4000:]}"
+        ) from exc
     usage = payload.get("usage") or {}
     prompt = int(usage.get("prompt_tokens") or 0)
     cached = int(usage.get("cached_tokens") or 0)
@@ -283,14 +285,18 @@ def main() -> int:
                         TASK,
                     ]
                 elapsed_ms, stdout = _run_process(command, cwd=workspace, env=env)
-                result = _pi_result(stdout) if agent == "pi" else _minimal_result(stdout)
+                result = (
+                    _pi_result(stdout) if agent == "pi" else _minimal_result(stdout)
+                )
                 result["agent"] = agent
                 result["run"] = run_number
                 result["elapsed_ms"] = elapsed_ms
                 result["cost_usd"] = _cost(result)
                 result["verified"] = (workspace / "answer.txt").read_bytes() == b"42"
                 if not result["verified"]:
-                    raise RuntimeError(f"{agent} failed task verification on run {run_number}")
+                    raise RuntimeError(
+                        f"{agent} failed task verification on run {run_number}"
+                    )
                 if result["final_text"].strip() != "DONE":
                     raise RuntimeError(
                         f"{agent} returned unexpected final text on run {run_number}: "
@@ -310,7 +316,9 @@ def main() -> int:
         f"{args.runs} runs each, {MAX_OUTPUT_TOKENS} max output tokens."
     )
     print()
-    print("| Agent | Mean tokens | Mean uncached input | Mean cache read | Mean output |")
+    print(
+        "| Agent | Mean tokens | Mean uncached input | Mean cache read | Mean output |"
+    )
     print("|---|---:|---:|---:|---:|")
     for agent in ("pi", "minimalcode"):
         runs = results[agent]

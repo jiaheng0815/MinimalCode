@@ -81,7 +81,9 @@ def import_pi_settings(
             else (Path.home() / ".pi" / "agent").resolve()
         )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ConfigError(f"invalid Pi config directory: {pi_home or '~/.pi/agent'}") from exc
+        raise ConfigError(
+            f"invalid Pi config directory: {pi_home or '~/.pi/agent'}"
+        ) from exc
     models_data = _read_json(pi_root / "models.json")
     settings_data = _read_json(pi_root / "settings.json")
     default_provider = str(settings_data.get("defaultProvider") or "")
@@ -150,7 +152,9 @@ def import_pi_settings(
         elif isinstance(api_key, str) and api_key:
             env_name = (
                 "MINIMALCODE_"
-                + "".join(char if char.isalnum() else "_" for char in provider_name).upper()
+                + "".join(
+                    char if char.isalnum() else "_" for char in provider_name
+                ).upper()
                 + "_API_KEY"
             )
             provider_config["api_key_env"] = env_name

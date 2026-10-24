@@ -168,7 +168,9 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.max_turns, 1000)
             self.assertTrue(result.completed)
             self.assertEqual(result.turns, 2)
-            self.assertEqual((workspace / "result.txt").read_text(encoding="utf-8"), "ok\n")
+            self.assertEqual(
+                (workspace / "result.txt").read_text(encoding="utf-8"), "ok\n"
+            )
             self.assertEqual(session.messages[0]["role"], "user")
             self.assertEqual(session.messages[1]["role"], "assistant")
             self.assertEqual(session.messages[2]["role"], "tool")

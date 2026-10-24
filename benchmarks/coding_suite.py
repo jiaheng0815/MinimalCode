@@ -211,8 +211,10 @@ def _invoke_agent(
         "stderr": completed.stderr[-2000:],
     }
     try:
-        parsed = _pi_result(completed.stdout) if agent == "pi" else _minimal_result(
-            completed.stdout
+        parsed = (
+            _pi_result(completed.stdout)
+            if agent == "pi"
+            else _minimal_result(completed.stdout)
         )
     except (RuntimeError, ValueError, TypeError, KeyError) as exc:
         result.update(
@@ -326,9 +328,7 @@ def _render_results(
         }
 
     task_ids = sorted({result["task"] for result in results})
-    by_agent_task = {
-        (result["agent"], result["task"]): result for result in results
-    }
+    by_agent_task = {(result["agent"], result["task"]): result for result in results}
     common_tasks = [
         task_id
         for task_id in task_ids
@@ -374,7 +374,9 @@ def _render_results(
                 for result in results
                 if result["agent"] == agent and result["task"] in category_ids
             ]
-            cells.append(f"{sum(bool(r.get('passed')) for r in relevant)}/{len(relevant)}")
+            cells.append(
+                f"{sum(bool(r.get('passed')) for r in relevant)}/{len(relevant)}"
+            )
         lines.append(f"| {category} | {cells[0]} | {cells[1]} |")
 
     lines.extend(
@@ -386,10 +388,7 @@ def _render_results(
             "|---:|---|---|---|---|",
         ]
     )
-    by_key = {
-        (result["task"], result["agent"]): result
-        for result in results
-    }
+    by_key = {(result["task"], result["agent"]): result for result in results}
     for index, task in enumerate(selected_tasks, 1):
         cells = []
         for agent in agents:
@@ -398,18 +397,15 @@ def _render_results(
                 cells.append("not run")
             elif result.get("passed"):
                 cells.append(
-                    f"PASS {result['total_tokens']}t "
-                    f"{result['elapsed_ms'] / 1000:.2f}s"
+                    f"PASS {result['total_tokens']}t {result['elapsed_ms'] / 1000:.2f}s"
                 )
             else:
                 cells.append("FAIL")
-        lines.append(f"| {index} | `{task.id}` | {task.category} | {cells[0]} | {cells[1]} |")
+        lines.append(
+            f"| {index} | `{task.id}` | {task.category} | {cells[0]} | {cells[1]} |"
+        )
 
-    failures = [
-        result
-        for result in results
-        if not result.get("passed")
-    ]
+    failures = [result for result in results if not result.get("passed")]
     if failures:
         lines.extend(["", "## Failures", ""])
         for failure in failures:
@@ -421,10 +417,7 @@ def _render_results(
             )
             detail_lines = [line for line in str(detail).splitlines() if line.strip()]
             summary = detail_lines[-1] if detail_lines else "unknown failure"
-            lines.append(
-                f"- `{failure['task']}` / {failure['agent']}: "
-                f"{summary[:300]}"
-            )
+            lines.append(f"- `{failure['task']}` / {failure['agent']}: {summary[:300]}")
 
     total_cost = sum(float(result.get("cost_usd", 0)) for result in results)
     lines.extend(

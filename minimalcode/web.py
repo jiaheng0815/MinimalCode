@@ -83,7 +83,9 @@ class ProviderWebClient:
         headers = {"Content-Type": "application/json"}
         custom_headers = web.get("headers")
         if isinstance(custom_headers, dict):
-            headers.update({str(key): str(value) for key, value in custom_headers.items()})
+            headers.update(
+                {str(key): str(value) for key, value in custom_headers.items()}
+            )
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.Client(
@@ -137,7 +139,9 @@ class ProviderWebClient:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
         if not isinstance(query, str) or not query.strip() or len(query) > 128:
             raise ToolError("query must contain 1-128 characters")
-        if count is not None and (not isinstance(count, int) or isinstance(count, bool)):
+        if count is not None and (
+            not isinstance(count, int) or isinstance(count, bool)
+        ):
             raise ToolError("count must be an integer")
         if not isinstance(need_content, bool):
             raise ToolError("need_content must be a boolean")
@@ -172,7 +176,9 @@ class ProviderWebClient:
             if parsed is not None:
                 _ = parsed.port
         except ValueError as exc:
-            raise ToolError(f"url must be an absolute HTTP or HTTPS URL: {exc}") from exc
+            raise ToolError(
+                f"url must be an absolute HTTP or HTTPS URL: {exc}"
+            ) from exc
         if parsed is None or parsed.scheme not in {"http", "https"} or not hostname:
             raise ToolError("url must be an absolute HTTP or HTTPS URL")
         data = self._post(self._fetch_path, {"url": url})
