@@ -19,8 +19,8 @@ dev = ["ruff>=0.9"]
 minimalcode = "minimalcode.cli:main"
 
 [project.urls]
-Repository = "https://github.com/jiaheng0815/minimalcode"
-Issues = "https://github.com/jiaheng0815/minimalcode/issues"
+Repository = "https://github.com/jiaheng0815/MinimalCode"
+Issues = "https://github.com/jiaheng0815/MinimalCode/issues"
 
 [tool.setuptools.dynamic]
 version = {attr = "minimalcode.__version__"}
