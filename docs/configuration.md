@@ -12,7 +12,7 @@ Built-in defaults are data, not Python literals: they live in
 | `provider` | string | `"deepseek"` | Default provider name |
 | `model` | string | `"deepseek-flash"` | Default model ID |
 | `thinking` | string | `"high"` | Reasoning effort passed only when enabled |
-| `max_turns` | integer | `50` | Maximum model/tool rounds per user task |
+| `max_turns` | integer | `1000` | Maximum model/tool rounds per user task |
 
 ## Session
 
@@ -25,7 +25,7 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 | Key | Default | Meaning |
 |---|---:|---|
 | `path` | `null` | Explicit shell executable; null enables auto-detection |
-| `timeout_seconds` | `120` | Default command timeout |
+| `timeout_seconds` | `120` | Default and maximum command timeout; model-requested timeouts are capped at this value |
 | `max_output_chars` | `60000` | Maximum stdout and stderr returned to the model |
 
 ## Tools
@@ -39,6 +39,11 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 
 The `shell` tool always inherits the operating-system permissions of the current process.
 
+`grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
+`dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
+Neither path parses `.gitignore`; install `ripgrep` if ignore-file semantics are
+required.
+
 ## Context
 
 | Key | Default | Meaning |
@@ -48,6 +53,16 @@ The `shell` tool always inherits the operating-system permissions of the current
 | `max_instruction_chars` | `60000` | Limit for `SYSTEM.md` and `AGENTS.md` content |
 
 Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading.
+
+## Output
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `markdown_highlight` | `true` | Render streamed Markdown with ANSI styling on interactive terminals |
+| `theme` | `"dark"` | Palette for the highlighter: `dark` or `light` |
+
+Highlighting only applies when stdout is a terminal. `--json`, redirected
+output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 
 ## Provider fields
 
@@ -94,5 +109,17 @@ checks. The built-in DeepSeek provider enables them with:
 `api_key` or `api_key_env` inside `web_tools` override the provider credential.
 When omitted, the provider API key is reused.
 
+`web_tools.base_url` and its credential are trusted provider configuration.
+`web_fetch` validates that the requested target is HTTP(S), but the target URL
+is fetched by the configured provider rather than directly by MinimalCode.
+Only configure provider endpoints you trust, especially when they can reach
+private networks.
+
 Providers without an enabled `web_tools` block neither receive the two tool
 schemas nor can invoke them through the local dispatcher.
+
+Environment placeholders such as `${CUSTOM_PROVIDER_KEY}` are expanded when
+`Settings.provider_config()` resolves the active provider. A placeholder that
+stays unresolved raises a configuration error that names the variable, instead
+of being sent to the provider as literal text. Other providers stay lazy: their
+placeholders are only checked when they become active.

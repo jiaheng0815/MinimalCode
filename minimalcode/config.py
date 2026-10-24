@@ -60,6 +60,23 @@ def expand_env(value: Any) -> Any:
     return value
 
 
+def _unresolved_env(value: Any) -> str | None:
+    if isinstance(value, str):
+        match = _ENV_PATTERN.search(value)
+        return match.group(0) if match else None
+    if isinstance(value, list):
+        for item in value:
+            unresolved = _unresolved_env(item)
+            if unresolved is not None:
+                return unresolved
+    if isinstance(value, dict):
+        for item in value.values():
+            unresolved = _unresolved_env(item)
+            if unresolved is not None:
+                return unresolved
+    return None
+
+
 def _validate(data: dict[str, Any], path: Path) -> None:
     provider = data.get("provider")
     model = data.get("model")
@@ -73,12 +90,127 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         raise ConfigError(f"{path}: provider {provider!r} is not defined in providers")
 
     max_turns = data.get("max_turns")
-    if not isinstance(max_turns, int) or not 1 <= max_turns <= 10_000:
+    if (
+        not isinstance(max_turns, int)
+        or isinstance(max_turns, bool)
+        or not 1 <= max_turns <= 10_000
+    ):
         raise ConfigError(f"{path}: max_turns must be an integer from 1 to 10000")
 
-    for key in ("shell", "tools", "context", "session"):
+    for key in ("shell", "tools", "context", "session", "output"):
         if not isinstance(data.get(key), dict):
             raise ConfigError(f"{path}: {key} must be an object")
+
+    shell = data["shell"]
+    shell_path = shell.get("path")
+    if shell_path is not None and (
+        not isinstance(shell_path, str) or not shell_path.strip()
+    ):
+        raise ConfigError(f"{path}: shell.path must be null or a non-empty string")
+    _validate_number(
+        shell.get("timeout_seconds"),
+        path,
+        "shell.timeout_seconds",
+        minimum=1,
+        maximum=3600,
+    )
+    _validate_integer(
+        shell.get("max_output_chars"),
+        path,
+        "shell.max_output_chars",
+        minimum=1,
+    )
+
+    tools = data["tools"]
+    if not isinstance(tools.get("allow_outside_workspace"), bool):
+        raise ConfigError(f"{path}: tools.allow_outside_workspace must be a boolean")
+    _validate_integer(
+        tools.get("max_file_chars"),
+        path,
+        "tools.max_file_chars",
+        minimum=1,
+    )
+    _validate_integer(
+        tools.get("max_file_bytes"),
+        path,
+        "tools.max_file_bytes",
+        minimum=1,
+    )
+    _validate_integer(
+        tools.get("max_results"),
+        path,
+        "tools.max_results",
+        minimum=1,
+        maximum=5000,
+    )
+
+    context = data["context"]
+    _validate_number(
+        context.get("compact_at"),
+        path,
+        "context.compact_at",
+        minimum=0,
+        maximum=1,
+        inclusive_minimum=False,
+    )
+    _validate_integer(
+        context.get("keep_messages"),
+        path,
+        "context.keep_messages",
+        minimum=4,
+    )
+    _validate_integer(
+        context.get("max_instruction_chars"),
+        path,
+        "context.max_instruction_chars",
+        minimum=1,
+    )
+
+    if not isinstance(data["session"].get("save"), bool):
+        raise ConfigError(f"{path}: session.save must be a boolean")
+
+    highlight = data["output"].get("markdown_highlight")
+    if not isinstance(highlight, bool):
+        raise ConfigError(f"{path}: output.markdown_highlight must be a boolean")
+    theme = data["output"].get("theme")
+    if theme not in {"dark", "light"}:
+        raise ConfigError(f"{path}: output.theme must be 'dark' or 'light'")
+
+
+def _validate_number(
+    value: Any,
+    path: Path,
+    key: str,
+    *,
+    minimum: float,
+    maximum: float | None = None,
+    inclusive_minimum: bool = True,
+) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"{path}: {key} must be a number")
+    minimum_ok = value >= minimum if inclusive_minimum else value > minimum
+    if not minimum_ok or (maximum is not None and value > maximum):
+        bounds = f">{minimum}" if not inclusive_minimum else f">={minimum}"
+        if maximum is not None:
+            bounds += f" and <={maximum}"
+        raise ConfigError(f"{path}: {key} must be {bounds}")
+
+
+def _validate_integer(
+    value: Any,
+    path: Path,
+    key: str,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{path}: {key} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        bounds = f">={minimum}"
+        if maximum is not None:
+            bounds += f" and <={maximum}"
+        raise ConfigError(f"{path}: {key} must be {bounds}")
 
 
 @dataclass(slots=True)
@@ -101,7 +233,14 @@ class Settings:
         provider = providers.get(provider_name)
         if not isinstance(provider, dict):
             raise ConfigError(f"provider {provider_name!r} is not defined")
-        return provider_name, expand_env(copy.deepcopy(provider))
+        expanded = expand_env(copy.deepcopy(provider))
+        unresolved = _unresolved_env(expanded)
+        if unresolved is not None:
+            raise ConfigError(
+                f"provider {provider_name!r} has an unset environment variable: "
+                f"{unresolved}"
+            )
+        return provider_name, expanded
 
     def effective_provider(self, override: str | None = None) -> str:
         return override or str(self.data["provider"])

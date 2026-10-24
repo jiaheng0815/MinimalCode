@@ -123,6 +123,61 @@ class WebToolTests(unittest.TestCase):
             finally:
                 blocked.close()
 
+    def test_fetch_rejects_non_string_response_fields(self) -> None:
+        for payload in (
+            {"title": ["invalid"], "content": "body"},
+            {"title": "title", "content": {"invalid": True}},
+        ):
+            with self.subTest(payload=payload):
+                client = ProviderWebClient(
+                    "custom",
+                    _web_config(),
+                    transport=httpx.MockTransport(
+                        lambda request, payload=payload: httpx.Response(200, json=payload)
+                    ),
+                )
+                try:
+                    with self.assertRaisesRegex(ToolError, "must be a string"):
+                        client.fetch("https://example.com")
+                finally:
+                    client.close()
+
+    def test_fetch_accepts_null_title(self) -> None:
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={"title": None, "content": "body"},
+                )
+            ),
+        )
+        try:
+            result = client.fetch("https://example.com")
+        finally:
+            client.close()
+        self.assertEqual(result["title"], "")
+        self.assertEqual(result["content"], "body")
+
+    def test_fetch_truncates_long_content(self) -> None:
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={"title": "Example", "content": "x" * 150},
+                )
+            ),
+        )
+        try:
+            result = client.fetch("https://example.com")
+        finally:
+            client.close()
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 100 + len("\n<content truncated>"))
+
     def test_default_deepseek_web_settings_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             settings = load_settings(Path(temp) / ".MinimalCode")

@@ -130,15 +130,43 @@ class SessionStore:
         files = self._candidate_files(cwd)
         if not files:
             files = self._candidate_files()
-        matches = [path for path in files if identifier in path.stem or identifier in path.name]
+        identities = [(path, self._recorded_session_id(path)) for path in files]
+        matches = [
+            path
+            for path, session_id in identities
+            if identifier in session_id or identifier in path.stem or identifier in path.name
+        ]
         if not matches:
             raise FileNotFoundError(f"session not found: {identifier}")
         if len(matches) > 1:
-            exact = [path for path in matches if path.stem == identifier]
+            exact = [
+                path
+                for path, session_id in identities
+                if identifier == session_id or identifier == path.stem
+            ]
             if len(exact) != 1:
                 raise ValueError(f"session identifier is ambiguous: {identifier}")
             matches = exact
         return self.load(matches[0])
+
+    @staticmethod
+    def _first_event(path: Path) -> dict[str, Any] | None:
+        """Return the session's meta event, or None when it is unreadable."""
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                event = json.loads(handle.readline())
+        except (OSError, json.JSONDecodeError):
+            return None
+        return event if isinstance(event, dict) else None
+
+    @classmethod
+    def _recorded_session_id(cls, path: Path) -> str:
+        event = cls._first_event(path)
+        if event is not None and event.get("type") == "meta":
+            session_id = event.get("session_id")
+            if isinstance(session_id, str):
+                return session_id
+        return path.stem
 
     def load(self, path: Path) -> Session:
         messages: list[dict[str, Any]] = []
@@ -150,6 +178,8 @@ class SessionStore:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
                         continue
                     if event.get("type") == "meta":
                         session_id = str(event.get("session_id", session_id))
@@ -169,10 +199,8 @@ class SessionStore:
     def list(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for path in self._candidate_files():
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    first = json.loads(handle.readline())
-            except (OSError, json.JSONDecodeError):
+            first = self._first_event(path)
+            if first is None:
                 continue
             rows.append(
                 {

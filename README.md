@@ -9,7 +9,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - 默认使用 PowerShell 7（`pwsh`）；Windows 缺失时回退到 Windows PowerShell 5.1，其他平台缺失时回退到 `bash`，最后回退到 `sh`。
 - 六个精简工具：`read`、`write`、`edit`、`shell`、`grep`、`find`。
 - DeepSeek 默认启用 `web_search` 和 `web_fetch`；其他供应商默认不暴露这两个工具。
-- 流式输出，不依赖 Markdown、Rich 或 UI 框架。
+- 流式输出，在交互终端中渲染 Markdown/README，不依赖 Markdown、Rich 或 UI 框架。
 - 会话自动保存，支持继续和指定会话。
 - 接近上下文上限时自动压缩较早消息。
 - 读取全局和项目级 `AGENTS.md` / `CLAUDE.md`。
@@ -63,6 +63,17 @@ minimalcode config set-model deepseek-flash
 minimalcode config set-provider deepseek
 minimalcode shell
 ```
+
+终端高亮默认开启，可按主题调整：
+
+```json
+"output": {
+  "markdown_highlight": true,
+  "theme": "dark"
+}
+```
+
+`theme` 支持 `dark` 和 `light`。
 
 从现有 Pi 配置迁移供应商、默认模型和上下文窗口：
 
@@ -156,6 +167,12 @@ JSON 输出：
 minimalcode --json -p "运行测试并总结"
 ```
 
+关闭 Markdown 高亮：
+
+```powershell
+minimalcode --no-highlight
+```
+
 切换模型或供应商：
 
 ```powershell
@@ -170,6 +187,20 @@ minimalcode --provider deepseek --model deepseek-v4-pro
 - `/status`：显示模型、shell、上下文和 token 状态。
 - `/help`：显示命令。
 - `/exit`、`/quit`：退出。
+
+## 终端 Markdown 高亮
+
+当输出目标是支持 ANSI 的交互式终端时，MinimalCode 会为模型输出中的标题、强调、行内代码、引用、列表、表格和围栏代码块着色，并按模型返回的 delta 逐词显示，不等待整行或完整回复。
+
+行内 Markdown 采用与网页 AI 相同的“未闭合块”处理思路：收到 `**` 后立即把后续文字按粗体显示，且不打印语法标记；即使模型只输出到 `**未完成的粗体`，文字也会先正常渲染。真正的闭合标记到达后只结束样式，不会补打 `**`。相同规则适用于斜体、删除线、行内代码和链接文本。链接会显示为 `文本 (URL)`，URL 以灰色随流式输出打印。正文不会重排，会话中保存的仍是模型返回的原始 Markdown。
+
+以下情况保持纯文本原样输出：
+
+- `--json` 输出；
+- stdout 被管道或文件重定向；
+- 设置了 `NO_COLOR`；
+- 使用 `--no-highlight`；
+- 配置中设置 `"markdown_highlight": false`。
 
 ## Shell 选择
 
@@ -191,9 +222,13 @@ minimalcode --provider deepseek --model deepseek-v4-pro
 
 显式指定的 shell 不存在时直接报错，不会静默换成另一个 shell。
 
+`shell` 工具执行完成后，终端活动区会显示退出码、stdout 和 stderr。为避免长命令刷屏，活动区只保留首尾各若干行（最多 12 行、4000 字符），被省略的行数以 `… N lines omitted` 标出；模型收到的完整输出不受影响。工具活动开头的 `[shell]`、`[read]` 等标签在支持 ANSI 的终端中显示为绿色。shell 输出写入 stderr，助手正文仍保存在 stdout；使用 `--quiet` 或 `--json` 时不会显示工具活动。
+
 ## 安全和边界
 
 MinimalCode 会执行模型生成的 shell 命令。当前默认将文件工具限制在工作区内，但 `shell` 子进程仍继承当前用户权限。敏感项目应在容器、虚拟机或权限受限的账户中运行。
+
+`web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置；不要把 provider endpoint 指向不可信或可访问敏感内网的服务。
 
 当前实现 OpenAI Chat Completions 和 OpenAI Responses 两种协议。使用 Anthropic、Gemini 时，需要通过兼容网关或在后续版本增加原生协议适配器。
 
@@ -217,7 +252,7 @@ MinimalCode 的第一目标不是复制 Pi 的扩展生态，而是用更小的�
 
 以下能力仍是明确的后续工作：
 
-- 原生 Anthropic、Gemini 和 OpenAI Responses 协议。
+- 原生 Anthropic、Gemini 协议。
 - RPC/SDK 集成。
 - 扩展、Skills 和主题系统。
 - 图片输入和更细粒度的工具权限。

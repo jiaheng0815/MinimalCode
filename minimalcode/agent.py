@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .config import Settings
+from .highlight import MarkdownHighlighter, style_activity_tag
 from .prompt import build_system_prompt
 from .provider import OpenAICompatibleProvider, ProviderError
 from .session import Session
@@ -28,6 +29,44 @@ def _tool_output_preview(result: dict[str, Any]) -> str:
             return f"exit {result.get('exit_code', 0)}; stderr present"
         return "ok"
     return str(result.get("message") or result.get("status") or "error")
+
+
+_ACTIVITY_OUTPUT_MAX_LINES = 12
+_ACTIVITY_OUTPUT_MAX_CHARS = 4000
+
+
+def _clip_activity_output(text: str) -> str:
+    """Keep tool activity readable without echoing entire command output."""
+    lines = text.splitlines()
+    if len(lines) > _ACTIVITY_OUTPUT_MAX_LINES:
+        head = _ACTIVITY_OUTPUT_MAX_LINES // 2
+        tail = _ACTIVITY_OUTPUT_MAX_LINES - head
+        omitted = len(lines) - _ACTIVITY_OUTPUT_MAX_LINES
+        lines = [*lines[:head], f"  … {omitted} lines omitted", *lines[-tail:]]
+    clipped = "\n".join(lines)
+    if len(clipped) > _ACTIVITY_OUTPUT_MAX_CHARS:
+        clipped = clipped[:_ACTIVITY_OUTPUT_MAX_CHARS] + "…"
+    return clipped
+
+
+def _shell_output_activity(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    exit_code = result.get("exit_code")
+    if isinstance(exit_code, int):
+        lines.append(f"  exit {exit_code}")
+    else:
+        lines.append(f"  {result.get('status', 'error')}")
+
+    stdout = _clip_activity_output(str(result.get("stdout") or "").rstrip())
+    stderr = _clip_activity_output(str(result.get("stderr") or "").rstrip())
+    message = str(result.get("message") or "").strip()
+    if stdout:
+        lines.extend(("  stdout:", stdout))
+    if stderr:
+        lines.extend(("  stderr:", stderr))
+    if message:
+        lines.append(f"  {message}")
+    return "\n".join(lines)
 
 
 def _repair_tool_history(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
@@ -98,6 +137,7 @@ class Agent:
         error_output: TextIO | None = None,
         quiet: bool = False,
         stream_output: bool = True,
+        markdown_highlight: bool | None = None,
     ):
         self.settings = settings
         self.provider = provider
@@ -105,11 +145,24 @@ class Agent:
         self.tools = tool_runtime
         self.tool_schemas = available_tool_schemas(self.tools.web_client)
         self.shell = shell
-        self.max_turns = int(max_turns or settings.get("max_turns", 50))
+        self.max_turns = int(max_turns or settings.get("max_turns", 1000))
         self.output = output or sys.stdout
         self.error_output = error_output or sys.stderr
         self.quiet = quiet
         self.stream_output = stream_output
+        highlight_enabled = (
+            bool(settings.get("output.markdown_highlight", True))
+            if markdown_highlight is None
+            else markdown_highlight
+        )
+        self._highlighter = (
+            MarkdownHighlighter(
+                self.output,
+                theme=str(settings.get("output.theme", "dark")),
+            )
+            if stream_output and highlight_enabled
+            else None
+        )
         self.last_prompt_tokens = 0
         self.total_usage = {
             "prompt_tokens": 0,
@@ -119,9 +172,18 @@ class Agent:
             "reasoning_tokens": 0,
         }
 
-        repaired, changed = _repair_tool_history(session.messages)
+        self._repair_history()
+
+    def _repair_history(self) -> None:
+        """Close tool_calls left without results by an interrupted turn.
+
+        Ctrl-C or a provider failure can stop the loop between an assistant
+        tool call and its result. Replaying that history makes most providers
+        reject the next request, so the gap is filled before every run.
+        """
+        repaired, changed = _repair_tool_history(self.session.messages)
         if changed:
-            session.replace_messages(
+            self.session.replace_messages(
                 repaired,
                 summary="Recovered an interrupted tool turn.",
                 dropped_messages=0,
@@ -158,12 +220,19 @@ class Agent:
 
     def _write_delta(self, text: str) -> None:
         if self.stream_output:
-            self.output.write(text)
-            self.output.flush()
+            if self._highlighter is not None:
+                self._highlighter.feed(text)
+            else:
+                self.output.write(text)
+                self.output.flush()
+
+    def _finish_delta(self) -> None:
+        if self._highlighter is not None:
+            self._highlighter.finish()
 
     def _activity(self, message: str) -> None:
         if not self.quiet:
-            self.error_output.write(message + "\n")
+            self.error_output.write(style_activity_tag(message, self.error_output) + "\n")
             self.error_output.flush()
 
     def _execute_tool(self, name: str, raw_arguments: str) -> dict[str, Any]:
@@ -176,12 +245,13 @@ class Agent:
         self._activity(self.tools.activity(name, arguments))
         try:
             return self.tools.dispatch(name, arguments)
-        except (ToolError, OSError, ValueError) as exc:
+        except (ToolError, OSError, TypeError, ValueError) as exc:
             return {"status": "error", "message": str(exc)}
 
     def run(self, user_text: str) -> AgentResult:
         if not user_text.strip():
             raise ValueError("user message is empty")
+        self._repair_history()
         self.session.append_message({"role": "user", "content": user_text})
         final_text = ""
         final_completed = False
@@ -191,11 +261,14 @@ class Agent:
             if self.should_compact():
                 self._compact(force=False)
             messages = self._messages()
-            reply = self.provider.stream_chat(
-                messages,
-                tools=self.tool_schemas,
-                on_text=self._write_delta,
-            )
+            try:
+                reply = self.provider.stream_chat(
+                    messages,
+                    tools=self.tool_schemas,
+                    on_text=self._write_delta,
+                )
+            finally:
+                self._finish_delta()
             self._accumulate_usage(reply.usage, messages)
             assistant = reply.as_message()
             self.session.append_message(assistant)
@@ -214,7 +287,10 @@ class Agent:
                     "content": tool_result_text(result),
                 }
                 self.session.append_message(tool_message)
-                self._activity(f"  {_tool_output_preview(result)}")
+                if call.name == "shell":
+                    self._activity(_shell_output_activity(result))
+                else:
+                    self._activity(f"  {_tool_output_preview(result)}")
 
         if not final_completed and turn >= self.max_turns:
             message = f"Reached max turns ({self.max_turns}); task may be incomplete."

@@ -119,6 +119,8 @@ def run_shell(
     max_output_chars: int,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
+    if not isinstance(command, str):
+        return {"status": "error", "message": "command must be a string"}
     if not command.strip():
         return {"status": "error", "message": "command is empty"}
     timeout = max(1.0, min(float(timeout), 3600.0))

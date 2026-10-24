@@ -2,7 +2,7 @@
   "provider": "deepseek",
   "model": "deepseek-flash",
   "thinking": "high",
-  "max_turns": 50,
+  "max_turns": 1000,
   "session": {
     "save": true
   },
@@ -21,6 +21,10 @@
     "compact_at": 0.8,
     "keep_messages": 12,
     "max_instruction_chars": 60000
+  },
+  "output": {
+    "markdown_highlight": true,
+    "theme": "dark"
   },
   "providers": {
     "deepseek": {

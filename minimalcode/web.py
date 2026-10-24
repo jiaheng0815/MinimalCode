@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+from .config import provider_api_key
 from .errors import ToolError
 
 
@@ -58,7 +58,7 @@ class ProviderWebClient:
         if self.max_content_chars < 1:
             raise ToolError(f"provider {name!r} has invalid max_content_chars")
 
-        api_key = self._api_key(web, config)
+        api_key = provider_api_key(web) or provider_api_key(config)
         headers = {"Content-Type": "application/json"}
         custom_headers = web.get("headers")
         if isinstance(custom_headers, dict):
@@ -75,24 +75,6 @@ class ProviderWebClient:
         self._search_path = str(web["search_path"]).strip("/")
         self._fetch_path = str(web["fetch_path"]).strip("/")
         self.enabled = True
-
-    @staticmethod
-    def _api_key(web: dict[str, Any], provider: dict[str, Any]) -> str | None:
-        direct = web.get("api_key")
-        if isinstance(direct, str) and direct:
-            return direct
-        env_name = web.get("api_key_env")
-        if isinstance(env_name, str) and env_name:
-            key = os.environ.get(env_name)
-            if key:
-                return key
-        direct = provider.get("api_key")
-        if isinstance(direct, str) and direct:
-            return direct
-        env_name = provider.get("api_key_env")
-        if isinstance(env_name, str):
-            return os.environ.get(env_name)
-        return None
 
     def close(self) -> None:
         if self._client is not None:
@@ -159,13 +141,20 @@ class ProviderWebClient:
         ):
             raise ToolError("url must be an absolute HTTP or HTTPS URL")
         data = self._post(self._fetch_path, {"url": url})
+        title = data.get("title")
+        if title is None:
+            title = ""
         content = data.get("content", "")
-        truncated = isinstance(content, str) and len(content) > self.max_content_chars
+        if not isinstance(title, str):
+            raise ToolError("provider web fetch title must be a string")
+        if not isinstance(content, str):
+            raise ToolError("provider web fetch content must be a string")
+        truncated = len(content) > self.max_content_chars
         if truncated:
             content = content[: self.max_content_chars] + "\n<content truncated>"
         return {
             "status": "success",
-            "title": data.get("title", ""),
+            "title": title,
             "content": content,
             "truncated": truncated,
         }

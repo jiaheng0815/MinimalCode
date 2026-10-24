@@ -28,6 +28,7 @@ CLI
 | `tools.py` | Workspace-bound file, search, and shell tools |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
 | `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |
+| `highlight.py` | Incremental Markdown rendering and ANSI styling for streamed text |
 | `cli.py` | Interactive and non-interactive command handling |
 
 ## Performance choices
@@ -37,4 +38,4 @@ CLI
 - `rg` is used when available; a bounded Python fallback keeps commands working without it.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
 - Session writes are append-only; configuration is the only atomically rewritten file.
-- The terminal displays raw streamed text instead of reparsing every Markdown delta.
+- The renderer treats incomplete inline markers as active styles, emits text without waiting for a newline, and keeps redirected and JSON output as raw Markdown.

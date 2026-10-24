@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import inspect
 import json
 import os
 import re
@@ -8,12 +9,35 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from .config import Settings
 from .errors import ToolError
 from .shell import ShellSpec, run_shell
 from .web import ProviderWebClient
+
+# Shared by the Python fallback walk and the ripgrep invocations so both
+# implementations search the same set of files.
+IGNORED_DIRECTORIES: tuple[str, ...] = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    ".venv",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+)
+IGNORED_GLOBS: tuple[str, ...] = tuple(
+    glob
+    for name in IGNORED_DIRECTORIES
+    for glob in (f"!{name}/**", f"!**/{name}/**")
+)
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -83,7 +107,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "type": "number",
                         "minimum": 1,
                         "maximum": 3600,
-                        "description": "Timeout in seconds",
+                        "description": (
+                            "Timeout in seconds, capped by shell.timeout_seconds"
+                        ),
                     },
                     "cwd": {
                         "type": "string",
@@ -215,6 +241,63 @@ def _clip(value: str, limit: int = 180) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+_UNION_ORIGINS = {Union, UnionType}
+_TYPE_LABELS: dict[Any, str] = {
+    str: "a string",
+    bool: "a boolean",
+    int: "an integer",
+    float: "a number",
+    type(None): "null",
+}
+
+
+def _describe_annotation(annotation: Any) -> str:
+    if get_origin(annotation) in _UNION_ORIGINS:
+        return " or ".join(_describe_annotation(arg) for arg in get_args(annotation))
+    return _TYPE_LABELS.get(annotation, "the documented type")
+
+
+def _matches_annotation(value: Any, annotation: Any) -> bool:
+    if get_origin(annotation) in _UNION_ORIGINS:
+        return any(_matches_annotation(value, arg) for arg in get_args(annotation))
+    if annotation is bool:
+        return isinstance(value, bool)
+    if annotation is str:
+        return isinstance(value, str)
+    if annotation is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if annotation is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if annotation is type(None):
+        return value is None
+    return True
+
+
+def _check_argument_types(
+    name: str,
+    handler: Any,
+    arguments: dict[str, Any],
+) -> None:
+    """Reject model-supplied arguments that do not match the handler signature.
+
+    ``bind`` only checks names and arity, so a call such as
+    ``{"command": 5}`` would otherwise reach the handler and raise
+    ``AttributeError``/``TypeError`` outside the tool-loop error handling.
+    """
+    try:
+        hints = get_type_hints(handler)
+    except (NameError, TypeError):  # pragma: no cover - stay permissive
+        return
+    for key, value in arguments.items():
+        annotation = hints.get(key)
+        if annotation is None or _matches_annotation(value, annotation):
+            continue
+        raise ToolError(
+            f"invalid arguments for {name}: {key} must be "
+            f"{_describe_annotation(annotation)}"
+        )
+
+
 class ToolRuntime:
     def __init__(
         self,
@@ -280,12 +363,19 @@ class ToolRuntime:
                     continue
                 if stop is not None and number > stop:
                     break
+                rendered = f"{number:>6}\t{line.rstrip(chr(13) + chr(10))}\n"
+                remaining = self.max_file_chars - used
+                if len(rendered) > remaining:
+                    truncated = True
+                    if actual_start is None and remaining > 0:
+                        # A first line larger than the budget must not look like an
+                        # empty file; return its prefix so the caller sees content.
+                        chunks.append(rendered[:remaining])
+                        actual_start = number
+                        actual_end = number
+                    break
                 if actual_start is None:
                     actual_start = number
-                rendered = f"{number:>6}\t{line.rstrip(chr(13) + chr(10))}\n"
-                if used + len(rendered) > self.max_file_chars:
-                    truncated = True
-                    break
                 chunks.append(rendered)
                 used += len(rendered)
                 actual_end = number
@@ -297,6 +387,7 @@ class ToolRuntime:
                 "content": "",
                 "start_line": start,
                 "end_line": start,
+                "truncated": truncated,
             }
         return {
             "status": "success",
@@ -307,6 +398,24 @@ class ToolRuntime:
             "truncated": truncated,
         }
 
+    @staticmethod
+    def _write_atomic(target: Path, text: str, *, mode: int | None = None) -> None:
+        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if mode is not None:
+                try:
+                    os.chmod(temp_path, mode)
+                except OSError:
+                    pass
+            os.replace(temp_path, target)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
     def write(self, path: str, content: str) -> dict[str, Any]:
         if not isinstance(content, str):
             raise ToolError("content must be a string")
@@ -315,16 +424,8 @@ class ToolRuntime:
         target = self._path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
-        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, target)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        mode = target.stat().st_mode & 0o7777 if existed else None
+        self._write_atomic(target, content, mode=mode)
         return {
             "status": "success",
             "path": str(target),
@@ -351,29 +452,32 @@ class ToolRuntime:
 
         with target.open("r", encoding="utf-8", errors="strict", newline="") as handle:
             original = handle.read()
-        newline = "\r\n" if "\r\n" in original else "\n"
-        normalized = original.replace("\r\n", "\n")
+        default_newline = "\r\n" if "\r\n" in original else "\n"
         needle = old_text.replace("\r\n", "\n")
-        replacement = new_text.replace("\r\n", "\n")
-        count = normalized.count(needle)
+        pattern = re.compile(r"\r?\n".join(re.escape(part) for part in needle.split("\n")))
+        matches = list(pattern.finditer(original))
+        count = len(matches)
         if count == 0:
             raise ToolError("old_text was not found")
         if count > 1 and not replace_all:
             raise ToolError(f"old_text occurs {count} times; make it unique or set replace_all")
+        if not replace_all:
+            matches = matches[:1]
 
-        updated = normalized.replace(needle, replacement, -1 if replace_all else 1)
-        if newline == "\r\n":
-            updated = updated.replace("\n", "\r\n")
-        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(updated)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, target)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        # Replace only the matched spans so untouched lines keep their own endings.
+        normalized_new = new_text.replace("\r\n", "\n")
+        updated = original
+        for match in reversed(matches):
+            span = match.group(0)
+            if "\r\n" in span:
+                span_newline = "\r\n"
+            elif "\n" in span:
+                span_newline = "\n"
+            else:
+                span_newline = default_newline
+            replacement = normalized_new.replace("\n", span_newline)
+            updated = updated[: match.start()] + replacement + updated[match.end() :]
+        self._write_atomic(target, updated, mode=target.stat().st_mode & 0o7777)
         return {
             "status": "success",
             "path": str(target),
@@ -381,13 +485,15 @@ class ToolRuntime:
         }
 
     def shell(self, command: str, timeout: float | None = None, cwd: str = ".") -> dict[str, Any]:
+        if not isinstance(command, str):
+            raise ToolError("command must be a string")
         workdir = self._path(cwd)
         if not workdir.is_dir():
             raise ToolError(f"working directory not found: {workdir}")
-        effective_timeout = min(
-            float(timeout if timeout is not None else self.shell_timeout),
-            max(self.shell_timeout, 3600.0),
+        requested_timeout = float(
+            timeout if timeout is not None else self.shell_timeout
         )
+        effective_timeout = max(1.0, min(requested_timeout, self.shell_timeout))
         return run_shell(
             command,
             shell=self.shell_spec,
@@ -422,6 +528,8 @@ class ToolRuntime:
             ]
             if glob:
                 command.extend(["--glob", glob])
+            for ignored_glob in IGNORED_GLOBS:
+                command.extend(["--glob", ignored_glob])
             command.extend(["--", pattern, str(target)])
             try:
                 completed = subprocess.run(
@@ -491,7 +599,10 @@ class ToolRuntime:
         limit = min(int(max_results or self.max_results), 5000)
         rg = shutil.which("rg")
         if rg:
-            command = [rg, "--files", "--glob", pattern, str(target)]
+            command = [rg, "--files", "--glob", pattern]
+            for ignored_glob in IGNORED_GLOBS:
+                command.extend(["--glob", ignored_glob])
+            command.append(str(target))
             try:
                 completed = subprocess.run(
                     command,
@@ -549,7 +660,7 @@ class ToolRuntime:
         return self.web_client.fetch(url)
 
     def _walk_files(self, root: Path):
-        ignored = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv"}
+        ignored = set(IGNORED_DIRECTORIES)
         for directory, dirnames, filenames in os.walk(root):
             dirnames[:] = [name for name in dirnames if name not in ignored]
             for filename in filenames:
@@ -572,9 +683,11 @@ class ToolRuntime:
         if not isinstance(arguments, dict):
             raise ToolError("tool arguments must be an object")
         try:
-            return handler(**arguments)
+            inspect.signature(handler).bind(**arguments)
         except TypeError as exc:
             raise ToolError(f"invalid arguments for {name}: {exc}") from exc
+        _check_argument_types(name, handler, arguments)
+        return handler(**arguments)
 
     @staticmethod
     def activity(name: str, arguments: dict[str, Any]) -> str:

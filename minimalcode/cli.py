@@ -43,6 +43,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", help="Workspace directory")
     parser.add_argument("--home", help="Config directory (default ~/.MinimalCode)")
     parser.add_argument("--quiet", action="store_true", help="Hide tool activity")
+    parser.add_argument(
+        "--no-highlight",
+        action="store_true",
+        help="Show plain Markdown without terminal highlighting",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -275,6 +280,8 @@ def _interactive(
                 shell=agent.shell,
                 max_turns=args.max_turns,
                 quiet=args.quiet,
+                stream_output=not args.json_output,
+                markdown_highlight=False if args.no_highlight else None,
             )
             print("new session")
             continue
@@ -374,6 +381,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             max_turns=args.max_turns,
             quiet=args.quiet or args.json_output,
             stream_output=not args.json_output,
+            markdown_highlight=False if args.no_highlight else None,
         )
 
         if prompt:
