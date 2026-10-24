@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 - 2026-10-24
+
+- Added DeepSeek-hosted web search and web fetch tools.
+- Web tools are exposed only for the official DeepSeek API and are blocked for all other providers.
+- Added provider-aware tool schemas and web API regression tests.
+
 ## 0.1.0
 
 - Introduced the `MinimalCode` package and `minimalcode` command.

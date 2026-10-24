@@ -10,7 +10,7 @@ from .prompt import build_system_prompt
 from .provider import OpenAICompatibleProvider, ProviderError
 from .session import Session
 from .shell import ShellSpec
-from .tools import TOOL_SCHEMAS, ToolError, ToolRuntime, tool_result_text
+from .tools import ToolError, ToolRuntime, available_tool_schemas, tool_result_text
 
 
 def _json_size(messages: list[dict[str, Any]]) -> int:
@@ -103,6 +103,7 @@ class Agent:
         self.provider = provider
         self.session = session
         self.tools = tool_runtime
+        self.tool_schemas = available_tool_schemas(self.tools.web_enabled)
         self.shell = shell
         self.max_turns = int(max_turns or settings.get("max_turns", 50))
         self.output = output or sys.stdout
@@ -192,7 +193,7 @@ class Agent:
             messages = self._messages()
             reply = self.provider.stream_chat(
                 messages,
-                tools=TOOL_SCHEMAS,
+                tools=self.tool_schemas,
                 on_text=self._write_delta,
             )
             self._accumulate_usage(reply.usage, messages)

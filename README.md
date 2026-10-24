@@ -2,12 +2,13 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.1.0`。
+当前版本：`0.2.0`。
 
 ## 核心特性
 
 - 默认使用 PowerShell 7（`pwsh`）；Windows 缺失时回退到 Windows PowerShell 5.1，其他平台缺失时回退到 `bash`，最后回退到 `sh`。
 - 六个精简工具：`read`、`write`、`edit`、`shell`、`grep`、`find`。
+- 使用官方 DeepSeek API 时额外启用 `web_search` 和 `web_fetch`；其他供应商默认不暴露这两个工具。
 - 流式输出，不依赖 Markdown、Rich 或 UI 框架。
 - 会话自动保存，支持继续和指定会话。
 - 接近上下文上限时自动压缩较早消息。
@@ -100,6 +101,16 @@ minimalcode import-pi
 ```
 
 协议值为 `openai_chat` 或 `openai_responses`。Responses 模式下，`thinking` 只有同时设置 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送。其他兼容供应商可沿用相同结构并替换 `base_url`、模型和密钥环境变量。
+
+### Web 工具
+
+当供应商 API 主机为 `api.deepseek.com` 时，MinimalCode 会通过 DeepSeek
+`/v1/tools/search` 和 `/v1/tools/fetch` 启用以下工具：
+
+- `web_search`：搜索网页，可返回标题、链接和可选正文。
+- `web_fetch`：抓取指定 HTTP/HTTPS 页面。
+
+其他供应商不会收到这两个工具定义，直接调用也会被工具层拒绝。
 
 环境变量可以写在值中：
 

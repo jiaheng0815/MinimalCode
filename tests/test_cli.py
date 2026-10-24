@@ -20,6 +20,7 @@ class FakeCliProvider:
 
     def __init__(self) -> None:
         self.closed = False
+        self.config: dict = {}
 
     def stream_chat(self, messages, *, tools=None, on_text=None):
         if on_text:

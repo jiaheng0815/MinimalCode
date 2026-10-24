@@ -266,7 +266,12 @@ def _interactive(
                 settings=settings,
                 provider=agent.provider,
                 session=session,
-                tool_runtime=ToolRuntime(settings, session.cwd, agent.shell),
+                tool_runtime=ToolRuntime(
+                    settings,
+                    session.cwd,
+                    agent.shell,
+                    web_client=agent.tools.web_client,
+                ),
                 shell=agent.shell,
                 max_turns=args.max_turns,
                 quiet=args.quiet,
@@ -326,6 +331,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     from .session import SessionStore
     from .shell import detect_shell
     from .tools import ToolRuntime
+    from .web import DeepSeekWebClient
 
     cwd = _resolve_cwd(args.cwd)
     settings = load_settings(args.home)
@@ -339,6 +345,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         model=args.model,
         thinking=args.thinking,
     )
+    web_client = None
     try:
         store = SessionStore(settings)
         session, effective_cwd = _load_or_create_session(
@@ -351,7 +358,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         if not effective_cwd.is_dir():
             raise ConfigError(f"session workspace no longer exists: {effective_cwd}")
-        tools = ToolRuntime(settings, effective_cwd, shell)
+        web_client = DeepSeekWebClient(provider_name, provider.config)
+        tools = ToolRuntime(
+            settings,
+            effective_cwd,
+            shell,
+            web_client=web_client,
+        )
         agent = Agent(
             settings=settings,
             provider=provider,
@@ -374,6 +387,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             model,
         )
     finally:
+        if web_client is not None:
+            web_client.close()
         provider.close()
 
 

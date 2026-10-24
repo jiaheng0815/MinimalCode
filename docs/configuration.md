@@ -67,3 +67,12 @@ Compaction is lossy in the active context but the original JSONL history remains
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`.
 
 For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}`; reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`.
+
+## Web tools
+
+`web_search` and `web_fetch` are enabled only when the provider `base_url`
+uses the official `https://api.deepseek.com` host. They call DeepSeek's
+`/v1/tools/search` and `/v1/tools/fetch` endpoints with the same API key.
+
+Other providers neither receive the two tool schemas nor can invoke them through
+the local tool dispatcher.

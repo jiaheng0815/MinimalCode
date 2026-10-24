@@ -13,6 +13,7 @@ from typing import Any
 from .config import Settings
 from .errors import ToolError
 from .shell import ShellSpec, run_shell
+from .web import DeepSeekWebClient
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -142,6 +143,69 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+WEB_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web through the DeepSeek API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query, 1-128 characters",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Number of results, default 10",
+                    },
+                    "need_content": {
+                        "type": "boolean",
+                        "description": "Include page content when available",
+                    },
+                    "ori_question": {
+                        "type": ["string", "null"],
+                        "description": "Original user question",
+                    },
+                    "localization": {
+                        "type": ["string", "null"],
+                        "description": "Optional localization IP",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch an HTTP or HTTPS page through the DeepSeek API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute HTTP or HTTPS URL",
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+
+def available_tool_schemas(web_enabled: bool = False) -> list[dict[str, Any]]:
+    if not web_enabled:
+        return list(TOOL_SCHEMAS)
+    return [*TOOL_SCHEMAS, *WEB_TOOL_SCHEMAS]
+
 
 def _clip(value: str, limit: int = 180) -> str:
     value = " ".join(value.split())
@@ -149,10 +213,19 @@ def _clip(value: str, limit: int = 180) -> str:
 
 
 class ToolRuntime:
-    def __init__(self, settings: Settings, cwd: Path, shell: ShellSpec):
+    def __init__(
+        self,
+        settings: Settings,
+        cwd: Path,
+        shell: ShellSpec,
+        *,
+        web_client: DeepSeekWebClient | None = None,
+    ):
         self.settings = settings
         self.cwd = cwd.resolve()
         self.shell_spec = shell
+        self.web_client = web_client
+        self.web_enabled = bool(web_client and web_client.enabled)
         self.allow_outside = bool(settings.get("tools.allow_outside_workspace", False))
         self.max_file_chars = int(settings.get("tools.max_file_chars", 160_000))
         self.max_file_bytes = int(settings.get("tools.max_file_bytes", 5_000_000))
@@ -449,6 +522,29 @@ class ToolRuntime:
                     return {"status": "success", "files": paths, "truncated": True}
         return {"status": "success", "files": paths, "truncated": False}
 
+    def web_search(
+        self,
+        query: str,
+        count: int = 10,
+        need_content: bool = False,
+        ori_question: str | None = None,
+        localization: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.web_enabled or self.web_client is None:
+            raise ToolError("web tools are only available with the DeepSeek API")
+        return self.web_client.search(
+            query,
+            count=count,
+            need_content=need_content,
+            ori_question=ori_question,
+            localization=localization,
+        )
+
+    def web_fetch(self, url: str) -> dict[str, Any]:
+        if not self.web_enabled or self.web_client is None:
+            raise ToolError("web tools are only available with the DeepSeek API")
+        return self.web_client.fetch(url)
+
     def _walk_files(self, root: Path):
         ignored = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv"}
         for directory, dirnames, filenames in os.walk(root):
@@ -464,6 +560,8 @@ class ToolRuntime:
             "shell": self.shell,
             "grep": self.grep,
             "find": self.find,
+            "web_search": self.web_search,
+            "web_fetch": self.web_fetch,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -485,6 +583,10 @@ class ToolRuntime:
             detail = f"{_clip(str(arguments.get('pattern', '')))} in {arguments.get('path', '.')}"
         elif name == "find":
             detail = f"{arguments.get('pattern', '*')} in {arguments.get('path', '.')}"
+        elif name == "web_search":
+            detail = _clip(str(arguments.get("query", "")))
+        elif name == "web_fetch":
+            detail = _clip(str(arguments.get("url", "")))
         else:
             detail = ""
         return f"[{name}] {detail}".rstrip()

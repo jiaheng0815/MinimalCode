@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "minimalcode"
 dynamic = ["version"]
-description = "A fast, minimal terminal coding agent with Responses and Chat API support"
+description = "A fast coding agent with DeepSeek web tools and Responses/Chat support"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
