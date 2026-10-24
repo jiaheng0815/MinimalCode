@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -11,11 +12,33 @@ from minimalcode.config import load_settings
 from minimalcode.errors import ToolError
 from minimalcode.shell import detect_shell
 from minimalcode.tools import ToolRuntime, available_tool_schemas
-from minimalcode.web import DeepSeekWebClient
+from minimalcode.web import ProviderWebClient
+
+
+def _web_config(
+    *,
+    enabled: bool = True,
+    base_url: str = "https://provider.test/v1/tools",
+) -> dict[str, Any]:
+    return {
+        "base_url": base_url,
+        "api_key": "secret",
+        "web_tools": {
+            "enabled": enabled,
+            "base_url": base_url,
+            "search_path": "search",
+            "fetch_path": "fetch",
+            "timeout_seconds": 10,
+            "default_count": 5,
+            "max_count": 5,
+            "max_content_chars": 100,
+            "headers": {},
+        },
+    }
 
 
 class WebToolTests(unittest.TestCase):
-    def test_deepseek_search_and_fetch(self) -> None:
+    def test_configured_search_and_fetch(self) -> None:
         requests: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -36,17 +59,15 @@ class WebToolTests(unittest.TestCase):
                 json={"title": "Example", "content": "Page body"},
             )
 
-        client = DeepSeekWebClient(
-            "deepseek",
-            {
-                "base_url": "https://api.deepseek.com/v1",
-                "api_key": "secret",
-            },
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
             transport=httpx.MockTransport(handler),
         )
         try:
             self.assertTrue(client.enabled)
-            self.assertEqual(client.search("minimalcode", count=3)["results"][0]["title"], "Result")
+            result = client.search("minimalcode", count=3)
+            self.assertEqual(result["results"][0]["title"], "Result")
             self.assertEqual(client.fetch("https://example.com")["content"], "Page body")
         finally:
             client.close()
@@ -55,43 +76,40 @@ class WebToolTests(unittest.TestCase):
             ["/v1/tools/search", "/v1/tools/fetch"],
         )
 
-    def test_non_deepseek_is_hidden_and_blocked(self) -> None:
-        client = DeepSeekWebClient(
-            "openai",
-            {
-                "base_url": "https://api.openai.com/v1",
-                "api_key": "secret",
-            },
-        )
+    def test_disabled_provider_hides_and_blocks_tools(self) -> None:
+        disabled = ProviderWebClient("custom", _web_config(enabled=False))
+        enabled = ProviderWebClient("custom", _web_config())
         try:
-            self.assertFalse(client.enabled)
-            with self.assertRaisesRegex(ToolError, "only available"):
-                client.search("blocked")
+            self.assertFalse(disabled.enabled)
+            with self.assertRaisesRegex(ToolError, "not enabled"):
+                disabled.search("blocked")
+
+            enabled_schemas = available_tool_schemas(enabled)
+            visible = {
+                tool["function"]["name"] for tool in enabled_schemas
+            }
+            hidden = {
+                tool["function"]["name"] for tool in available_tool_schemas()
+            }
+            count_rule = next(
+                tool
+                for tool in enabled_schemas
+                if tool["function"]["name"] == "web_search"
+            )["function"]["parameters"]["properties"]["count"]
+            self.assertEqual(count_rule["maximum"], 5)
+            self.assertIn("web_search", visible)
+            self.assertIn("web_fetch", visible)
+            self.assertNotIn("web_search", hidden)
+            self.assertNotIn("web_fetch", hidden)
         finally:
-            client.close()
+            disabled.close()
+            enabled.close()
 
-        visible = {
-            tool["function"]["name"] for tool in available_tool_schemas(web_enabled=True)
-        }
-        hidden = {
-            tool["function"]["name"] for tool in available_tool_schemas(web_enabled=False)
-        }
-        self.assertIn("web_search", visible)
-        self.assertIn("web_fetch", visible)
-        self.assertNotIn("web_search", hidden)
-        self.assertNotIn("web_fetch", hidden)
-
-    def test_tool_runtime_only_dispatches_web_tools_for_deepseek(self) -> None:
+    def test_tool_runtime_blocks_disabled_web_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp)
             settings = load_settings(workspace / ".MinimalCode")
-            blocked = DeepSeekWebClient(
-                "custom",
-                {
-                    "base_url": "https://provider.test/v1",
-                    "api_key": "secret",
-                },
-            )
+            blocked = ProviderWebClient("custom", _web_config(enabled=False))
             try:
                 runtime = ToolRuntime(
                     settings,
@@ -100,10 +118,19 @@ class WebToolTests(unittest.TestCase):
                     web_client=blocked,
                 )
                 self.assertFalse(runtime.web_enabled)
-                with self.assertRaisesRegex(ToolError, "only available"):
+                with self.assertRaisesRegex(ToolError, "not enabled"):
                     runtime.dispatch("web_search", {"query": "blocked"})
             finally:
                 blocked.close()
+
+    def test_default_deepseek_web_settings_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = load_settings(Path(temp) / ".MinimalCode")
+        _, provider = settings.provider_config("deepseek")
+        web = provider["web_tools"]
+        self.assertTrue(web["enabled"])
+        self.assertEqual(web["base_url"], "https://api.deepseek.com/v1/tools")
+        self.assertEqual(web["search_path"], "search")
 
 
 if __name__ == "__main__":

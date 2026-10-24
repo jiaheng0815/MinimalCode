@@ -1,0 +1,50 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "thinking": "high",
+  "max_turns": 50,
+  "session": {
+    "save": true
+  },
+  "shell": {
+    "path": null,
+    "timeout_seconds": 120,
+    "max_output_chars": 60000
+  },
+  "tools": {
+    "allow_outside_workspace": false,
+    "max_file_chars": 160000,
+    "max_file_bytes": 5000000,
+    "max_results": 200
+  },
+  "context": {
+    "compact_at": 0.8,
+    "keep_messages": 12,
+    "max_instruction_chars": 60000
+  },
+  "providers": {
+    "deepseek": {
+      "protocol": "openai_responses",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "context_window": 1000000,
+      "timeout_seconds": 120,
+      "stream": true,
+      "include_usage": false,
+      "send_reasoning_effort": true,
+      "headers": {},
+      "extra_body": {},
+      "web_tools": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com/v1/tools",
+        "search_path": "search",
+        "fetch_path": "fetch",
+        "timeout_seconds": 60,
+        "default_count": 10,
+        "max_count": 50,
+        "max_content_chars": 120000,
+        "headers": {}
+      }
+    }
+  }
+}

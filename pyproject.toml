@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "minimalcode"
 dynamic = ["version"]
-description = "A fast coding agent with DeepSeek web tools and Responses/Chat support"
+description = "A configurable coding agent with provider web tools and Responses/Chat support"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -27,6 +27,9 @@ version = {attr = "minimalcode.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["minimalcode*"]
+
+[tool.setuptools.package-data]
+minimalcode = ["defaults.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

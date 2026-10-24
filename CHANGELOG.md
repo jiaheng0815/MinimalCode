@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-10-24
+
+- Removed provider host checks and hardcoded web endpoints from runtime code.
+- Web tool capability, endpoints, timeout, result limits, content limits, key source, and headers are now provider configuration.
+- Moved the complete default configuration out of Python into packaged `defaults.json`.
+- DeepSeek keeps web tools enabled by default; all other providers remain disabled unless explicitly configured.
+
 ## 0.2.0 - 2026-10-24
 
 - Added DeepSeek-hosted web search and web fetch tools.

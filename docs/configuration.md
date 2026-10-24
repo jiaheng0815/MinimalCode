@@ -2,6 +2,9 @@
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
+Built-in defaults are data, not Python literals: they live in
+`minimalcode/defaults.json` from the installed package.
+
 ## Top-level settings
 
 | Key | Type | Default | Meaning |
@@ -70,9 +73,26 @@ For `openai_responses`, `include_usage` is not needed because usage is returned 
 
 ## Web tools
 
-`web_search` and `web_fetch` are enabled only when the provider `base_url`
-uses the official `https://api.deepseek.com` host. They call DeepSeek's
-`/v1/tools/search` and `/v1/tools/fetch` endpoints with the same API key.
+Web tools are provider configuration, not runtime provider-name or hostname
+checks. The built-in DeepSeek provider enables them with:
 
-Other providers neither receive the two tool schemas nor can invoke them through
-the local tool dispatcher.
+```json
+"web_tools": {
+  "enabled": true,
+  "base_url": "https://api.deepseek.com/v1/tools",
+  "search_path": "search",
+  "fetch_path": "fetch",
+  "timeout_seconds": 60,
+  "default_count": 10,
+  "max_count": 50,
+  "max_content_chars": 120000,
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "headers": {}
+}
+```
+
+`api_key` or `api_key_env` inside `web_tools` override the provider credential.
+When omitted, the provider API key is reused.
+
+Providers without an enabled `web_tools` block neither receive the two tool
+schemas nor can invoke them through the local dispatcher.

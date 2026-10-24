@@ -24,7 +24,7 @@ CLI
 | `shell.py` | Shell detection, fast subprocess execution, UTF-8 normalization |
 | `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
 | `provider.py` | OpenAI Chat/Responses HTTP and SSE transport |
-| `web.py` | DeepSeek-only web search and fetch client |
+| `web.py` | Configurable provider web search and fetch client |
 | `tools.py` | Workspace-bound file, search, and shell tools |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
 | `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |

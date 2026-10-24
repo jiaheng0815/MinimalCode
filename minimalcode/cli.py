@@ -331,7 +331,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     from .session import SessionStore
     from .shell import detect_shell
     from .tools import ToolRuntime
-    from .web import DeepSeekWebClient
+    from .web import ProviderWebClient
 
     cwd = _resolve_cwd(args.cwd)
     settings = load_settings(args.home)
@@ -358,7 +358,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         if not effective_cwd.is_dir():
             raise ConfigError(f"session workspace no longer exists: {effective_cwd}")
-        web_client = DeepSeekWebClient(provider_name, provider.config)
+        web_client = ProviderWebClient(provider_name, provider.config)
         tools = ToolRuntime(
             settings,
             effective_cwd,

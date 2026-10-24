@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -16,45 +17,9 @@ APP_DIR_NAME = ".MinimalCode"
 HOME_ENV = "MINIMALCODE_HOME"
 SETTINGS_FILENAME = "settings.json"
 
-DEFAULT_SETTINGS: dict[str, Any] = {
-    "provider": "deepseek",
-    "model": "deepseek-flash",
-    "thinking": "high",
-    "max_turns": 50,
-    "session": {
-        "save": True,
-    },
-    "shell": {
-        "path": None,
-        "timeout_seconds": 120,
-        "max_output_chars": 60_000,
-    },
-    "tools": {
-        "allow_outside_workspace": False,
-        "max_file_chars": 160_000,
-        "max_file_bytes": 5_000_000,
-        "max_results": 200,
-    },
-    "context": {
-        "compact_at": 0.8,
-        "keep_messages": 12,
-        "max_instruction_chars": 60_000,
-    },
-    "providers": {
-        "deepseek": {
-            "protocol": "openai_responses",
-            "base_url": "https://api.deepseek.com/v1",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "context_window": 1_000_000,
-            "timeout_seconds": 120,
-            "stream": True,
-            "include_usage": False,
-            "send_reasoning_effort": True,
-            "headers": {},
-            "extra_body": {},
-        }
-    },
-}
+DEFAULT_SETTINGS: dict[str, Any] = json.loads(
+    files("minimalcode").joinpath("defaults.json").read_text(encoding="utf-8")
+)
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 

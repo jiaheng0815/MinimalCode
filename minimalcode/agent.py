@@ -103,7 +103,7 @@ class Agent:
         self.provider = provider
         self.session = session
         self.tools = tool_runtime
-        self.tool_schemas = available_tool_schemas(self.tools.web_enabled)
+        self.tool_schemas = available_tool_schemas(self.tools.web_client)
         self.shell = shell
         self.max_turns = int(max_turns or settings.get("max_turns", 50))
         self.output = output or sys.stdout

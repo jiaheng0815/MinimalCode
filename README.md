@@ -2,13 +2,13 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.2.0`。
+当前版本：`0.3.0`。
 
 ## 核心特性
 
 - 默认使用 PowerShell 7（`pwsh`）；Windows 缺失时回退到 Windows PowerShell 5.1，其他平台缺失时回退到 `bash`，最后回退到 `sh`。
 - 六个精简工具：`read`、`write`、`edit`、`shell`、`grep`、`find`。
-- 使用官方 DeepSeek API 时额外启用 `web_search` 和 `web_fetch`；其他供应商默认不暴露这两个工具。
+- DeepSeek 默认启用 `web_search` 和 `web_fetch`；其他供应商默认不暴露这两个工具。
 - 流式输出，不依赖 Markdown、Rich 或 UI 框架。
 - 会话自动保存，支持继续和指定会话。
 - 接近上下文上限时自动压缩较早消息。
@@ -104,13 +104,14 @@ minimalcode import-pi
 
 ### Web 工具
 
-当供应商 API 主机为 `api.deepseek.com` 时，MinimalCode 会通过 DeepSeek
-`/v1/tools/search` 和 `/v1/tools/fetch` 启用以下工具：
+Web 能力由供应商的 `web_tools` 配置启用，运行时代码不包含供应商主机或端点判断。默认 DeepSeek 配置通过 `/v1/tools/search` 和 `/v1/tools/fetch` 启用以下工具：
 
 - `web_search`：搜索网页，可返回标题、链接和可选正文。
 - `web_fetch`：抓取指定 HTTP/HTTPS 页面。
 
-其他供应商不会收到这两个工具定义，直接调用也会被工具层拒绝。
+其他供应商默认不会收到这两个工具定义，直接调用也会被工具层拒绝。需要时应显式添加完整 `web_tools` 配置。
+
+完整默认值位于包内 `minimalcode/defaults.json`，运行时会与用户配置深度合并。
 
 环境变量可以写在值中：
 
