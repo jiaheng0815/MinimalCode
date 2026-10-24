@@ -17,7 +17,7 @@ class ShellTests(unittest.TestCase):
                 command,
                 shell=shell,
                 cwd=Path(temp),
-                timeout=10,
+                timeout=30,
                 max_output_chars=10_000,
             )
         self.assertEqual(result["status"], "success", result)

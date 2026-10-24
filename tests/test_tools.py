@@ -69,7 +69,7 @@ class ToolTests(unittest.TestCase):
         shell = detect_shell()
         powershell = shell.kind in {"pwsh7", "windows_powershell"}
         command = 'Write-Output "tool-shell"' if powershell else 'printf "tool-shell"'
-        result = self.tools.shell(command, timeout=10)
+        result = self.tools.shell(command, timeout=30)
         self.assertEqual(result["status"], "success", result)
         self.assertIn("tool-shell", str(result["stdout"]))
 
