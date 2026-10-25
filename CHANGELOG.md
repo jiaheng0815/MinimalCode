@@ -1,5 +1,25 @@
 # 更新日志
 
+## 未发布
+
+### 修复
+
+- 修复 `--no-sandbox` 同时放开了工作区约束和敏感文件过滤的 fail-open 问题：`sandbox.enabled=false` 现在只关闭执行层（后端包装、网络策略、子进程资源限制），文件工具仍受允许根、符号链接逃逸检查和敏感文件策略约束，工作区外的读写需要使用 `tools.allow_outside_workspace`。
+- 修复 `subagent.timeout_seconds` 被 `sandbox.timeout_seconds` 静默截断到 120 秒的问题：构造工具时就按策略上限收敛，工具结果返回实际生效的 `timeout_seconds`，原因写入沙箱 notes 并可在 `minimalcode sandbox` / `/status` 中看到。
+- 修复超长行导致行号错位的问题：`read` 的 Python 搜索后备实现（子进程与内联两套）现在按物理行计数，超过单行上限的行会先消费剩余片段再继续，`read(start_line=...)` 不再返回被切成多行的片段。
+- 修复 `docker` 后端在 Windows 上被报告为可用却必然失败的问题（Docker Desktop 无法消费 `C:\ws:C:\ws` 形式挂载），并在 POSIX 上以当前 `uid:gid` 运行容器，避免工作区出现 root 属主文件。
+- 修复 `local` 网络策略把只读的 `python -m pip show/list`、`pip --version` 误判为联网命令的问题：只有 `install`、`download`、`search`、`index` 等子命令会被拒绝。
+- 修复工具历史修复逻辑：孤立的 `tool` 消息和重复的 `tool_call_id` 结果会被丢弃，避免严格供应商直接 400；工具处理函数抛出非预期异常时也转为工具错误结果，不再中断整轮并让用户消息悬空。
+- 修复上下文压缩在历史缺少 `user` 消息时永远无法推进的问题：新增回退边界，保证保留的尾部不以孤立的工具结果开头。
+- 修复 `subagent`/`init` 等管理命令与提示词冲突的问题：命令行出现 `--` 时不再按子命令解析，`minimalcode -- init` 发送提示词 `init`。
+- 修复供应商在拿到响应前断开（`provider network error: Server disconnected without sending a response.`）时只重试一次的问题：现在重试 10 次，退避从 0.5 秒翻倍到最多 8 秒；已经开始输出的流式中断仍不重试，避免重复输出或重复计费。重试提示写入工具活动流，`--quiet` / `--json` 下保持静默。
+
+### 变更
+
+- 沙箱执行层默认关闭（默认等价 `--no-sandbox`）：`sandbox.enabled` 与 `minimalcode/defaults.json` 的默认值改为 `false`，需要时用 `--sandbox` 开启。文件工具的工作区约束与敏感文件过滤不受影响，仍然始终生效。
+- 任意 `--sandbox-*` 调优参数会隐式开启执行层，避免 `--sandbox-timeout 30` 之类的参数成为静默无效项；显式的 `--no-sandbox` 优先。执行层关闭时 `subagent` 只受 `subagent.timeout_seconds` 约束。
+- `should_compact` 优先使用供应商返回的 prompt token 数，不再每轮序列化整个历史。
+
 ## 0.6.0
 
 ### 新增

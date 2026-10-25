@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -18,6 +19,7 @@ from minimalcode.errors import ToolError
 from minimalcode.sandbox import (
     BwrapBackend,
     CommandRequest,
+    DockerBackend,
     LocalSandboxBackend,
     SandboxPolicy,
     SandboxRunner,
@@ -55,6 +57,10 @@ class SandboxTestBase(unittest.TestCase):
 
     def _settings(self, **sandbox: object):
         settings = load_settings(self.home)
+        # The sandbox is off by default; these tests are about the sandbox, so
+        # they opt in unless a case says otherwise.
+        if "enabled" not in sandbox:
+            settings.data["sandbox"]["enabled"] = True
         settings.data["sandbox"].update(sandbox)
         return settings
 
@@ -116,12 +122,29 @@ class PathPolicyTests(SandboxTestBase):
         tools.write(str(shared / "ok.txt"), "ok\n")
         self.assertTrue((shared / "ok.txt").exists())
 
-    def test_disabled_sandbox_restores_legacy_outside_access(self) -> None:
-        target = self.outside / "legacy.txt"
+    def test_disabled_sandbox_keeps_the_workspace_boundary(self) -> None:
+        # `sandbox.enabled = false` disables command wrapping, not the path
+        # policy: otherwise --no-sandbox silently unlocks the whole filesystem.
         tools = self._tools(enabled=False)
-        tools.write(str(target), "legacy\n")
-        self.assertTrue(target.exists())
         self.assertFalse(tools.sandbox.policy.enabled)
+        target = self.outside / "legacy.txt"
+        with self.assertRaisesRegex(ToolError, "outside workspace"):
+            tools.write(str(target), "legacy\n")
+        self.assertFalse(target.exists())
+        with self.assertRaisesRegex(ToolError, "sensitive path"):
+            tools.read(".env")
+        tools.write("inside.txt", "ok\n")
+        self.assertEqual(
+            (self.workspace / "inside.txt").read_text(encoding="utf-8"), "ok\n"
+        )
+
+    def test_disabled_sandbox_still_honors_allow_outside_workspace(self) -> None:
+        settings = self._settings(enabled=False)
+        settings.data["tools"]["allow_outside_workspace"] = True
+        tools = ToolRuntime(settings, self.workspace, detect_shell())
+        target = self.outside / "explicit.txt"
+        tools.write(str(target), "explicit\n")
+        self.assertEqual(target.read_text(encoding="utf-8"), "explicit\n")
 
     def test_sensitive_paths_are_blocked_unless_enabled(self) -> None:
         (self.workspace / ".env").write_text("TOKEN=1\n", encoding="utf-8")
@@ -180,6 +203,22 @@ class NetworkPolicyTests(SandboxTestBase):
         result = tools.shell("echo sandbox-ok")
         self.assertEqual(result["status"], "success", result)
         self.assertIn("sandbox-ok", str(result["stdout"]))
+
+    def test_read_only_pip_subcommands_are_not_network_use(self) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "python -m pip show httpx2",
+            "python -m pip list",
+            "python -m pip --version",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command))
+        for command in (
+            "python -m pip install requests",
+            "python -m pip download requests",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command))
 
 
 class ExecutionBaselineTests(SandboxTestBase):
@@ -345,6 +384,35 @@ class BackendTests(SandboxTestBase):
         self.assertTrue(backends["local"])
         self.assertIn("bwrap", backends)
 
+    def test_docker_backend_is_not_advertised_on_windows(self) -> None:
+        # Docker Desktop on Windows cannot consume the `C:\ws:C:\ws` mount and
+        # workdir this backend builds, so availability must match the platform.
+        backend = DockerBackend()
+        if os.name == "nt":
+            self.assertFalse(backend.available())
+        else:
+            self.assertEqual(backend.available(), shutil.which("docker") is not None)
+
+    def test_docker_wrap_runs_as_the_invoking_user(self) -> None:
+        policy = SandboxPolicy.from_settings(
+            self._settings(backend="docker"), self.workspace
+        )
+        request = CommandRequest(
+            argv=("true",),
+            command="true",
+            shell_kind="sh",
+            shell_label="sh",
+            cwd=self.workspace,
+            temp_dir=None,
+            policy=policy,
+        )
+        wrapped = DockerBackend().wrap(request)
+        if hasattr(os, "getuid"):
+            self.assertEqual(
+                wrapped[wrapped.index("--user") + 1], f"{os.getuid()}:{os.getgid()}"
+            )
+        self.assertIn("none", wrapped)
+
 
 class SearchLeakTests(SandboxTestBase):
     def test_sensitive_files_are_not_returned_by_search(self) -> None:
@@ -425,10 +493,32 @@ class ConfigAndCliTests(SandboxTestBase):
             )
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertTrue(payload["enabled"])
+        # The execution layer is off unless settings or --sandbox enable it.
+        self.assertFalse(payload["enabled"])
         self.assertEqual(payload["network_policy"], "deny")
         self.assertIn("local", payload["available_backends"])
         self.assertEqual(payload["allowed_roots"], [str(self.workspace.resolve())])
+
+    def test_sandbox_defaults_to_off_and_flags_opt_in(self) -> None:
+        settings = load_settings(self.home)
+        self.assertFalse(settings.get("sandbox.enabled"))
+        args = _parser().parse_args([])
+        _apply_sandbox_overrides(settings, args)
+        self.assertFalse(settings.data["sandbox"]["enabled"])
+
+        args = _parser().parse_args(["--sandbox"])
+        _apply_sandbox_overrides(settings, args)
+        self.assertTrue(settings.data["sandbox"]["enabled"])
+
+        settings = load_settings(self.home)
+        args = _parser().parse_args(["--sandbox-timeout", "5"])
+        _apply_sandbox_overrides(settings, args)
+        self.assertTrue(settings.data["sandbox"]["enabled"])
+
+        settings = load_settings(self.home)
+        args = _parser().parse_args(["--no-sandbox", "--sandbox-timeout", "5"])
+        _apply_sandbox_overrides(settings, args)
+        self.assertFalse(settings.data["sandbox"]["enabled"])
 
     def test_status_exposes_sandbox_summary(self) -> None:
         from minimalcode.agent import Agent

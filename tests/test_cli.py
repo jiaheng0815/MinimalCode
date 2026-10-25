@@ -161,6 +161,45 @@ class CliTests(unittest.TestCase):
             settings = load_settings(home, require_file=True)
             self.assertEqual(settings.get("thinking"), "max")
 
+    def test_double_dash_keeps_subcommand_words_as_a_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = FakeCliProvider()
+            stdout = io.StringIO()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                patch("minimalcode.cli._management_command") as managed,
+                redirect_stdout(stdout),
+            ):
+                code = run(
+                    [
+                        "--json",
+                        "--no-session",
+                        "--home",
+                        str(home),
+                        "--cwd",
+                        str(workspace),
+                        "--",
+                        "init",
+                        "config",
+                        "show",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            managed.assert_not_called()
+            prompt = next(
+                message["content"]
+                for message in provider.messages
+                if message["role"] == "user"
+            )
+            self.assertEqual(prompt, "init config show")
+
     def test_config_set_model_and_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / ".MinimalCode"

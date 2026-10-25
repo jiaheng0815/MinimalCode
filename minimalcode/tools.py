@@ -80,10 +80,21 @@ for path in spec["files"]:
                 if not line:
                     break
                 number += 1
+                cut = len(line) >= spec["max_line_chars"] and not line.endswith(
+                    ("\n", "\r")
+                )
+                if cut:
+                    # Swallow the rest of this physical line so the next
+                    # readline starts a new line and `number` stays aligned
+                    # with the file instead of counting each fragment.
+                    while True:
+                        rest = handle.readline(spec["max_line_chars"])
+                        if not rest or rest.endswith(("\n", "\r")):
+                            break
                 if not regex.search(line):
                     continue
                 text = line.rstrip("\r\n")
-                if len(text) > spec["max_columns"]:
+                if cut or len(text) > spec["max_columns"]:
                     text = text[: spec["max_columns"]] + " [... omitted end of long line]"
                 matches.append(f"{path}:{number}:{text}")
                 if len(matches) >= spec["limit"]:
@@ -410,6 +421,14 @@ def _smart_case_ignore(pattern: str) -> bool:
     return not any(char.isupper() for char in literal)
 
 
+def _drain_physical_line(handle: Any, limit: int) -> None:
+    """Consume the rest of a line that was longer than ``limit``."""
+    while True:
+        rest = handle.readline(limit)
+        if not rest or rest.endswith(("\n", "\r")):
+            return
+
+
 def _run_bounded_command(
     command: list[str],
     *,
@@ -722,6 +741,18 @@ class ToolRuntime:
         self.shell_timeout = float(settings.get("shell.timeout_seconds", 120))
         self.max_output_chars = int(settings.get("shell.max_output_chars", 60_000))
         self.sandbox = SandboxRunner.from_settings(settings, self.cwd)
+        if self.sandbox.policy.enabled:
+            cap = self.sandbox.policy.timeout_seconds
+            if self.subagent_timeout > cap:
+                # A subagent is one sandboxed command, so the policy cap always
+                # wins. Clamp here so the value the tool reports is the value
+                # that actually applies, instead of silently killing the child
+                # at the sandbox timeout.
+                self.subagent_timeout = cap
+                self.sandbox.audit.note(
+                    "subagent.timeout_seconds capped by sandbox.timeout_seconds "
+                    f"({cap:g}s)"
+                )
 
     def _path(self, raw: str, *, operation: str = "read") -> Path:
         return self.sandbox.resolve_path(
@@ -771,11 +802,16 @@ class ToolRuntime:
                     break
                 number += 1
                 last_line = number
-                if number < start:
-                    continue
-                if stop is not None and number > stop:
-                    break
                 line_cut = len(line) >= line_limit and not line.endswith(("\n", "\r"))
+                if number < start or (stop is not None and number > stop):
+                    if line_cut:
+                        # Skip the rest of an over-long physical line so the
+                        # next readline starts a new line and the reported
+                        # numbers keep matching the file.
+                        _drain_physical_line(handle, line_limit)
+                    if stop is not None and number > stop:
+                        break
+                    continue
                 if line_cut:
                     truncated = True
                 rendered = f"{number:>6}\t{line.rstrip(chr(13) + chr(10))}\n"
@@ -992,7 +1028,11 @@ class ToolRuntime:
         )
         if math.isnan(requested_timeout):
             raise ToolError("timeout must be a number")
-        effective_timeout = max(1.0, min(requested_timeout, self.subagent_timeout))
+        limits = [requested_timeout, self.subagent_timeout]
+        if self.sandbox.policy.enabled:
+            # Only an active sandbox caps the child's runtime.
+            limits.append(self.sandbox.policy.timeout_seconds)
+        effective_timeout = max(1.0, min(limits))
         turns = self.subagent_max_turns if max_turns is None else max_turns
         if isinstance(turns, bool) or not isinstance(turns, int):
             raise ToolError("max_turns must be an integer")
@@ -1017,7 +1057,7 @@ class ToolRuntime:
             stdin_text=SUBAGENT_PREAMBLE + task.strip(),
             sandbox=self.sandbox,
         )
-        return {**result, "command": command}
+        return {**result, "command": command, "timeout_seconds": effective_timeout}
 
     def grep(
         self,
@@ -1084,7 +1124,9 @@ class ToolRuntime:
         return IGNORED_GLOBS
 
     def _sandbox_globs(self) -> tuple[str, ...]:
-        if not self.sandbox.policy.enabled or self.sandbox.policy.allow_sensitive_files:
+        # The sensitive-file filter is a path policy, not an execution setting,
+        # so it also applies when `sandbox.enabled` is false.
+        if self.sandbox.policy.allow_sensitive_files:
             return ()
         return SENSITIVE_SEARCH_GLOBS
 

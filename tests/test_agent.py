@@ -341,6 +341,138 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(reloaded.messages[-1]["role"], "tool")
             self.assertIn("interrupted", reloaded.messages[-1]["content"])
 
+    def test_repair_drops_orphan_and_duplicate_tool_results(self) -> None:
+        from minimalcode.agent import _repair_tool_history
+
+        messages = [
+            {"role": "tool", "tool_call_id": "ghost", "name": "read", "content": "x"},
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "a", "function": {"name": "read"}}],
+            },
+            {"role": "tool", "tool_call_id": "a", "name": "read", "content": "1"},
+            {"role": "tool", "tool_call_id": "a", "name": "read", "content": "2"},
+            {"role": "tool", "tool_call_id": "unknown", "name": "read", "content": "3"},
+        ]
+        repaired, changed = _repair_tool_history(messages)
+        self.assertTrue(changed)
+        self.assertEqual(
+            [item["role"] for item in repaired], ["user", "assistant", "tool"]
+        )
+        self.assertEqual(repaired[-1]["content"], "1")
+
+    def test_unexpected_tool_failure_becomes_a_tool_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            runtime = ToolRuntime(settings, workspace, shell)
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=runtime,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            with patch.object(runtime, "dispatch", side_effect=RuntimeError("boom")):
+                result = agent.run("write result.txt")
+
+            self.assertTrue(result.completed)
+            tool_message = session.messages[2]
+            self.assertEqual(tool_message["role"], "tool")
+            self.assertIn("boom", tool_message["content"])
+
+    def test_compaction_finds_a_boundary_without_a_user_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["context"]["keep_messages"] = 4
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            for index in range(8):
+                session.append_message(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {"id": f"c{index}", "function": {"name": "read"}}
+                        ],
+                    }
+                )
+                session.append_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"c{index}",
+                        "name": "read",
+                        "content": "r",
+                    }
+                )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            self.assertTrue(agent._compact(force=False))
+            self.assertEqual(session.messages[0]["role"], "user")
+            self.assertNotEqual(session.messages[2]["role"], "tool")
+
+    def test_should_compact_prefers_reported_prompt_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            agent.last_prompt_tokens = 90_000
+            with patch("minimalcode.agent.estimate_tokens") as estimate:
+                self.assertTrue(agent.should_compact())
+            estimate.assert_not_called()
+
+            agent.last_prompt_tokens = 0
+            with patch("minimalcode.agent.estimate_tokens", return_value=1) as estimate:
+                self.assertFalse(agent.should_compact())
+            estimate.assert_called_once()
+
     def test_streamed_markdown_is_highlighted_on_a_tty(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

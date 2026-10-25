@@ -62,7 +62,11 @@ def _parser() -> argparse.ArgumentParser:
         dest="sandbox_enabled",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable or disable the sandbox execution layer (--no-sandbox opts out)",
+        help=(
+            "Enable the sandbox execution layer (off by default). The workspace "
+            "and sensitive-file boundary applies either way; any --sandbox-* "
+            "option also enables it"
+        ),
     )
     parser.add_argument(
         "--sandbox-backend",
@@ -256,11 +260,26 @@ def _resolve_cwd(raw: str | None) -> Path:
     return resolved
 
 
+def _sandbox_tuning_requested(args: argparse.Namespace) -> bool:
+    """Return True when the CLI asked for sandbox behaviour, not just its state."""
+    if args.sandbox_backend or args.sandbox_root or args.sandbox_network:
+        return True
+    if args.sandbox_allow_host:
+        return True
+    if args.sandbox_timeout is not None or args.sandbox_max_output is not None:
+        return True
+    return args.sandbox_allow_sensitive is not None
+
+
 def _apply_sandbox_overrides(settings: Settings, args: argparse.Namespace) -> None:
     """Apply CLI sandbox flags on top of the loaded settings (in memory)."""
     sandbox = settings.data.setdefault("sandbox", {})
     if args.sandbox_enabled is not None:
         sandbox["enabled"] = args.sandbox_enabled
+    elif _sandbox_tuning_requested(args):
+        # The sandbox is off by default, so a flag that only tunes it would
+        # otherwise be a silent no-op.
+        sandbox["enabled"] = True
     if args.sandbox_backend is not None:
         sandbox["backend"] = args.sandbox_backend
     if args.sandbox_root:
@@ -495,9 +514,12 @@ def _interactive(
 
 def run(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
-    managed = _management_command(raw_args)
-    if managed is not None:
-        return managed
+    # `minimalcode -- init` is the prompt "init", not the subcommand: a bare
+    # management word is otherwise consumed before argparse ever sees it.
+    if "--" not in raw_args:
+        managed = _management_command(raw_args)
+        if managed is not None:
+            return managed
 
     parser = _parser()
     args = parser.parse_args(raw_args)

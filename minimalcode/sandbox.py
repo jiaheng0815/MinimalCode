@@ -139,9 +139,13 @@ _NETWORK_SEQUENCES = (
         r"\b(?:brew|dnf|yum|apk|pacman)\s+(?:install|add|upgrade)\b", re.IGNORECASE
     ),
     re.compile(r"\bdocker\s+(?:pull|push|login|run)\b", re.IGNORECASE),
+    # `python -m pip show/list` and friends are read-only; only the subcommands
+    # that actually reach an index are treated as network use.
     re.compile(
-        r"\bpython[0-9.]*\s+-m\s+(?:pip|http\.server|requests)\b", re.IGNORECASE
+        r"\bpython[0-9.]*\s+-m\s+pip\b[^|;&\n]*?\b(?:install|download|search|index)\b",
+        re.IGNORECASE,
     ),
+    re.compile(r"\bpython[0-9.]*\s+-m\s+(?:http\.server|requests)\b", re.IGNORECASE),
     re.compile(r"\b(?:requests|urllib|httpx|socket)\.", re.IGNORECASE),
 )
 _URL_PATTERN = re.compile(r"\b(?:https?|ftps?)://([^\s'\"`/?#]+)", re.IGNORECASE)
@@ -269,7 +273,7 @@ class SandboxPolicy:
                 {key: value for key, value in overrides.items() if value is not None}
             )
 
-        enabled = data.get("enabled", True)
+        enabled = data.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ConfigError("sandbox.enabled must be a boolean")
         backend = data.get("backend", "local")
@@ -580,7 +584,10 @@ class DockerBackend(SandboxBackend):
     capabilities = frozenset({"shell", "filesystem", "network"})
 
     def available(self) -> bool:
-        return shutil.which("docker") is not None
+        # Docker Desktop on Windows cannot mount drive-letter paths the way this
+        # backend builds them (`C:\ws:C:\ws`), so claiming availability there
+        # would produce a confusing failure after the policy said it was usable.
+        return os.name != "nt" and shutil.which("docker") is not None
 
     def wrap(self, request: CommandRequest) -> list[str]:
         if not request.command:
@@ -599,6 +606,11 @@ class DockerBackend(SandboxBackend):
             "--network",
             network,
         ]
+        user = _docker_user()
+        if user is not None:
+            # Containers run as root by default, which would leave root-owned
+            # files in the mounted workspace.
+            argv.extend(["--user", user])
         mounted: set[str] = set()
         for root in request.policy.write_roots(request.cwd):
             text = str(root)
@@ -620,6 +632,18 @@ class DockerBackend(SandboxBackend):
 
     def temp_path(self, request: CommandRequest) -> str | None:
         return "/tmp" if request.temp_dir is not None else None
+
+
+def _docker_user() -> str | None:
+    """Return the ``uid:gid`` the container should write files as, if known."""
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is None or getgid is None:  # pragma: no cover - Windows
+        return None
+    try:
+        return f"{getuid()}:{getgid()}"
+    except OSError:  # pragma: no cover - defensive
+        return None
 
 
 def _auto_backend() -> SandboxBackend:
@@ -999,7 +1023,13 @@ class SandboxRunner:
         operation: str = "read",
         allow_outside: bool = False,
     ) -> Path:
-        """Resolve a tool path and enforce roots and sensitive-file policy."""
+        """Resolve a tool path and enforce roots and sensitive-file policy.
+
+        ``sandbox.enabled`` only governs how *commands* are executed. The
+        filesystem boundary and the sensitive-file filter stay in force even
+        when the execution layer is disabled, so ``--no-sandbox`` cannot
+        silently turn every file tool into an unrestricted one.
+        """
         if not isinstance(raw, (str, Path)) or (
             isinstance(raw, str) and not raw.strip()
         ):
@@ -1011,8 +1041,6 @@ class SandboxRunner:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError, ValueError) as exc:
             raise ToolError(f"invalid path: {raw}") from exc
-        if not self.policy.enabled:
-            return resolved
         if not allow_outside and not self.policy.contains(resolved):
             reason = "path escapes the sandbox allowed roots"
             self.audit.deny(operation, str(resolved), reason)
@@ -1036,8 +1064,6 @@ class SandboxRunner:
         allow_outside: bool = False,
     ) -> bool:
         """Non-raising variant used to filter bulk search results."""
-        if not self.policy.enabled:
-            return True
         try:
             resolved = Path(path).resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
@@ -1064,6 +1090,7 @@ class SandboxRunner:
             "recent_denials": [
                 denial.as_dict() for denial in self.audit.denials()[-5:]
             ],
+            "notes": self.audit.notes()[-5:],
             "last_temp_cleaned": self.last_temp_cleaned,
         }
 

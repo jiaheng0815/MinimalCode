@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx2
 
@@ -204,6 +205,82 @@ class ProviderTests(unittest.TestCase):
                 model="x",
                 thinking="off",
             )
+
+    def test_disconnect_without_a_response_is_retried(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 3:
+                raise httpx2.RemoteProtocolError(
+                    "Server disconnected without sending a response."
+                )
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "recovered"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        notices: list[str] = []
+        provider.notify = notices.append
+        try:
+            with patch("minimalcode.provider.time.sleep") as sleep:
+                reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "recovered")
+        self.assertEqual(attempts, 4)
+        self.assertEqual(sleep.call_count, 3)
+        self.assertEqual(len(notices), 3)
+        self.assertTrue(notices[0].startswith("[retry]"))
+        self.assertIn("1/10", notices[0])
+
+    def test_disconnect_is_retried_ten_times_then_reported(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            raise httpx2.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                patch("minimalcode.provider.time.sleep") as sleep,
+                self.assertRaises(ProviderError) as context,
+            ):
+                provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(attempts, 11)
+        self.assertEqual(sleep.call_count, 10)
+        self.assertIn("Server disconnected", str(context.exception))
+        # The retry backoff is bounded, so a stuck provider cannot hang the turn.
+        self.assertLessEqual(max(call.args[0] for call in sleep.call_args_list), 8.0)
 
     def test_http_error_reports_status_and_body(self) -> None:
         def handler(request: httpx2.Request) -> httpx2.Response:

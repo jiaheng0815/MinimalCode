@@ -114,17 +114,17 @@ def _repair_tool_history(
     def flush_block() -> None:
         nonlocal changed, call_order, call_names, block_results
         if call_order is None:
-            repaired.extend(block_results)
             block_results = []
             return
         by_id: dict[str, dict[str, Any]] = {}
-        extras: list[dict[str, Any]] = []
         for result in block_results:
             call_id = str(result.get("tool_call_id") or "")
             if call_id in call_names and call_id not in by_id:
                 by_id[call_id] = result
             else:
-                extras.append(result)
+                # A result for an unknown or already answered call id makes
+                # most providers reject the whole request; drop it.
+                changed = True
         for call_id in call_order:
             result = by_id.get(call_id)
             if result is not None:
@@ -132,7 +132,6 @@ def _repair_tool_history(
             else:
                 repaired.append(synthetic_result(call_id, call_names[call_id]))
                 changed = True
-        repaired.extend(extras)
         call_order = None
         call_names = {}
         block_results = []
@@ -143,6 +142,11 @@ def _repair_tool_history(
             flush_block()
         if role == "tool" and call_order is not None:
             block_results.append(dict(message))
+            continue
+        if role == "tool":
+            # Orphan result: no assistant tool_calls precedes it, so replaying
+            # it is a protocol error for every OpenAI-compatible server.
+            changed = True
             continue
         repaired.append(dict(message))
         if role == "assistant" and isinstance(message.get("tool_calls"), list):
@@ -168,6 +172,30 @@ class AgentResult:
     completed: bool
     usage: dict[str, int] = field(default_factory=dict)
     turns: int = 0
+
+
+def _compaction_boundary(messages: list[dict[str, Any]], target: int) -> int | None:
+    """Return an index that keeps ``messages[index:]`` replayable.
+
+    A cut may only land before a message that does not belong to a tool-call
+    block, otherwise the kept tail starts with an orphan tool result.
+    """
+    for index in range(target, 0, -1):
+        if messages[index].get("role") == "user":
+            return index
+    # Some session files start mid-turn; fall forward to the next user message
+    # so compaction can still make progress instead of silently never running.
+    for index in range(target + 1, len(messages)):
+        if messages[index].get("role") == "user":
+            return index
+    for index in range(target, 0, -1):
+        if messages[index].get("role") == "tool":
+            continue
+        previous = messages[index - 1]
+        if previous.get("role") == "assistant" and previous.get("tool_calls"):
+            continue
+        return index
+    return None
 
 
 class Agent:
@@ -202,6 +230,10 @@ class Agent:
         self.error_output = error_output or sys.stderr
         self.quiet = quiet
         self.stream_output = stream_output
+        # Retry notices travel through the activity stream, so --quiet and
+        # --json stay silent while an interactive turn shows the retries.
+        if hasattr(self.provider, "notify"):
+            self.provider.notify = self._activity
         highlight_enabled = (
             bool(settings.get("output.markdown_highlight", True))
             if markdown_highlight is None
@@ -310,6 +342,11 @@ class Agent:
             return self.tools.dispatch(name, arguments)
         except (ToolError, OSError, TypeError, ValueError) as exc:
             return {"status": "error", "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - a bad tool must not end the turn
+            # Any unexpected failure inside a handler is still reported to the
+            # model as a tool result; re-raising would abort the whole turn and
+            # leave the user message without an answer.
+            return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
 
     def run(self, user_text: str) -> AgentResult:
         if not user_text.strip():
@@ -422,7 +459,12 @@ class Agent:
     def should_compact(self) -> bool:
         threshold = float(self.settings.get("context.compact_at", 0.8))
         window = max(1, self.provider.context_window)
-        current = max(self.last_prompt_tokens, estimate_tokens(self._messages()))
+        # Re-serializing the whole history on every turn is O(n^2) over a long
+        # session; the provider-reported prompt size is the better signal and is
+        # only missing before the first reply or right after a compaction.
+        current = self.last_prompt_tokens
+        if current <= 0:
+            current = estimate_tokens(self._messages())
         return current >= int(window * threshold)
 
     def _compact(self, *, force: bool) -> bool:
@@ -432,15 +474,11 @@ class Agent:
             return False
 
         target = len(messages) - keep
-        cut = None
-        for index in range(target, 0, -1):
-            if messages[index].get("role") == "user":
-                cut = index
-                break
+        cut = _compaction_boundary(messages, target)
         if cut is None:
             if not force:
                 return False
-            raise RuntimeError("cannot compact: no safe user-message boundary found")
+            raise RuntimeError("cannot compact: no safe message boundary found")
 
         old_messages = messages[:cut]
         transcript = self._transcript(old_messages)

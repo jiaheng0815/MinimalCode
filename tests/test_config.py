@@ -31,7 +31,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(created.get("model"), "deepseek-flash")
             self.assertTrue(created.get("output.markdown_highlight"))
             self.assertEqual(created.get("output.theme"), "dark")
-            self.assertTrue(created.get("sandbox.enabled"))
+            self.assertFalse(created.get("sandbox.enabled"))
             self.assertEqual(created.get("sandbox.network_policy"), "deny")
             self.assertFalse(created.get("sandbox.allow_sensitive_files"))
             _, provider = created.provider_config()

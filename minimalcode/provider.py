@@ -126,6 +126,25 @@ def _decode_json_body(body: bytes) -> tuple[bool, Any]:
         return False, None
 
 
+# A request that never produced a response is safe to repeat: the provider did
+# not start a billable generation, so a dropped keep-alive or a proxy reset is
+# worth retrying. Failures after the body started streaming are not retried,
+# because the answer may already have been shown or billed.
+_RETRYABLE_CONNECTION_ERRORS = (
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.RemoteProtocolError,
+)
+_CONNECTION_ATTEMPTS = 11  # the first try plus 10 retries
+_CONNECTION_BACKOFF_SECONDS = 0.5
+_CONNECTION_BACKOFF_CAP_SECONDS = 8.0
+
+
+def _connection_backoff(attempt: int) -> float:
+    delay = _CONNECTION_BACKOFF_SECONDS * (2**attempt)
+    return min(delay, _CONNECTION_BACKOFF_CAP_SECONDS)
+
+
 def _stream_event_error(event: dict[str, Any]) -> ProviderError:
     error = event.get("error")
     if isinstance(error, dict):
@@ -183,6 +202,9 @@ class OpenAICompatibleProvider:
         self.stream_enabled = bool(config.get("stream", True))
         self.include_usage = bool(config.get("include_usage", True))
         self.send_reasoning_effort = bool(config.get("send_reasoning_effort", False))
+        # Optional sink for retry notices; the agent points this at its activity
+        # stream so ten silent retries do not look like a hang.
+        self.notify: Callable[[str], None] | None = None
 
         api_key = provider_api_key(config)
         key_env = config.get("api_key_env")
@@ -374,26 +396,31 @@ class OpenAICompatibleProvider:
         return reply.content
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
+        stream = bool(payload.get("stream"))
         last_error: ProviderError | None = None
-        for attempt in range(2):
+        connection_attempt = 0
+        status_retried = False
+        while True:
             try:
                 request = self._client.build_request(
                     "POST", self._endpoint(), json=payload
                 )
-                response = self._client.send(
-                    request, stream=bool(payload.get("stream"))
-                )
+                response = self._client.send(request, stream=stream)
             except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
-                # Only a connection that never opened is safe to retry: a
-                # read/write failure may mean the provider already consumed the
-                # request and started a billable generation.
-                retryable = isinstance(
-                    exc, (httpx2.ConnectError, httpx2.ConnectTimeout)
-                )
-                if attempt or not retryable:
+                connection_attempt += 1
+                if connection_attempt >= _CONNECTION_ATTEMPTS or not isinstance(
+                    exc, _RETRYABLE_CONNECTION_ERRORS
+                ):
                     break
-                time.sleep(0.5)
+                delay = _connection_backoff(connection_attempt - 1)
+                if self.notify is not None:
+                    self.notify(
+                        "[retry] provider did not respond; attempt "
+                        f"{connection_attempt}/{_CONNECTION_ATTEMPTS - 1} "
+                        f"in {delay:g}s ({exc})"
+                    )
+                time.sleep(delay)
                 continue
             if response.status_code < 400:
                 return response
@@ -417,8 +444,9 @@ class OpenAICompatibleProvider:
                 )
             finally:
                 response.close()
-            if status_code not in {429, 503} or attempt:
+            if status_code not in {429, 503} or status_retried:
                 break
+            status_retried = True
             try:
                 delay = min(max(float(retry_after), 0.2), 5.0)
             except ValueError:

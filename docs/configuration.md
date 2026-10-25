@@ -68,16 +68,18 @@ same cleanup path.
 ## Sandbox
 
 Every tool that resolves a path or spawns a process goes through the single
-`SandboxRunner` entry point in `minimalcode/sandbox.py`. The layer is
-fail-closed: a path outside the allowed roots, a credential-like file, a denied
-network command, or an unavailable backend is refused instead of quietly
-falling back to unsandboxed execution. Denials are recorded with their reason in
-`SandboxAudit`, surfaced in tool errors and `/status`, and summarized by
+`SandboxRunner` entry point in `minimalcode/sandbox.py`. The execution layer is
+off by default (`--no-sandbox`), so only the filesystem policy applies out of the
+box; enable it with `--sandbox` or `sandbox.enabled: true`. When enabled, the
+layer is fail-closed: a path outside the allowed roots, a credential-like file,
+a denied network command, or an unavailable backend is refused instead of
+quietly falling back to unsandboxed execution. Denials are recorded with their
+reason in `SandboxAudit`, surfaced in tool errors and `/status`, and summarized by
 `minimalcode sandbox` together with backend availability.
 
 | Key | Default | Meaning |
 |---|---|---:|
-| `enabled` | `true` | Enforce path, network, timeout, output, and resource policy |
+| `enabled` | `false` | Enforce network, timeout, output, and resource policy (the path policy always applies) |
 | `backend` | `"local"` | `auto`, `local`, `bwrap`, `firejail`, `sandbox-exec`, or `docker` |
 | `allowed_roots` | `[]` | Extra readable/writable roots; relative entries resolve against the workspace. The workspace is always allowed |
 | `network_policy` | `"deny"` | `deny`, `allowlist`, or `allow` |
@@ -91,12 +93,14 @@ falling back to unsandboxed execution. Denials are recorded with their reason in
 
 `allowed_roots` and sensitive-file checks apply to `read`, `write`, `edit`,
 `grep`, `find`, `read_image`, and to `shell`/`subagent` working directories and
-their resolved symlinks. Symlinks are resolved before the check, so a link that
-points outside the workspace is refused. Sensitive names are blocked in both
+their resolved symlinks, whether or not the execution layer is enabled. Symlinks
+are resolved before the check, so a link that points outside the workspace is
+refused. Sensitive names are blocked in both
 directions and excluded from bulk searches; `.env.example` and similar templates
 remain readable.
 
-`network_policy` has three distinct meanings:
+`network_policy`, the command timeout/output caps, and the resource limits only
+apply while the execution layer is enabled:
 
 - `deny` (default): filesystem/namespace backends (`bwrap`, `firejail`,
   `sandbox-exec`, `docker`) remove network access. The `local` baseline has no
@@ -106,18 +110,22 @@ remain readable.
   target host cannot be determined are refused. At least one host is required.
 - `allow`: no network restriction.
 
-Backends are probed at execution time. `auto` picks the first available of
-`bwrap`, `firejail`, `sandbox-exec`, then `local`; the default is `local`.
-Selecting a backend that is not installed refuses to run the command (it never
-silently downgrades). Path and sensitive-file policy is enforced in-process, so
-file tools stay usable even when a command backend is unavailable; only command
+Backends are probed at execution time, which only happens when the layer is
+enabled. `auto` picks the first available of `bwrap`, `firejail`,
+`sandbox-exec`, then `local`; the default is `local`. Selecting a backend that is
+not installed refuses to run the command (it never silently downgrades). Path and
+sensitive-file policy is enforced in-process, so file tools stay usable even when
+the execution layer is off or a command backend is unavailable; only command
 execution is gated by the backend.
 `bwrap` isolates namespaces and mounts the workspace/allowed roots read-write
 with the rest of the filesystem read-only. `firejail` adds a private temp
 directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies
 network traffic for `deny`. `docker` runs `sh -lc` in the configured image with
 the workspace mounted and no host environment; it refuses argv-based search
-children, so `grep`/`find` fall back to the in-process Python scanner.
+children, so `grep`/`find` fall back to the in-process Python scanner. The
+`docker` backend is POSIX-host only (Docker Desktop cannot consume the
+`C:\ws:C:\ws` mount this backend builds) and runs the container as the invoking
+`uid:gid`, so workspace files do not end up owned by root.
 
 The local baseline enforces the timeout and output caps on every platform,
 kills the process tree on timeout, and runs children with a private temporary
@@ -131,7 +139,7 @@ under a 2 GB cap even when their real usage is small.
 CLI overrides (all optional):
 
 ```text
---sandbox / --no-sandbox
+--sandbox / --no-sandbox      (the default is --no-sandbox)
 --sandbox-backend auto|local|bwrap|firejail|sandbox-exec|docker
 --sandbox-root PATH          (repeatable)
 --sandbox-network deny|allowlist|allow
@@ -141,10 +149,14 @@ CLI overrides (all optional):
 --sandbox-allow-sensitive / --no-sandbox-allow-sensitive
 ```
 
+Any `--sandbox-*` tuning flag also enables the layer, so `--sandbox-timeout 30`
+is not a silent no-op; an explicit `--no-sandbox` still wins.
+
 `tools.allow_outside_workspace` remains an explicit legacy escape hatch: when
 set, it bypasses the root confinement but still applies sensitive-file and
-network policy. With the sandbox disabled entirely, path checking reverts to the
-old workspace-only behaviour.
+network policy. The execution layer being off does not change path handling: the
+root confinement and the sensitive-file filter always stay in force, because a
+toggle meant for command wrapping must not silently unlock every file tool.
 
 Known limits: the `local` baseline is a policy and resource layer, not an
 OS-level filesystem jail, and its network gate is a command-string heuristic
@@ -170,12 +182,15 @@ protocol: the child is spawned through the configured shell.
 | `enabled` | `true` | Offer the `subagent` tool at all |
 | `max_depth` | `2` | Maximum nesting level; a child at this depth no longer receives the tool |
 | `max_turns` | `40` | Default and maximum model/tool rounds for one child |
-| `timeout_seconds` | `900` | Default and maximum runtime for one child |
+| `timeout_seconds` | `900` | Default and maximum runtime for one child, further capped by `sandbox.timeout_seconds` while the execution layer is enabled |
 
 The child inherits the parent's `--home`, provider, model, reasoning effort, and
 workspace. The task text is piped through stdin, so it never appears on the
 command line. The child runs with `-p --no-session --quiet`: it prints only its
-final answer and leaves no session files behind.
+final answer and leaves no session files behind. Because a child is one command,
+its runtime is also bounded by `sandbox.timeout_seconds` while the execution layer
+is enabled: when the subagent budget is larger, the tool clamps to the sandbox cap
+and records the reason in the sandbox notes.
 
 ## Context
 
@@ -221,6 +236,14 @@ Values containing `${VAR}` placeholders are expanded later, so they are checked
 again when that provider becomes active.
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`.
+
+Requests that fail before a response is received (`ConnectError`, `ConnectTimeout`,
+and `RemoteProtocolError` such as `Server disconnected without sending a
+response.`) are retried 10 times with an exponential backoff from 0.5 s up to
+8 s. A stream that already delivered data is not retried, so a partial answer is
+never printed twice or billed twice; HTTP 429/503 keeps its single `Retry-After`
+retry. Retry notices go to the tool activity stream, so `--quiet` and `--json`
+stay silent.
 
 For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}` (`none` disables thinking); reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`. For `openai_chat`, it sends `reasoning_effort`; `none` instead sends `{"thinking":{"type":"disabled"}}`.
 

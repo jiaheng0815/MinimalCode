@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from minimalcode.config import load_settings
 from minimalcode.shell import detect_shell
-from minimalcode.tools import ToolError, ToolRuntime
+from minimalcode.tools import ToolError, ToolRuntime, _run_python_grep
 
 
 class ToolTests(unittest.TestCase):
@@ -47,6 +47,30 @@ class ToolTests(unittest.TestCase):
         self.assertIn("line-150", result["content"])
         self.assertNotIn("line-149", result["content"])
         self.assertTrue(result["truncated"])
+
+    def test_read_keeps_line_numbers_after_an_oversized_line(self) -> None:
+        # A physical line longer than the per-line cap used to be counted once
+        # per fragment, so every later line number was wrong.
+        self.tools.write("minified.js", "x" * 5000 + "\nsecond\n")
+        self.tools.max_file_chars = 200
+        result = self.tools.read("minified.js", start_line=2)
+        self.assertEqual(result["start_line"], 2)
+        self.assertIn("second", result["content"])
+
+    def test_python_grep_numbers_lines_after_an_oversized_line(self) -> None:
+        # The child-process fallback read a >1 MB line in capped fragments and
+        # counted each fragment, reporting the match one line too late.
+        target = self.workspace / "minified.js"
+        target.write_text("y" * 1_200_000 + "\nneedle\n", encoding="utf-8")
+        result = _run_python_grep(
+            pattern="needle",
+            files=[target],
+            limit=5,
+            max_bytes=5_000_000,
+            cwd=self.workspace,
+        )
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertTrue(result["matches"][0].endswith(":2:needle"))
 
     def test_read_returns_prefix_of_oversized_first_line(self) -> None:
         self.tools.write("minified.js", "x" * 5000 + "\nshort\n")

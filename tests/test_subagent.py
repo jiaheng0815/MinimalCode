@@ -109,10 +109,47 @@ class SubagentToolTests(unittest.TestCase):
             "minimalcode.tools.run_shell",
             return_value={"status": "success", "exit_code": 0},
         ) as run:
-            self.tools.subagent("review", timeout=3600, max_turns=500)
+            result = self.tools.subagent("review", timeout=3600, max_turns=500)
         command = run.call_args.args[0]
         self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertEqual(result["timeout_seconds"], 60)
         self.assertIn("--max-turns '5'", command)
+
+    def test_timeout_is_capped_by_the_sandbox_policy(self) -> None:
+        # A subagent is one sandboxed command, so sandbox.timeout_seconds wins;
+        # the value reported back must be the one that really applies.
+        self.settings.data["sandbox"]["enabled"] = True
+        self.settings.data["sandbox"]["timeout_seconds"] = 45
+        self.settings.data["subagent"]["timeout_seconds"] = 900
+        tools = ToolRuntime(self.settings, self.workspace, detect_shell())
+        self.assertEqual(tools.subagent_timeout, 45)
+        with patch(
+            "minimalcode.tools.run_shell",
+            return_value={"status": "success", "exit_code": 0},
+        ) as run:
+            result = tools.subagent("review")
+        self.assertEqual(run.call_args.kwargs["timeout"], 45)
+        self.assertEqual(result["timeout_seconds"], 45)
+        self.assertTrue(
+            any(
+                "subagent.timeout_seconds" in note
+                for note in tools.sandbox.audit.notes()
+            )
+        )
+
+    def test_disabled_sandbox_does_not_cap_the_subagent(self) -> None:
+        self.settings.data["sandbox"]["enabled"] = False
+        self.settings.data["sandbox"]["timeout_seconds"] = 45
+        self.settings.data["subagent"]["timeout_seconds"] = 900
+        tools = ToolRuntime(self.settings, self.workspace, detect_shell())
+        self.assertEqual(tools.subagent_timeout, 900)
+        with patch(
+            "minimalcode.tools.run_shell",
+            return_value={"status": "success", "exit_code": 0},
+        ) as run:
+            result = tools.subagent("review")
+        self.assertEqual(run.call_args.kwargs["timeout"], 900)
+        self.assertEqual(result["timeout_seconds"], 900)
 
     def test_nested_subagents_are_refused_at_the_depth_limit(self) -> None:
         with patch.dict(os.environ, {DEPTH_ENV: "2"}, clear=False):
