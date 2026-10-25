@@ -20,7 +20,6 @@ _PALETTES = {
         "italic": "\x1b[3;38;5;250m",
         "strike": "\x1b[9;38;5;245m",
         "inline_code": "\x1b[38;5;222;48;5;236m",
-        "fence": "\x1b[38;5;108m",
         "code_comment": "\x1b[3;38;5;244m",
         "code_string": "\x1b[38;5;186m",
         "code_number": "\x1b[38;5;141m",
@@ -44,7 +43,6 @@ _PALETTES = {
         "italic": "\x1b[3;38;5;238m",
         "strike": "\x1b[9;38;5;240m",
         "inline_code": "\x1b[38;5;166;48;5;254m",
-        "fence": "\x1b[38;5;66m",
         "code_comment": "\x1b[3;38;5;244m",
         "code_string": "\x1b[38;5;130m",
         "code_number": "\x1b[38;5;91m",
@@ -121,6 +119,8 @@ _KEYWORDS = {
 }
 _KEYWORD_RE = re.compile(r"\b(?:" + "|".join(sorted(_KEYWORDS)) + r")\b")
 _RULE_RE = re.compile(r"([*_-])(?:[ \t]*\1){2,}")
+_TABLE_SEPARATOR_RE = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?")
+_TABLE_SEPARATOR_PREFIX_RE = re.compile(r"[ \t|:-]+")
 
 
 def strip_ansi(text: str) -> str:
@@ -191,6 +191,7 @@ class MarkdownHighlighter:
         self._line_kind = "normal"
         self._heading_level = 0
         self._inline_mode: str | None = None
+        self._line_indent = 0
         self._in_fence = False
         self._fence_char = ""
         self._fence_length = 0
@@ -230,7 +231,7 @@ class MarkdownHighlighter:
     ) -> None:
         while self._cursor < len(self._pending):
             if self._in_fence and self._at_line_start:
-                if not self._consume_code_line_start(segments, final=final):
+                if not self._consume_code_line_start(final=final):
                     break
             elif self._at_line_start:
                 if not self._consume_line_start(segments, final=final):
@@ -254,19 +255,22 @@ class MarkdownHighlighter:
         body_start = start
         while body_start < len(text) and text[body_start] == " ":
             body_start += 1
-        leading = body_start - start
+        if body_start > start:
+            # Hold the indentation until the line kind is known. A filtered
+            # `| --- |` row has to take its own indentation with it, and the
+            # cursor still moves forward so later deltas never rescan it.
+            self._line_indent += body_start - start
+            self._advance(body_start - start)
         if body_start >= len(text):
             if not final:
-                # Emit the scanned indentation now so the next delta resumes at the
-                # first non-space byte instead of rescanning the whole prefix.
-                self._emit(segments, body_start, None)
                 return False
-            self._emit(segments, body_start, None)
+            self._flush_indent(segments)
             self._at_line_start = False
             return True
 
         if text.startswith(("\r\n", "\n"), body_start):
             ending = 2 if text.startswith("\r\n", body_start) else 1
+            self._flush_indent(segments)
             self._emit(segments, body_start + ending, None)
             self._end_line()
             return True
@@ -283,6 +287,7 @@ class MarkdownHighlighter:
                 # split across deltas, so wait for the next non-'#' character.
                 return False
             if level <= 6 and (level_end == len(text) or text[level_end].isspace()):
+                self._flush_indent(segments)
                 if level_end == len(text):
                     # The stream ended inside the marker; print it rather than
                     # swallowing the only characters the model produced.
@@ -302,6 +307,7 @@ class MarkdownHighlighter:
                 return True
 
         if first == ">":
+            self._flush_indent(segments)
             self._emit(segments, body_start + 1, self.palette["quote"])
             self._line_kind = "quote"
             self._at_line_start = False
@@ -314,6 +320,7 @@ class MarkdownHighlighter:
                 if line_end < 0 and not final:
                     return False
                 consumed = len(text) if line_end < 0 else line_end + 1
+                self._flush_indent(segments)
                 self._emit(segments, consumed, self.palette["rule"])
                 self._end_line()
                 return True
@@ -327,6 +334,7 @@ class MarkdownHighlighter:
                 if not final:
                     return False
             elif text[body_start + 1].isspace():
+                self._flush_indent(segments)
                 self._emit(segments, body_start + 1, self.palette["bullet"])
                 self._emit(segments, body_start + 2, None)
                 self._line_kind = "list"
@@ -346,6 +354,7 @@ class MarkdownHighlighter:
         else:
             marker_end = 0
         if marker_end and marker_end < len(text) and text[marker_end].isspace():
+            self._flush_indent(segments)
             self._emit(segments, marker_end, self.palette["bullet"])
             self._line_kind = "list"
             self._at_line_start = False
@@ -358,7 +367,24 @@ class MarkdownHighlighter:
         ):
             return False
 
+        if first in "|-:":
+            line_end = text.find("\n", body_start)
+            line = text[body_start:] if line_end < 0 else text[body_start:line_end]
+            if line_end < 0 and not final:
+                if "|" in line and _TABLE_SEPARATOR_PREFIX_RE.fullmatch(line):
+                    # Still only separator characters, so this row may yet turn
+                    # into `| --- |`; wait for the rest of it before deciding.
+                    return False
+            elif "|" in line and _TABLE_SEPARATOR_RE.fullmatch(line.strip()):
+                # Drop the `| --- |` row wholesale, indentation included, instead
+                # of printing a wall of dashes and pipes between header and body.
+                self._line_indent = 0
+                self._advance(line_end + 1 - self._cursor)
+                self._end_line()
+                return True
+
         if first == "|":
+            self._flush_indent(segments)
             self._emit(segments, body_start + 1, self.palette["rule"])
             self._line_kind = "table"
             self._at_line_start = False
@@ -374,7 +400,10 @@ class MarkdownHighlighter:
                 if line_end < 0 and not final:
                     return False
                 consumed = len(text) if line_end < 0 else line_end + 1
-                self._emit(segments, consumed, self.palette["fence"])
+                # Hide the opening fence (```python) so only the code body is
+                # rendered, the same way `**bold**` drops its delimiters.
+                self._line_indent = 0
+                self._advance(consumed - self._cursor)
                 self._in_fence = True
                 self._fence_char = first
                 self._fence_length = marker_length
@@ -383,8 +412,7 @@ class MarkdownHighlighter:
             if marker_length == len(text) - body_start and not final:
                 return False
 
-        if leading:
-            self._emit(segments, body_start, None)
+        self._flush_indent(segments)
         self._line_kind = "normal"
         self._at_line_start = False
         return True
@@ -626,7 +654,6 @@ class MarkdownHighlighter:
 
     def _consume_code_line_start(
         self,
-        segments: list[tuple[str | None, list[str]]],
         *,
         final: bool,
     ) -> bool:
@@ -648,7 +675,8 @@ class MarkdownHighlighter:
                 and (line_end >= 0 or final)
             ):
                 consumed = len(text) if line_end < 0 else line_end + 1
-                self._emit(segments, consumed, self.palette["fence"])
+                # Hide the closing fence too, so no stray ``` follows the code.
+                self._advance(consumed - self._cursor)
                 self._in_fence = False
                 self._end_line()
                 return True
@@ -772,6 +800,15 @@ class MarkdownHighlighter:
         self._cursor += count
         self._previous = self._pending[self._cursor - 1]
 
+    def _flush_indent(
+        self,
+        segments: list[tuple[str | None, list[str]]],
+    ) -> None:
+        indent = self._line_indent
+        self._line_indent = 0
+        if indent:
+            self._append(segments, " " * indent, None)
+
     def _emit(
         self,
         segments: list[tuple[str | None, list[str]]],
@@ -788,6 +825,7 @@ class MarkdownHighlighter:
         self._line_kind = "normal"
         self._heading_level = 0
         self._inline_mode = None
+        self._line_indent = 0
         self._reset_code_line()
 
     def _reset_code_line(self) -> None:
@@ -805,6 +843,7 @@ class MarkdownHighlighter:
         self._line_kind = "normal"
         self._heading_level = 0
         self._inline_mode = None
+        self._line_indent = 0
         self._in_fence = False
         self._fence_char = ""
         self._fence_length = 0

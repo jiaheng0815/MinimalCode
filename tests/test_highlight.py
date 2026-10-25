@@ -32,12 +32,9 @@ Use bold, italic, old text and inline code.
 > quoted text
 
 | Feature | State |
-|---|---|
 | highlight | ready |
 
-```python
 print("hello")  # a comment
-```
 """
 
 
@@ -130,7 +127,7 @@ class HighlightTests(unittest.TestCase):
     def test_fence_markers_can_be_split_across_deltas(self) -> None:
         stream = io.StringIO()
         highlighter = MarkdownHighlighter(stream, color=True)
-        sample = "```python\nprint('ok')\n```\n"
+        sample = "print('ok')\n"
         for delta in ("`", "`", "`python\nprint('ok')\n", "`", "`", "`\n"):
             highlighter.feed(delta)
         highlighter.finish()
@@ -215,7 +212,7 @@ class HighlightTests(unittest.TestCase):
     def test_crlf_and_unclosed_fence_are_preserved(self) -> None:
         sample = "# Title\r\n\r\n```text\r\nplain\r\n"
         rendered = _render(sample, io.StringIO(), color=True)
-        self.assertEqual(strip_ansi(rendered), "Title\r\n\r\n```text\r\nplain\r\n")
+        self.assertEqual(strip_ansi(rendered), "Title\r\n\r\nplain\r\n")
 
     def test_trailing_backslash_is_preserved(self) -> None:
         for size in (1, 2, 3, len("path\\")):
@@ -228,6 +225,50 @@ class HighlightTests(unittest.TestCase):
                 highlighter.finish()
                 self.assertEqual(strip_ansi(stream.getvalue()), sample)
 
+    def test_fence_lines_are_hidden(self) -> None:
+        sample = "before\n\n```python\nprint(1)\nprint(2)\n```\n\nafter\n"
+        expected = "before\n\nprint(1)\nprint(2)\n\nafter\n"
+        for size in (1, 2, 3, 7, len(sample)):
+            with self.subTest(size=size):
+                rendered = _render(sample, io.StringIO(), color=True, size=size)
+                self.assertEqual(strip_ansi(rendered), expected)
+                self.assertNotIn("```", rendered)
+
+    def test_tilde_fence_lines_are_hidden(self) -> None:
+        sample = "~~~js\nlet a = 1;\n~~~\n"
+        for size in (1, 2, 3, len(sample)):
+            with self.subTest(size=size):
+                rendered = _render(sample, io.StringIO(), color=True, size=size)
+                self.assertEqual(strip_ansi(rendered), "let a = 1;\n")
+                self.assertNotIn("~~~", rendered)
+
+    def test_table_separator_rows_are_filtered(self) -> None:
+        cases = {
+            "| Feature | State |\n| --- | --- |\n| a | b |\n": (
+                "| Feature | State |\n| a | b |\n"
+            ),
+            "| a | b |\n|---|---|\n| 1 | 2 |\n": "| a | b |\n| 1 | 2 |\n",
+            "| a | b |\n|:--|--:|\n| 1 | 2 |\n": "| a | b |\n| 1 | 2 |\n",
+            "| a | b |\n--- | ---\n| 1 | 2 |\n": "| a | b |\n| 1 | 2 |\n",
+            "  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n": (
+                "  | a | b |\n  | 1 | 2 |\n"
+            ),
+        }
+        for sample, expected in cases.items():
+            for size in (1, 2, 3, 7, len(sample)):
+                with self.subTest(sample=sample, size=size):
+                    rendered = _render(sample, io.StringIO(), color=True, size=size)
+                    self.assertEqual(strip_ansi(rendered), expected)
+                    self.assertNotIn("---", rendered)
+
+    def test_table_rows_with_dashes_in_cells_are_preserved(self) -> None:
+        sample = "| a | b |\n| --- | --- |\n| x-y | --- done --- |\n"
+        expected = "| a | b |\n| x-y | --- done --- |\n"
+        for size in (1, 3, 7, len(sample)):
+            with self.subTest(size=size):
+                rendered = _render(sample, io.StringIO(), color=True, size=size)
+                self.assertEqual(strip_ansi(rendered), expected)
+
     def test_indented_fence_closes_so_later_headings_render_as_markdown(self) -> None:
         from minimalcode.highlight import _PALETTES
 
@@ -237,9 +278,7 @@ class HighlightTests(unittest.TestCase):
             sample = (
                 f"1. step\n\n{pad}```python\n{pad}print(1)\n{pad}```\n\n## 二级标题\n"
             )
-            expected = (
-                f"1. step\n\n{pad}```python\n{pad}print(1)\n{pad}```\n\n二级标题\n"
-            )
+            expected = f"1. step\n\n{pad}print(1)\n\n二级标题\n"
             for size in (1, 2, 3, 7, len(sample)):
                 with self.subTest(indent=indent, size=size):
                     rendered = _render(sample, io.StringIO(), color=True, size=size)
@@ -251,9 +290,7 @@ class HighlightTests(unittest.TestCase):
 
         sample = "```text\n    ```not a closing fence\n```\n## After\n"
         rendered = _render(sample, io.StringIO(), color=True)
-        self.assertEqual(
-            strip_ansi(rendered), "```text\n    ```not a closing fence\n```\nAfter\n"
-        )
+        self.assertEqual(strip_ansi(rendered), "    ```not a closing fence\nAfter\n")
         # The fence opened at the first line still ends at the bare marker, so
         # the heading after it is styled instead of staying code.
         self.assertIn(_PALETTES["dark"]["h2"], rendered)
