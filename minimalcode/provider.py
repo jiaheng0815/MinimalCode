@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from . import __version__
 from .config import Settings, provider_api_key
@@ -114,7 +114,7 @@ def _tool_arguments(value: Any) -> str:
         return "{}"
 
 
-def _is_event_stream(response: httpx.Response) -> bool:
+def _is_event_stream(response: httpx2.Response) -> bool:
     content_type = response.headers.get("content-type", "").lower()
     return "text/event-stream" in content_type
 
@@ -143,7 +143,7 @@ class OpenAICompatibleProvider:
         config: dict[str, Any],
         model: str,
         thinking: str,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ):
         protocol = str(config.get("protocol", "openai_chat"))
         if protocol not in {"openai_chat", "openai_responses"}:
@@ -203,10 +203,10 @@ class OpenAICompatibleProvider:
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self.headers = headers
-        timeout = httpx.Timeout(
+        timeout = httpx2.Timeout(
             self.timeout_seconds, connect=min(20.0, self.timeout_seconds)
         )
-        self._client = httpx.Client(
+        self._client = httpx2.Client(
             timeout=timeout,
             headers=headers,
             transport=transport,
@@ -368,7 +368,7 @@ class OpenAICompatibleProvider:
         reply = self.stream_chat(messages, tools=None, on_text=None)
         return reply.content
 
-    def _open(self, payload: dict[str, Any]) -> httpx.Response:
+    def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         last_error: ProviderError | None = None
         for attempt in range(2):
             try:
@@ -378,7 +378,7 @@ class OpenAICompatibleProvider:
                 response = self._client.send(
                     request, stream=bool(payload.get("stream"))
                 )
-            except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+            except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
                 if attempt:
                     break
@@ -392,7 +392,7 @@ class OpenAICompatibleProvider:
             retry_after = response.headers.get("Retry-After", "1")
             try:
                 body = response.read().decode("utf-8", errors="replace")[:2000]
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 body = ""
                 last_error = ProviderError(
                     f"provider network error while reading response: {exc}",
@@ -428,7 +428,7 @@ class OpenAICompatibleProvider:
             if not _is_event_stream(response):
                 try:
                     body = response.read()
-                except httpx.HTTPError as exc:
+                except httpx2.HTTPError as exc:
                     raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = _decode_json_body(body)
                 if parsed:
@@ -519,7 +519,7 @@ class OpenAICompatibleProvider:
                                 entry["arguments"] = _tool_arguments(arguments)
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             raise ProviderError(f"provider stream interrupted: {exc}") from exc
 
         tool_calls: list[ToolCall] = []
@@ -606,7 +606,7 @@ class OpenAICompatibleProvider:
                 data = response.json()
             except ValueError as exc:
                 raise ProviderError("provider returned invalid JSON") from exc
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
@@ -713,7 +713,7 @@ class OpenAICompatibleProvider:
             if not _is_event_stream(response):
                 try:
                     body = response.read()
-                except httpx.HTTPError as exc:
+                except httpx2.HTTPError as exc:
                     raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = _decode_json_body(body)
                 if parsed:
@@ -810,7 +810,7 @@ class OpenAICompatibleProvider:
                         continue
                     if event_type in {"response.failed", "error"}:
                         raise self._response_error(event)
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 raise ProviderError(f"provider stream interrupted: {exc}") from exc
         finally:
             response.close()
@@ -895,7 +895,7 @@ class OpenAICompatibleProvider:
                 data = response.json()
             except ValueError as exc:
                 raise ProviderError("provider returned invalid JSON") from exc
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
@@ -908,7 +908,7 @@ def create_provider(
     provider_name: str | None = None,
     model: str | None = None,
     thinking: str | None = None,
-    transport: httpx.BaseTransport | None = None,
+    transport: httpx2.BaseTransport | None = None,
 ) -> tuple[OpenAICompatibleProvider, str, str]:
     name, config = settings.provider_config(provider_name)
     provider_default_model = config.get("model")

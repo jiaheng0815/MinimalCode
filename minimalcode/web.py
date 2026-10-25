@@ -4,7 +4,7 @@ import math
 from typing import Any
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from . import __version__
 from .config import provider_api_key
@@ -19,7 +19,7 @@ class ProviderWebClient:
         name: str,
         config: dict[str, Any],
         *,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ):
         self.name = name
         self.enabled = False
@@ -28,7 +28,7 @@ class ProviderWebClient:
         self.max_content_chars = 0
         self._search_path = ""
         self._fetch_path = ""
-        self._client: httpx.Client | None = None
+        self._client: httpx2.Client | None = None
 
         web = config.get("web_tools")
         if not isinstance(web, dict):
@@ -92,7 +92,7 @@ class ProviderWebClient:
             )
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx.Client(
+        self._client = httpx2.Client(
             timeout=timeout,
             headers=headers,
             transport=transport,
@@ -110,7 +110,7 @@ class ProviderWebClient:
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled or self._client is None:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
-        response: httpx.Response | None = None
+        response: httpx2.Response | None = None
         try:
             response = self._client.post(f"{self._endpoint}/{path}", json=payload)
             if response.status_code >= 400:
@@ -120,7 +120,7 @@ class ProviderWebClient:
                     f"{response.status_code}: {detail}"
                 )
             data = response.json()
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        except (httpx2.HTTPError, httpx2.InvalidURL) as exc:
             raise ToolError(f"provider web request failed: {exc}") from exc
         except ValueError as exc:
             raise ToolError("provider web request returned invalid JSON") from exc

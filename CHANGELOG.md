@@ -5,7 +5,7 @@
 ### Added
 
 - Added the `subagent` tool: the agent can dispatch a fresh `minimalcode -p` child process through the configured shell and use its final answer, which suits code review, broad analysis, and independent verification. The task travels on stdin, the child inherits `--home`/provider/model/effort/workspace, and nesting is capped by `subagent.max_depth` (default `2`, tracked through `MINIMALCODE_SUBAGENT_DEPTH`). New settings: `subagent.enabled`, `subagent.max_depth`, `subagent.max_turns`, `subagent.timeout_seconds`.
-- Bumped the version to 0.4.0.
+- Bumped the version to 0.5.0.
 - Added the `/effort` interactive command to inspect or switch reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`) without restarting; `none` disables thinking and `/status` reports the active effort.
 - Added the `read_image` tool: local JPEG/PNG/GIF/WebP images are sent to the provider's vision model and returned as text descriptions or answers. It is enabled by the provider's `vision` block, defaults on for DeepSeek, and stays inside the workspace.
 - Increased the default per-task model/tool loop budget from 50 to 1000 turns.
@@ -19,6 +19,9 @@
 
 ### Changed
 
+- Migrated the HTTP layer from `httpx` to `httpx2`, the Pydantic-maintained continuation of `httpx` with the same public API. `httpx2` is now the only runtime dependency, and the provider, web, and vision clients all use `httpx2.Client` / `httpx2.Response`.
+- Dropped Python 3.10 support: `httpx2` requires Python 3.11+, so `requires-python` is now `>=3.11`, the CI matrix starts at 3.11, and Ruff targets `py311`.
+- TLS verification now uses the operating system trust store instead of `certifi`'s bundle, which is `httpx2`'s default. `SSL_CERT_FILE` / `SSL_CERT_DIR` and an explicit `verify=` still take precedence.
 - Heading markers are no longer printed: `## Title` renders as blue styled text like bold and italic drop their delimiters.
 
 - Shell tool activity clips stdout/stderr to the first and last few lines so long commands no longer flood the terminal; the model still receives the full output.

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from minimalcode.config import load_settings
 from minimalcode.errors import ToolError
@@ -45,15 +45,15 @@ def _describe_client(handler) -> ProviderVisionClient:
     return ProviderVisionClient(
         "custom",
         _vision_config(),
-        transport=httpx.MockTransport(handler),
+        transport=httpx2.MockTransport(handler),
     )
 
 
 class VisionClientTests(unittest.TestCase):
     def test_describe_posts_an_inline_image(self) -> None:
-        requests: list[httpx.Request] = []
+        requests: list[httpx2.Request] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             requests.append(request)
             self.assertEqual(request.url.path, "/v1/chat/completions")
             self.assertEqual(request.headers["authorization"], "Bearer secret")
@@ -66,7 +66,7 @@ class VisionClientTests(unittest.TestCase):
             self.assertEqual(image["detail"], "low")
             encoded = image["url"].split(",", 1)[1]
             self.assertEqual(base64.b64decode(encoded), PNG_BYTES)
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"choices": [{"message": {"content": "A tiny PNG."}}]},
             )
@@ -80,10 +80,10 @@ class VisionClientTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
 
     def test_describe_uses_a_default_question(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             body = json.loads(request.content)
             self.assertIn("transcribe", body["messages"][0]["content"][0]["text"])
-            return httpx.Response(
+            return httpx2.Response(
                 200, json={"choices": [{"message": {"content": "ok"}}]}
             )
 
@@ -103,7 +103,7 @@ class VisionClientTests(unittest.TestCase):
         for payload in payloads:
             with self.subTest(payload=payload):
                 client = _describe_client(
-                    lambda request, payload=payload: httpx.Response(200, json=payload)
+                    lambda request, payload=payload: httpx2.Response(200, json=payload)
                 )
                 try:
                     with self.assertRaisesRegex(ToolError, "provider"):
@@ -113,7 +113,7 @@ class VisionClientTests(unittest.TestCase):
 
     def test_describe_reports_http_errors(self) -> None:
         client = _describe_client(
-            lambda request: httpx.Response(400, text="unsupported image")
+            lambda request: httpx2.Response(400, text="unsupported image")
         )
         try:
             with self.assertRaisesRegex(ToolError, "HTTP 400"):
@@ -123,7 +123,7 @@ class VisionClientTests(unittest.TestCase):
 
     def test_describe_truncates_long_text(self) -> None:
         client = _describe_client(
-            lambda request: httpx.Response(
+            lambda request: httpx2.Response(
                 200, json={"choices": [{"message": {"content": "x" * 250}}]}
             )
         )
@@ -202,7 +202,7 @@ class ReadImageToolTests(unittest.TestCase):
 
     def test_read_image_returns_the_description(self) -> None:
         runtime = self._runtime(
-            lambda request: httpx.Response(
+            lambda request: httpx2.Response(
                 200, json={"choices": [{"message": {"content": "A screenshot."}}]}
             )
         )
@@ -216,7 +216,7 @@ class ReadImageToolTests(unittest.TestCase):
         outside = self.root / "outside.png"
         outside.write_bytes(PNG_BYTES)
         runtime = self._runtime(
-            lambda request: httpx.Response(
+            lambda request: httpx2.Response(
                 200, json={"choices": [{"message": {"content": "seen"}}]}
             )
         )
@@ -262,7 +262,7 @@ class ReadImageToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "not enabled"):
             runtime.read_image("shot.png")
 
-        visible_client = _describe_client(lambda request: httpx.Response(200, json={}))
+        visible_client = _describe_client(lambda request: httpx2.Response(200, json={}))
         self.addCleanup(visible_client.close)
         visible = {
             tool["function"]["name"]

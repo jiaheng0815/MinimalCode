@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-import httpx
+import httpx2
 
 from minimalcode.config import EFFORT_LEVELS
 from minimalcode.provider import OpenAICompatibleProvider, ProviderError
@@ -13,7 +13,7 @@ class ProviderTests(unittest.TestCase):
     def test_stream_tool_calls_and_usage(self) -> None:
         seen_request: dict[str, object] = {}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen_request.update(json.loads(request.content))
             self.assertEqual(request.url.path, "/v1/chat/completions")
             events = [
@@ -64,7 +64,7 @@ class ProviderTests(unittest.TestCase):
             ]
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
             body += "data: [DONE]\n\n"
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
                 content=body.encode("utf-8"),
@@ -79,7 +79,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         deltas: list[str] = []
         try:
@@ -114,18 +114,18 @@ class ProviderTests(unittest.TestCase):
         chat_requests: list[dict[str, object]] = []
         responses_requests: list[dict[str, object]] = []
 
-        def chat_handler(request: httpx.Request) -> httpx.Response:
+        def chat_handler(request: httpx2.Request) -> httpx2.Response:
             chat_requests.append(json.loads(request.content))
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
                 },
             )
 
-        def responses_handler(request: httpx.Request) -> httpx.Response:
+        def responses_handler(request: httpx2.Request) -> httpx2.Response:
             responses_requests.append(json.loads(request.content))
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "status": "completed",
@@ -147,7 +147,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(chat_handler),
+            transport=httpx2.MockTransport(chat_handler),
         )
         responses = OpenAICompatibleProvider(
             name="responses",
@@ -159,7 +159,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(responses_handler),
+            transport=httpx2.MockTransport(responses_handler),
         )
         try:
             for effort in EFFORT_LEVELS:
@@ -206,15 +206,15 @@ class ProviderTests(unittest.TestCase):
             )
 
     def test_http_error_reports_status_and_body(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(400, json={"error": {"message": "bad request"}})
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(400, json={"error": {"message": "bad request"}})
 
         provider = OpenAICompatibleProvider(
             name="test",
             config={"base_url": "https://provider.test/v1", "stream": True},
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         try:
             with self.assertRaises(ProviderError) as context:
@@ -229,9 +229,9 @@ class ProviderTests(unittest.TestCase):
     def test_responses_input_skips_empty_messages(self) -> None:
         seen_request: dict[str, object] = {}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen_request.update(json.loads(request.content))
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "status": "completed",
@@ -248,7 +248,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         try:
             reply = provider.stream_chat(
@@ -289,7 +289,7 @@ class ProviderTests(unittest.TestCase):
     def test_responses_stream_tool_call_and_history_conversion(self) -> None:
         seen_request: dict[str, object] = {}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             seen_request.update(json.loads(request.content))
             self.assertEqual(request.url.path, "/v1/responses")
             events = [
@@ -350,7 +350,7 @@ class ProviderTests(unittest.TestCase):
             ]
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
             body += "data: [DONE]\n\n"
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
                 content=body.encode("utf-8"),
@@ -365,7 +365,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         messages = [
             {"role": "system", "content": "system"},
@@ -421,8 +421,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(request_tools[0]["name"], "read")
 
     def test_stream_falls_back_to_json_response(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
                 200,
                 json={
                     "choices": [
@@ -444,7 +444,7 @@ class ProviderTests(unittest.TestCase):
             config={"base_url": "https://provider.test/v1", "stream": True},
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         deltas: list[str] = []
         try:
@@ -461,8 +461,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.usage["total_tokens"], 5)
 
     def test_responses_stream_falls_back_to_json_response(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
                 200,
                 json={
                     "status": "completed",
@@ -485,7 +485,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         try:
             reply = provider.stream_chat([{"role": "user", "content": "hello"}])
@@ -497,8 +497,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.usage["prompt_tokens"], 2)
 
     def test_responses_output_text_items_are_parsed(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
                 200,
                 json={
                     "status": "completed",
@@ -515,7 +515,7 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         try:
             reply = provider.stream_chat([{"role": "user", "content": "hello"}])
@@ -526,7 +526,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_chat_stream_ignores_non_object_events_and_reports_errors(self) -> None:
         def events(body: str):
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
                 content=body.encode("utf-8"),
@@ -537,7 +537,7 @@ class ProviderTests(unittest.TestCase):
             config={"base_url": "https://provider.test/v1", "stream": True},
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(
+            transport=httpx2.MockTransport(
                 lambda request: events(
                     "data: []\n\n"
                     "data: null\n\n"
@@ -557,7 +557,7 @@ class ProviderTests(unittest.TestCase):
             config={"base_url": "https://provider.test/v1", "stream": True},
             model="model-a",
             thinking="high",
-            transport=httpx.MockTransport(
+            transport=httpx2.MockTransport(
                 lambda request: events('data: {"error":{"message":"bad key"}}\n\n')
             ),
         )
@@ -590,8 +590,8 @@ class ProviderTests(unittest.TestCase):
             },
             model="model-r",
             thinking="high",
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
                     200,
                     headers={"Content-Type": "text/event-stream"},
                     content=body.encode("utf-8"),

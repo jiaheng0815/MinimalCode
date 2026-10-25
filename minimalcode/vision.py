@@ -5,7 +5,7 @@ import math
 from typing import Any
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from . import __version__
 from .config import provider_api_key
@@ -53,7 +53,7 @@ class ProviderVisionClient:
         config: dict[str, Any],
         *,
         model: str | None = None,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx2.BaseTransport | None = None,
     ):
         self.name = name
         self.enabled = False
@@ -62,7 +62,7 @@ class ProviderVisionClient:
         self.max_image_bytes = 0
         self.max_chars = 0
         self._endpoint = ""
-        self._client: httpx.Client | None = None
+        self._client: httpx2.Client | None = None
 
         vision = config.get("vision")
         if not isinstance(vision, dict):
@@ -123,7 +123,7 @@ class ProviderVisionClient:
             )
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx.Client(
+        self._client = httpx2.Client(
             timeout=timeout,
             headers=headers,
             transport=transport,
@@ -175,7 +175,7 @@ class ProviderVisionClient:
                 }
             ],
         }
-        response: httpx.Response | None = None
+        response: httpx2.Response | None = None
         try:
             response = self._client.post(self._endpoint, json=payload)
             if response.status_code >= 400:
@@ -185,7 +185,7 @@ class ProviderVisionClient:
                     f"{response.status_code}: {detail}"
                 )
             body = response.json()
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        except (httpx2.HTTPError, httpx2.InvalidURL) as exc:
             raise ToolError(f"provider vision request failed: {exc}") from exc
         except ValueError as exc:
             raise ToolError("provider vision request returned invalid JSON") from exc

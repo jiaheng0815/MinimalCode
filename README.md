@@ -2,7 +2,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.4.0`。运行时依赖只有 `httpx`，Python 3.10+。
+当前版本：`0.5.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -32,7 +32,7 @@ minimalcode init
 
 `init` 会在配置目录写入 `settings.json` 并创建 `sessions/`。首次正常运行如果发现配置缺失，也会自动生成，因此这一步是可选的。
 
-要求 Python 3.10 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
+要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 快速开始
 

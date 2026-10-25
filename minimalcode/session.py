@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +16,7 @@ from .config import Settings
 
 
 def _utc_now() -> str:
-    return (
-        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    )
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _workspace_key(cwd: Path) -> str:
@@ -122,7 +120,7 @@ class SessionStore:
         if not save:
             return Session(session_id=session_id, path=None, cwd=cwd.resolve())
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = self.workspace_dir(cwd) / f"{stamp}-{session_id[:10]}.jsonl"
         session = Session(session_id=session_id, path=path, cwd=cwd.resolve())
         session.append_event(

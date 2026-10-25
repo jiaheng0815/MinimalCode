@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from minimalcode import __version__
 from minimalcode.config import load_settings
@@ -40,16 +40,16 @@ def _web_config(
 
 class WebToolTests(unittest.TestCase):
     def test_configured_search_and_fetch(self) -> None:
-        requests: list[httpx.Request] = []
+        requests: list[httpx2.Request] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             requests.append(request)
             self.assertEqual(request.headers["authorization"], "Bearer secret")
             if request.url.path.endswith("/search"):
                 body = json.loads(request.content)
                 self.assertEqual(body["query"], "minimalcode")
                 self.assertEqual(body["count"], 3)
-                return httpx.Response(
+                return httpx2.Response(
                     200,
                     json={
                         "results": [{"title": "Result", "url": "https://example.com"}]
@@ -57,7 +57,7 @@ class WebToolTests(unittest.TestCase):
                 )
             body = json.loads(request.content)
             self.assertEqual(body["url"], "https://example.com")
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={"title": "Example", "content": "Page body"},
             )
@@ -65,7 +65,7 @@ class WebToolTests(unittest.TestCase):
         client = ProviderWebClient(
             "custom",
             _web_config(),
-            transport=httpx.MockTransport(handler),
+            transport=httpx2.MockTransport(handler),
         )
         try:
             self.assertTrue(client.enabled)
@@ -145,8 +145,8 @@ class WebToolTests(unittest.TestCase):
                 client = ProviderWebClient(
                     "custom",
                     _web_config(),
-                    transport=httpx.MockTransport(
-                        lambda request, payload=payload: httpx.Response(
+                    transport=httpx2.MockTransport(
+                        lambda request, payload=payload: httpx2.Response(
                             200, json=payload
                         )
                     ),
@@ -166,11 +166,11 @@ class WebToolTests(unittest.TestCase):
                     ProviderWebClient("custom", config)
 
     def test_search_bounds_provider_output(self) -> None:
-        requests: list[httpx.Request] = []
+        requests: list[httpx2.Request] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             requests.append(request)
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "results": [
@@ -182,7 +182,7 @@ class WebToolTests(unittest.TestCase):
             )
 
         client = ProviderWebClient(
-            "custom", _web_config(), transport=httpx.MockTransport(handler)
+            "custom", _web_config(), transport=httpx2.MockTransport(handler)
         )
         try:
             result = client.search("query")
@@ -204,8 +204,8 @@ class WebToolTests(unittest.TestCase):
         client = ProviderWebClient(
             "custom",
             _web_config(),
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, json=payload)
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, json=payload)
             ),
         )
         try:
@@ -218,8 +218,8 @@ class WebToolTests(unittest.TestCase):
         client = ProviderWebClient(
             "custom",
             _web_config(),
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
                     200,
                     json={"title": None, "content": "body"},
                 )
@@ -236,8 +236,8 @@ class WebToolTests(unittest.TestCase):
         client = ProviderWebClient(
             "custom",
             _web_config(),
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
                     200,
                     json={"title": "Example", "content": "x" * 150},
                 )

@@ -35,7 +35,7 @@ CLI
 
 ## Performance choices
 
-- One reusable `httpx.Client` maintains the connection pool.
+- One reusable `httpx2.Client` maintains the connection pool.
 - Tool schemas are static; the system prompt is built once per agent rather than once per turn.
 - `rg` is used when available; a bounded Python fallback keeps commands working without it.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
