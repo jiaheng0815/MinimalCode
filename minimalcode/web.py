@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import __version__
 from .config import provider_api_key
 from .errors import ToolError
 
@@ -68,11 +69,11 @@ class ProviderWebClient:
             self.default_count = int(web["default_count"])
             self.max_count = int(web["max_count"])
             self.max_content_chars = int(web["max_content_chars"])
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ToolError(
                 f"provider {name!r} has invalid web_tools numeric settings"
             ) from exc
-        if math.isnan(timeout) or timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             raise ToolError(f"provider {name!r} has invalid web_tools timeout")
         if self.default_count < 1 or self.max_count < self.default_count:
             raise ToolError(f"provider {name!r} has invalid web result limits")
@@ -80,7 +81,10 @@ class ProviderWebClient:
             raise ToolError(f"provider {name!r} has invalid max_content_chars")
 
         api_key = provider_api_key(web) or provider_api_key(config)
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"MinimalCode/{__version__}",
+        }
         custom_headers = web.get("headers")
         if isinstance(custom_headers, dict):
             headers.update(
@@ -165,7 +169,22 @@ class ProviderWebClient:
         results = data.get("results", [])
         if not isinstance(results, list):
             raise ToolError("provider web search results must be a list")
-        return {"status": "success", "results": results}
+        # Provider output is untrusted: keep only object results, cap the count,
+        # and bound every text field so one search cannot flood the context.
+        normalized = [
+            self._normalize_result(item)
+            for item in results[: self.max_count]
+            if isinstance(item, dict)
+        ]
+        return {"status": "success", "results": normalized}
+
+    def _normalize_result(self, item: dict[str, Any]) -> dict[str, Any]:
+        result = dict(item)
+        for key in ("content", "text", "snippet"):
+            value = result.get(key)
+            if isinstance(value, str) and len(value) > self.max_content_chars:
+                result[key] = value[: self.max_content_chars] + "\n<content truncated>"
+        return result
 
     def fetch(self, url: str) -> dict[str, Any]:
         if not self.enabled:

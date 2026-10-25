@@ -145,6 +145,19 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "unset environment variable"):
                     settings.provider_config()
 
+    def test_unreadable_settings_file_is_not_silently_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home)
+            with (
+                patch(
+                    "minimalcode.config.Path.read_text",
+                    side_effect=PermissionError("denied"),
+                ),
+                self.assertRaisesRegex(ConfigError, "cannot read"),
+            ):
+                load_settings(home, require_file=True)
+
     def test_redaction(self) -> None:
         data = {
             "api_key": "abc",
@@ -158,6 +171,27 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(redacted["api_key_env"], "SAFE_VARIABLE_NAME")
         self.assertEqual(redacted["nested"]["authorization"], "<redacted>")
         self.assertEqual(redacted["nested"]["name"], "ok")
+
+    def test_redaction_keeps_token_counts_and_redacts_tokens(self) -> None:
+        data = {
+            "max_tokens": 100,
+            "prompt_tokens": 5,
+            "reasoning_tokens": 2,
+            "tokenizer": "bpe",
+            "access_token": "secret",
+            "X-Api-Key": "secret",
+            "client_secret": "secret",
+            "api_key_env": "SAFE_VARIABLE_NAME",
+        }
+        redacted = redact_config(data)
+        self.assertEqual(redacted["max_tokens"], 100)
+        self.assertEqual(redacted["prompt_tokens"], 5)
+        self.assertEqual(redacted["reasoning_tokens"], 2)
+        self.assertEqual(redacted["tokenizer"], "bpe")
+        self.assertEqual(redacted["access_token"], "<redacted>")
+        self.assertEqual(redacted["X-Api-Key"], "<redacted>")
+        self.assertEqual(redacted["client_secret"], "<redacted>")
+        self.assertEqual(redacted["api_key_env"], "SAFE_VARIABLE_NAME")
 
 
 if __name__ == "__main__":

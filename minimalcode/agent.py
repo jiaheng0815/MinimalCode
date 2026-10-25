@@ -156,7 +156,9 @@ class Agent:
         self.provider = provider
         self.session = session
         self.tools = tool_runtime
-        self.tool_schemas = available_tool_schemas(self.tools.web_client)
+        self.tool_schemas = available_tool_schemas(
+            self.tools.web_client, self.tools.vision_client
+        )
         self.shell = shell
         configured_turns = (
             settings.get("max_turns", 1000) if max_turns is None else max_turns
@@ -180,6 +182,7 @@ class Agent:
             else None
         )
         self.last_prompt_tokens = 0
+        self._system_prompt: str | None = None
         self.total_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -206,16 +209,16 @@ class Agent:
             )
 
     def _system_messages(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "role": "system",
-                "content": build_system_prompt(
-                    self.settings,
-                    self.session.cwd,
-                    self.shell,
-                ),
-            }
-        ]
+        if self._system_prompt is None:
+            # Building the prompt reads SYSTEM.md plus every AGENTS.md/CLAUDE.md
+            # on the path; the tool loop calls this once per turn, so the result
+            # is cached for the lifetime of the agent.
+            self._system_prompt = build_system_prompt(
+                self.settings,
+                self.session.cwd,
+                self.shell,
+            )
+        return [{"role": "system", "content": self._system_prompt}]
 
     def _messages(self) -> list[dict[str, Any]]:
         return [*self._system_messages(), *self.session.messages]
@@ -275,6 +278,7 @@ class Agent:
         self.session.append_message({"role": "user", "content": user_text})
         final_text = ""
         final_completed = False
+        final_finish_reason: str | None = None
         turn = 0
 
         for turn in range(1, self.max_turns + 1):
@@ -293,9 +297,14 @@ class Agent:
             assistant = reply.as_message()
             self.session.append_message(assistant)
             final_text = reply.content
+            final_finish_reason = reply.finish_reason
 
             if not reply.tool_calls:
                 final_completed = reply.finish_reason in {None, "stop", "completed"}
+                if final_completed and not reply.content.strip():
+                    # A finished turn with neither text nor a tool call is a
+                    # provider-side failure; nothing was delivered to the user.
+                    final_completed = False
                 break
 
             if reply.finish_reason in _INCOMPLETE_FINISH_REASONS:
@@ -332,22 +341,42 @@ class Agent:
                 else:
                     self._activity(f"  {_tool_output_preview(result)}")
 
-        if not final_completed and turn >= self.max_turns:
-            message = f"Reached max turns ({self.max_turns}); task may be incomplete."
-            if not self.quiet:
-                self.error_output.write(message + "\n")
-                self.error_output.flush()
-        elif not final_completed:
-            message = f"Provider stopped early: {final_text or 'no final text'}"
-            if not self.quiet:
-                self.error_output.write(message + "\n")
-                self.error_output.flush()
+        if not final_completed:
+            self._report_incomplete(
+                turn=turn,
+                final_text=final_text,
+                finish_reason=final_finish_reason,
+            )
         return AgentResult(
             text=final_text,
             completed=final_completed,
             usage=dict(self.total_usage),
             turns=turn,
         )
+
+    def _report_incomplete(
+        self,
+        *,
+        turn: int,
+        final_text: str,
+        finish_reason: str | None,
+    ) -> None:
+        if self.quiet:
+            return
+        if turn >= self.max_turns:
+            message = f"Reached max turns ({self.max_turns}); task may be incomplete."
+        elif not final_text.strip():
+            message = "The provider returned an empty response; the task is unfinished."
+        else:
+            # Never echo a whole answer to stderr while reporting the failure.
+            preview = " ".join(final_text.split())
+            if len(preview) > 200:
+                preview = preview[:197] + "..."
+            message = f"Provider stopped early: {preview}"
+        if finish_reason and finish_reason not in {"stop", "completed", "tool_calls"}:
+            message = f"{message} (finish reason: {finish_reason})"
+        self.error_output.write(message + "\n")
+        self.error_output.flush()
 
     def should_compact(self) -> bool:
         threshold = float(self.settings.get("context.compact_at", 0.8))

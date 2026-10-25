@@ -109,6 +109,91 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(seen_request["model"], "model-a")
         self.assertTrue(seen_request["stream"])
 
+    def test_non_finite_numeric_settings_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ProviderError, "numeric settings"):
+            OpenAICompatibleProvider(
+                name="bad",
+                config={
+                    "base_url": "https://provider.test/v1",
+                    "context_window": float("inf"),
+                },
+                model="x",
+                thinking="off",
+            )
+        with self.assertRaisesRegex(ProviderError, "timeout_seconds"):
+            OpenAICompatibleProvider(
+                name="bad",
+                config={
+                    "base_url": "https://provider.test/v1",
+                    "timeout_seconds": float("inf"),
+                },
+                model="x",
+                thinking="off",
+            )
+
+    def test_http_error_reports_status_and_body(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"message": "bad request"}})
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with self.assertRaises(ProviderError) as context:
+                provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("bad request", str(context.exception))
+        self.assertIn("bad request", context.exception.body or "")
+
+    def test_responses_input_skips_empty_messages(self) -> None:
+        seen_request: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_request.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [{"type": "message", "content": [{"text": "ok"}]}],
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat(
+                [
+                    {"role": "system", "content": "system"},
+                    {"role": "assistant", "content": None},
+                    {"role": "assistant", "content": ""},
+                    {"role": "user", "content": "hello"},
+                ]
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "ok")
+        request_input = seen_request["input"]
+        self.assertEqual(len(request_input), 2)
+        for item in request_input:
+            self.assertIsNotNone(item.get("content"))
+
     def test_invalid_base_url_is_rejected(self) -> None:
         with self.assertRaisesRegex(ProviderError, "base_url"):
             OpenAICompatibleProvider(

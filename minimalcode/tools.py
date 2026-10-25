@@ -16,6 +16,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 from .config import Settings
 from .errors import ToolError
 from .shell import ShellSpec, run_shell
+from .vision import SUPPORTED_IMAGE_FORMATS, ProviderVisionClient, image_media_type
 from .web import ProviderWebClient
 
 # Shared by the Python fallback walk and the ripgrep invocations so both
@@ -181,11 +182,45 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+READ_IMAGE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_image",
+        "description": (
+            "Describe an image or screenshot with the provider's vision model. "
+            "Use it to read text, UI details, or diagrams that plain text tools cannot see."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Image path in the workspace",
+                },
+                "prompt": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Question about the image; defaults to a full description "
+                        "with verbatim visible text"
+                    ),
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
+    vision_client: ProviderVisionClient | None = None,
 ) -> list[dict[str, Any]]:
+    schemas = list(TOOL_SCHEMAS)
+    if vision_client is not None and vision_client.enabled:
+        schemas.append(READ_IMAGE_SCHEMA)
     if web_client is None or not web_client.enabled:
-        return list(TOOL_SCHEMAS)
+        return schemas
     web_schemas: list[dict[str, Any]] = [
         {
             "type": "function",
@@ -244,7 +279,7 @@ def available_tool_schemas(
             },
         },
     ]
-    return [*TOOL_SCHEMAS, *web_schemas]
+    return [*schemas, *web_schemas]
 
 
 def _clip(value: str, limit: int = 180) -> str:
@@ -262,10 +297,11 @@ def _positive_limit(
         isinstance(requested, bool) or not isinstance(requested, int)
     ):
         raise ToolError(f"{label} must be an integer")
-    limit = default if requested is None else requested
+    # A configured default above the hard cap must not silently exceed it.
+    limit = min(default if requested is None else requested, maximum)
     if limit < 1:
         raise ToolError(f"{label} must be at least 1")
-    return min(limit, maximum)
+    return limit
 
 
 _UNION_ORIGINS = {Union, UnionType}
@@ -333,12 +369,15 @@ class ToolRuntime:
         shell: ShellSpec,
         *,
         web_client: ProviderWebClient | None = None,
+        vision_client: ProviderVisionClient | None = None,
     ):
         self.settings = settings
         self.cwd = cwd.resolve()
         self.shell_spec = shell
         self.web_client = web_client
         self.web_enabled = bool(web_client and web_client.enabled)
+        self.vision_client = vision_client
+        self.vision_enabled = bool(vision_client and vision_client.enabled)
         self.allow_outside = bool(settings.get("tools.allow_outside_workspace", False))
         self.max_file_chars = int(settings.get("tools.max_file_chars", 160_000))
         self.max_file_bytes = int(settings.get("tools.max_file_bytes", 5_000_000))
@@ -455,8 +494,15 @@ class ToolRuntime:
     def write(self, path: str, content: str) -> dict[str, Any]:
         if not isinstance(content, str):
             raise ToolError("content must be a string")
-        if len(content) > self.max_file_chars * 8:
-            raise ToolError("content is too large for write")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(f"content is not valid UTF-8 text: {exc}") from exc
+        if len(encoded) > self.max_file_bytes:
+            raise ToolError(
+                f"content is too large for write: {len(encoded)} bytes exceeds "
+                f"tools.max_file_bytes ({self.max_file_bytes})"
+            )
         target = self._path(path)
         if target.exists() and target.is_dir():
             raise ToolError(f"path is a directory: {target}")
@@ -470,7 +516,7 @@ class ToolRuntime:
         return {
             "status": "success",
             "path": str(target),
-            "bytes": len(content.encode("utf-8")),
+            "bytes": len(encoded),
             "created": not existed,
         }
 
@@ -636,9 +682,11 @@ class ToolRuntime:
         files = [target] if target.is_file() else self._walk_files(target)
         matches: list[str] = []
         for file_path in files:
-            if glob_pattern and not fnmatch.fnmatch(file_path.name, glob_pattern):
+            if glob_pattern and not self._matches_glob(file_path, target, glob_pattern):
                 continue
             try:
+                if file_path.stat().st_size > self.max_file_bytes:
+                    continue
                 with file_path.open("r", encoding="utf-8", errors="replace") as handle:
                     for number, line in enumerate(handle, 1):
                         if regex.search(line):
@@ -652,6 +700,22 @@ class ToolRuntime:
             except (OSError, UnicodeError):
                 continue
         return {"status": "success", "matches": matches, "truncated": False}
+
+    @staticmethod
+    def _matches_glob(file_path: Path, root: Path, glob_pattern: str) -> bool:
+        """Match a ripgrep-style glob against the file name and relative path."""
+        if fnmatch.fnmatch(file_path.name, glob_pattern):
+            return True
+        try:
+            relative = file_path.relative_to(root).as_posix()
+        except ValueError:
+            relative = file_path.as_posix()
+        if fnmatch.fnmatch(relative, glob_pattern):
+            return True
+        # `**/` is optional in ripgrep globs, required by fnmatch.
+        if glob_pattern.startswith("**/"):
+            return fnmatch.fnmatch(relative, glob_pattern[3:])
+        return False
 
     def find(
         self,
@@ -694,17 +758,48 @@ class ToolRuntime:
 
         paths: list[str] = []
         for file_path in self._walk_files(target):
-            try:
-                relative = str(file_path.relative_to(target))
-            except ValueError:
-                relative = str(file_path)
-            if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(
-                file_path.name, pattern
-            ):
+            if self._matches_glob(file_path, target, pattern):
                 paths.append(str(file_path))
                 if len(paths) >= limit:
                     return {"status": "success", "files": paths, "truncated": True}
         return {"status": "success", "files": paths, "truncated": False}
+
+    def read_image(self, path: str, prompt: str | None = None) -> dict[str, Any]:
+        if not self.vision_enabled or self.vision_client is None:
+            raise ToolError("read_image is not enabled for the current provider")
+        if prompt is not None and not isinstance(prompt, str):
+            raise ToolError("prompt must be a string or null")
+        target = self._path(path)
+        if not target.is_file():
+            raise ToolError(f"file not found: {target}")
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise ToolError(f"cannot read image: {target}: {exc}") from exc
+        if size > self.vision_client.max_image_bytes:
+            raise ToolError(
+                f"image is too large: {size} bytes exceeds "
+                f"vision.max_image_bytes ({self.vision_client.max_image_bytes})"
+            )
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            raise ToolError(f"cannot read image: {target}: {exc}") from exc
+        media_type = image_media_type(data)
+        if media_type is None:
+            raise ToolError(
+                f"unsupported image format; expected {SUPPORTED_IMAGE_FORMATS}"
+            )
+        description = self.vision_client.describe(
+            media_type, data, question=prompt or None
+        )
+        return {
+            "status": "success",
+            "path": str(target),
+            "media_type": media_type,
+            "bytes": len(data),
+            "description": description,
+        }
 
     def web_search(
         self,
@@ -744,6 +839,7 @@ class ToolRuntime:
             "shell": self.shell,
             "grep": self.grep,
             "find": self.find,
+            "read_image": self.read_image,
             "web_search": self.web_search,
             "web_fetch": self.web_fetch,
         }
@@ -763,7 +859,7 @@ class ToolRuntime:
     def activity(name: str, arguments: dict[str, Any]) -> str:
         if name == "shell":
             detail = _clip(str(arguments.get("command", "")))
-        elif name in {"read", "write", "edit"}:
+        elif name in {"read", "write", "edit", "read_image"}:
             detail = _clip(str(arguments.get("path", "")))
         elif name == "grep":
             detail = f"{_clip(str(arguments.get('pattern', '')))} in {arguments.get('path', '.')}"

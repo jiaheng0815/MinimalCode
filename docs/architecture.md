@@ -25,7 +25,8 @@ CLI
 | `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
 | `provider.py` | OpenAI Chat/Responses HTTP and SSE transport |
 | `web.py` | Configurable provider web search and fetch client |
-| `tools.py` | Workspace-bound file, search, and shell tools |
+| `vision.py` | Configurable provider vision client for inline image understanding |
+| `tools.py` | Workspace-bound file, search, shell, image, and web tool dispatch |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
 | `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |
 | `highlight.py` | Incremental Markdown rendering and ANSI styling for streamed text |
@@ -34,7 +35,7 @@ CLI
 ## Performance choices
 
 - One reusable `httpx.Client` maintains the connection pool.
-- Tool schemas and prompts are static or shallowly transformed.
+- Tool schemas are static; the system prompt is built once per agent rather than once per turn.
 - `rg` is used when available; a bounded Python fallback keeps commands working without it.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
 - Session writes are append-only; configuration is the only atomically rewritten file.

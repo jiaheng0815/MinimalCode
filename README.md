@@ -8,7 +8,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 
 - 默认使用 PowerShell 7（`pwsh`）；Windows 缺失时回退到 Windows PowerShell 5.1，其他平台缺失时回退到 `bash`，最后回退到 `sh`。
 - 六个精简工具：`read`、`write`、`edit`、`shell`、`grep`、`find`。
-- DeepSeek 默认启用 `web_search` 和 `web_fetch`；其他供应商默认不暴露这两个工具。
+- DeepSeek 默认启用 `read_image`、`web_search` 和 `web_fetch`；其他供应商默认不暴露这些工具。
 - 流式输出，在交互终端中渲染 Markdown/README，不依赖 Markdown、Rich 或 UI 框架。
 - 会话自动保存，支持继续和指定会话。
 - 接近上下文上限时自动压缩较早消息。
@@ -121,6 +121,30 @@ Web 能力由供应商的 `web_tools` 配置启用，运行时代码不包含供
 - `web_fetch`：抓取指定 HTTP/HTTPS 页面。
 
 其他供应商默认不会收到这两个工具定义，直接调用也会被工具层拒绝。需要时应显式添加完整 `web_tools` 配置。
+
+### 图像理解
+
+`read_image` 由供应商的 `vision` 配置启用，通过 OpenAI 兼容的 `/chat/completions` 端点把本地图片以 base64 data URL 发送给视觉模型，返回文字描述。默认 DeepSeek 配置已启用：
+
+```json
+"vision": {
+  "enabled": true,
+  "base_url": "https://api.deepseek.com/v1",
+  "model": "deepseek-flash",
+  "timeout_seconds": 120,
+  "max_image_bytes": 33554432,
+  "max_chars": 8000,
+  "detail": "auto",
+  "headers": {}
+}
+```
+
+- 支持 JPEG、PNG、GIF 和 WebP，格式按文件内容判断，不依赖扩展名。
+- `read_image` 和文件工具一样受工作区限制；读取工作区外的图片需要同时设置 `tools.allow_outside_workspace`。
+- `prompt` 可选，默认要求模型详细描述图片并逐字转写可见文字。
+- 返回内容超过 `max_chars` 时截断并标记 `<description truncated>`。
+
+未配置 `vision` 的供应商不会收到该工具定义，直接调用也会被拒绝。
 
 完整默认值位于包内 `minimalcode/defaults.json`，运行时会与用户配置深度合并。
 
@@ -255,4 +279,4 @@ MinimalCode 的第一目标不是复制 Pi 的扩展生态，而是用更小的�
 - 原生 Anthropic、Gemini 协议。
 - RPC/SDK 集成。
 - 扩展、Skills 和主题系统。
-- 图片输入和更细粒度的工具权限。
+- 更细粒度的工具权限。

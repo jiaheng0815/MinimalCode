@@ -46,10 +46,16 @@ class TtyBuffer(io.StringIO):
         return True
 
 
-def _render(text: str, stream: io.StringIO, *, color: bool | None = None) -> str:
+def _render(
+    text: str,
+    stream: io.StringIO,
+    *,
+    color: bool | None = None,
+    size: int = 7,
+) -> str:
     highlighter = MarkdownHighlighter(stream, color=color)
-    for index in range(0, len(text), 7):
-        highlighter.feed(text[index : index + 7])
+    for index in range(0, len(text), size):
+        highlighter.feed(text[index : index + size])
     highlighter.finish()
     return stream.getvalue()
 
@@ -198,6 +204,55 @@ class HighlightTests(unittest.TestCase):
         sample = "# Title\r\n\r\n```text\r\nplain\r\n"
         rendered = _render(sample, io.StringIO(), color=True)
         self.assertEqual(strip_ansi(rendered), sample)
+
+    def test_trailing_backslash_is_preserved(self) -> None:
+        for size in (1, 2, 3, len("path\\")):
+            with self.subTest(size=size):
+                sample = "path\\"
+                stream = io.StringIO()
+                highlighter = MarkdownHighlighter(stream, color=True)
+                for index in range(0, len(sample), size):
+                    highlighter.feed(sample[index : index + size])
+                highlighter.finish()
+                self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
+    def test_thematic_breaks_are_preserved(self) -> None:
+        for sample in ("---\n", "***\n", "___\n", "- - -\n"):
+            with self.subTest(sample=sample):
+                for size in (1, 2, len(sample)):
+                    stream = io.StringIO()
+                    highlighter = MarkdownHighlighter(stream, color=True)
+                    for index in range(0, len(sample), size):
+                        highlighter.feed(sample[index : index + size])
+                    highlighter.finish()
+                    self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
+    def test_bullet_lists_are_not_treated_as_rules(self) -> None:
+        sample = "- first\n- second\n"
+        rendered = _render(sample, io.StringIO(), color=True)
+        self.assertEqual(strip_ansi(rendered), sample)
+
+    def test_heading_level_does_not_depend_on_delta_size(self) -> None:
+        from minimalcode.highlight import _PALETTES
+
+        palette = _PALETTES["dark"]
+        for level in (1, 2, 3, 6):
+            sample = f"{'#' * level} Heading\n"
+            expected_style = palette[f"h{level}"]
+            for size in (1, 2, 3, level, len(sample)):
+                with self.subTest(level=level, size=size):
+                    rendered = _render(sample, io.StringIO(), color=True, size=size)
+                    self.assertEqual(strip_ansi(rendered), sample)
+                    self.assertIn(expected_style, rendered)
+                    other_styles = {
+                        style
+                        for key, style in palette.items()
+                        if key.startswith("h") and style != expected_style
+                    }
+                    self.assertFalse(
+                        any(style in rendered for style in other_styles),
+                        rendered,
+                    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -46,6 +47,31 @@ class ShellTests(unittest.TestCase):
         self.assertIn("truncated", result)
         self.assertTrue(result.startswith("A"))
         self.assertTrue(result.endswith("B"))
+
+    def test_timeout_returns_partial_output_and_does_not_hang(self) -> None:
+        shell = detect_shell()
+        powershell = shell.kind in {"pwsh7", "windows_powershell"}
+        if powershell:
+            command = 'Write-Output "started"; Start-Sleep -Seconds 20'
+        else:
+            command = "echo started; sleep 20"
+        with tempfile.TemporaryDirectory() as temp:
+            started = time.perf_counter()
+            result = run_shell(
+                command,
+                shell=shell,
+                cwd=Path(temp),
+                timeout=1,
+                max_output_chars=10_000,
+            )
+            elapsed = time.perf_counter() - started
+        self.assertEqual(result["status"], "timeout", result)
+        self.assertIn("started", str(result["stdout"]))
+        self.assertLess(elapsed, 15.0)
+
+    def test_zero_budget_truncation_drops_the_text(self) -> None:
+        self.assertEqual(truncate_text("abc", 0), ("", True))
+        self.assertEqual(truncate_text("", 0), ("", False))
 
     def test_invalid_configured_shell_path_is_reported(self) -> None:
         with (

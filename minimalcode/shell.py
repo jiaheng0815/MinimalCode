@@ -4,9 +4,11 @@ import math
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 from .errors import ShellError
 
@@ -103,7 +105,9 @@ def _prefix_command(shell: ShellSpec, command: str) -> list[str]:
 
 
 def truncate_text(text: str, limit: int) -> tuple[str, bool]:
-    if limit <= 0 or len(text) <= limit:
+    if limit <= 0:
+        return ("", bool(text)) if text else ("", False)
+    if len(text) <= limit:
         return text, False
     marker = f"\n... <truncated {len(text) - limit} chars> ...\n"
     if limit <= len(marker):
@@ -146,26 +150,41 @@ def run_shell(
     if env:
         process_env.update({str(key): str(value) for key, value in env.items()})
 
+    # Output is collected through temporary files instead of pipes. With pipes a
+    # timed-out command that left a background child holding the write end made
+    # the post-kill drain block forever; file handles let the call return with
+    # whatever was written so far.
     try:
-        completed = subprocess.run(
-            _prefix_command(shell, command),
-            cwd=cwd,
-            env=process_env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _decode_output(exc.stdout)
-        stderr = _decode_output(exc.stderr)
-        return {
-            "status": "timeout",
-            "shell": shell.label,
-            "timeout_seconds": timeout,
-            "stdout": truncate_text(stdout, max_output_chars)[0],
-            "stderr": truncate_text(stderr, max_output_chars)[0],
-        }
+        with (
+            tempfile.TemporaryFile() as out_file,
+            tempfile.TemporaryFile() as err_file,
+        ):
+            try:
+                completed = subprocess.run(
+                    _prefix_command(shell, command),
+                    cwd=cwd,
+                    env=process_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out_file,
+                    stderr=err_file,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                stdout = _read_capture(out_file)
+                stderr = _read_capture(err_file)
+                stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
+                stderr, stderr_truncated = truncate_text(stderr, max_output_chars)
+                return {
+                    "status": "timeout",
+                    "shell": shell.label,
+                    "timeout_seconds": timeout,
+                    "stdout": stdout.rstrip(),
+                    "stderr": stderr.rstrip(),
+                    "truncated": stdout_truncated or stderr_truncated,
+                }
+            stdout = _read_capture(out_file)
+            stderr = _read_capture(err_file)
     except (OSError, ValueError) as exc:
         return {
             "status": "error",
@@ -173,8 +192,6 @@ def run_shell(
             "message": str(exc),
         }
 
-    stdout = _decode_output(completed.stdout)
-    stderr = _decode_output(completed.stderr)
     stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
     stderr, stderr_truncated = truncate_text(stderr, max_output_chars)
     return {
@@ -185,6 +202,11 @@ def run_shell(
         "stderr": stderr.rstrip(),
         "truncated": stdout_truncated or stderr_truncated,
     }
+
+
+def _read_capture(handle: IO[bytes]) -> str:
+    handle.seek(0)
+    return _decode_output(handle.read())
 
 
 def _decode_output(data: bytes | str | None) -> str:

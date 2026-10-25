@@ -51,12 +51,13 @@ class Session:
             self.path.parent.chmod(0o700)
         except OSError:
             pass
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(_compact_json(event) + "\n")
-        try:
-            self.path.chmod(0o600)
-        except OSError:
-            pass
+        line = _compact_json(event) + "\n"
+        # Create session files with restrictive permissions from the first
+        # byte instead of tightening them after conversation content is
+        # already on disk.
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(line)
 
     def append_message(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
@@ -90,7 +91,15 @@ class Session:
             raise
 
     def append_usage(self, usage: dict[str, int]) -> None:
-        self.append_event({"type": "usage", "usage": usage, "at": _utc_now()})
+        """Record token usage without aborting the turn when the write fails.
+
+        Usage is telemetry: losing one record only affects statistics, while
+        raising here would discard a reply the model already produced.
+        """
+        try:
+            self.append_event({"type": "usage", "usage": usage, "at": _utc_now()})
+        except (OSError, TypeError, ValueError):
+            return
 
 
 class SessionStore:
@@ -150,8 +159,13 @@ class SessionStore:
         return None
 
     def resolve(self, identifier: str, cwd: Path) -> Session:
-        candidate = Path(identifier).expanduser()
-        if candidate.is_file():
+        try:
+            candidate = Path(identifier).expanduser()
+            is_file = candidate.is_file()
+        except (OSError, RuntimeError, ValueError):
+            is_file = False
+            candidate = None
+        if is_file and candidate is not None:
             return self.load(candidate)
 
         files = self._candidate_files(cwd)
@@ -250,11 +264,11 @@ class SessionStore:
                 continue
             rows.append(
                 {
-                    "session_id": first.get("session_id", path.stem),
-                    "workspace": first.get("workspace", ""),
-                    "provider": first.get("provider", ""),
-                    "model": first.get("model", ""),
-                    "created_at": first.get("created_at", ""),
+                    "session_id": str(first.get("session_id") or path.stem),
+                    "workspace": str(first.get("workspace") or ""),
+                    "provider": str(first.get("provider") or ""),
+                    "model": str(first.get("model") or ""),
+                    "created_at": str(first.get("created_at") or ""),
                     "path": str(path),
                 }
             )

@@ -264,16 +264,23 @@ def load_settings(
 ) -> Settings:
     root = home_dir(home)
     source = root / SETTINGS_FILENAME
-    if not source.exists():
+    try:
+        text = source.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
         if require_file:
-            raise ConfigError(f"settings file not found: {source}")
+            raise ConfigError(f"settings file not found: {source}") from None
         data = copy.deepcopy(DEFAULT_SETTINGS)
         _validate(data, source)
         return Settings(data=data, home=root, source=source)
+    except (OSError, UnicodeDecodeError) as exc:
+        # An existing but unreadable file must never silently fall back to
+        # defaults: the user would be talking to a different provider than
+        # the one their settings file describes.
+        raise ConfigError(f"cannot read {source}: {exc}") from exc
 
     try:
-        raw = json.loads(source.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise ConfigError(f"cannot read {source}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: top-level value must be an object")
@@ -328,19 +335,52 @@ def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) ->
     return path
 
 
+_SENSITIVE_EXACT_KEYS = {"api_key", "apikey", "authorization", "x-api-key"}
+# Token budgets and counters describe costs, not credentials, and environment
+# variable names are safe to print. Redacting them made `config show` hide
+# ordinary settings such as `max_tokens` or `prompt_tokens`.
+_SAFE_COMPACT_KEYS = {
+    "maxtokens",
+    "maxoutputtokens",
+    "maxinputtokens",
+    "maxcompletiontokens",
+    "prompttokens",
+    "completiontokens",
+    "totaltokens",
+    "inputtokens",
+    "outputtokens",
+    "cachedtokens",
+    "reasoningtokens",
+    "tokenizer",
+    "tokencount",
+    "tokenlimit",
+    "tokenbudget",
+}
+
+
+def _is_sensitive_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    if lowered in _SENSITIVE_EXACT_KEYS:
+        return True
+    compact = re.sub(r"[^a-z0-9]", "", lowered)
+    if compact in _SAFE_COMPACT_KEYS or compact.endswith("env"):
+        return False
+    return (
+        "apikey" in compact
+        or "secret" in compact
+        or "password" in compact
+        or "credential" in compact
+        or compact.endswith(("token", "tokens"))
+    )
+
+
 def redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            lowered = key.lower() if isinstance(key, str) else ""
-            compact = re.sub(r"[^a-z0-9]", "", lowered)
-            sensitive = (
-                lowered in {"api_key", "authorization", "x-api-key"}
-                or compact in {"apikey", "xapikey"}
-                or "secret" in lowered
-                or "token" in lowered
-            )
-            if sensitive:
+            if _is_sensitive_key(key):
                 result[key] = "<redacted>" if item else item
             else:
                 result[key] = redact_config(item)

@@ -48,6 +48,16 @@
         "max_count": 50,
         "max_content_chars": 120000,
         "headers": {}
+      },
+      "vision": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-flash",
+        "timeout_seconds": 120,
+        "max_image_bytes": 33554432,
+        "max_chars": 8000,
+        "detail": "auto",
+        "headers": {}
       }
     }
   }

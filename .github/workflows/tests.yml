@@ -22,3 +22,4 @@ jobs:
       - run: python benchmarks/coding_suite.py --validate-only
       - run: python -m compileall -q minimalcode tests main.py
       - run: ruff check minimalcode tests benchmarks main.py
+      - run: ruff format --check minimalcode tests benchmarks main.py

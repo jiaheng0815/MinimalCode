@@ -137,6 +137,35 @@ class ToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "directory"):
             self.tools.write("folder", "content")
 
+    def test_write_rejects_content_over_max_file_bytes(self) -> None:
+        self.tools.max_file_bytes = 10
+        with self.assertRaisesRegex(ToolError, "max_file_bytes"):
+            self.tools.write("big.txt", "x" * 11)
+        self.assertFalse((self.workspace / "big.txt").exists())
+
+    def test_python_grep_supports_recursive_glob_prefix(self) -> None:
+        self.tools.write("root.py", "needle = 1\n")
+        self.tools.write("src/nested.py", "needle = 2\n")
+        with patch("minimalcode.tools.shutil.which", return_value=None):
+            grep_result = self.tools.grep("needle", glob="**/*.py")
+            find_result = self.tools.find("**/*.py")
+        self.assertTrue(any("root.py" in line for line in grep_result["matches"]))
+        self.assertTrue(any("nested.py" in line for line in grep_result["matches"]))
+        self.assertTrue(any(path.endswith("root.py") for path in find_result["files"]))
+
+    def test_default_result_limit_is_capped_by_the_tool_schema(self) -> None:
+        self.tools.max_results = 5000
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"a.py:1:needle\n" * 3000, stderr=b""
+        )
+        with (
+            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
+            patch("minimalcode.tools.subprocess.run", return_value=completed),
+        ):
+            result = self.tools.grep("needle")
+        self.assertEqual(len(result["matches"]), 2000)
+        self.assertTrue(result["truncated"])
+
     def test_outside_workspace_is_blocked(self) -> None:
         outside = self.root / "outside.txt"
         with self.assertRaises(ToolError):

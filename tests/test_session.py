@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from minimalcode.config import ensure_config, load_settings
-from minimalcode.session import SessionStore, _workspace_key
+from minimalcode.session import Session, SessionStore, _workspace_key
 
 
 class SessionTests(unittest.TestCase):
@@ -152,6 +155,59 @@ class SessionTests(unittest.TestCase):
                             for row in store.list()
                         )
                     )
+
+    def test_usage_write_failure_does_not_abort_the_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+
+            with patch.object(
+                Session, "append_event", side_effect=OSError("disk full")
+            ):
+                session.append_usage({"prompt_tokens": 1})
+                with self.assertRaises(OSError):
+                    session.append_message({"role": "user", "content": "kept"})
+            self.assertEqual(session.messages, [])
+
+    def test_non_string_metadata_is_coerced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            lines = session.path.read_text(encoding="utf-8").splitlines(keepends=True)
+            meta = json.loads(lines[0])
+            meta["session_id"] = 5
+            meta["workspace"] = 1
+            meta["provider"] = None
+            session.path.write_text(
+                json.dumps(meta) + "\n" + "".join(lines[1:]), encoding="utf-8"
+            )
+
+            rows = store.list()
+
+            self.assertEqual(rows[0]["session_id"], "5")
+            self.assertEqual(rows[0]["workspace"], "1")
+            self.assertEqual(rows[0]["provider"], "")
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+    def test_session_file_is_created_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            self.assertEqual(stat.S_IMODE(session.path.stat().st_mode) & 0o077, 0)
+            self.assertEqual(
+                stat.S_IMODE(session.path.parent.stat().st_mode) & 0o077, 0
+            )
 
 
 if __name__ == "__main__":

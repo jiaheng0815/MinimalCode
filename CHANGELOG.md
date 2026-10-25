@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `read_image` tool: local JPEG/PNG/GIF/WebP images are sent to the provider's vision model and returned as text descriptions or answers. It is enabled by the provider's `vision` block, defaults on for DeepSeek, and stays inside the workspace.
 - Increased the default per-task model/tool loop budget from 50 to 1000 turns.
 - Added streaming Markdown and README rendering for interactive terminals.
 - Unterminated bold, italic, strikethrough, inline code, and link text render immediately, following Streamdown/remend-style incomplete-block handling.
@@ -11,6 +12,7 @@
 - Added dark/light palettes, `--no-highlight`, and `NO_COLOR` support while keeping JSON and redirected output plain.
 - Shell tool activity now displays the command exit code, stdout, and stderr unless tools are quiet or JSON output is active.
 - Tool activity tags such as `[shell]` and `[read]` are green on ANSI-capable terminals.
+- Thematic breaks (`---`, `***`, `___`) are highlighted instead of being swallowed as emphasis markers.
 
 ### Changed
 
@@ -18,6 +20,13 @@
 - `grep` and `find` now skip the same ignored directories (`.git`, `node_modules`, `build`, `dist`, caches, virtualenvs) with or without `ripgrep`.
 - An unset `${VAR}` placeholder in the active provider now raises a configuration error naming the variable instead of reaching the provider as literal text.
 - `web_fetch` accepts a `null` title from the provider and rejects only non-string titles.
+- Shell commands capture output through temporary files instead of pipes, so a timed-out command with a live background child returns partial output instead of blocking.
+- The system prompt is built once per agent instead of once per model turn, so `SYSTEM.md`/`AGENTS.md` are not re-read every round trip.
+- Web search results are now normalized: non-object entries are dropped, the count is capped by `max_count`, and long `content`/`text`/`snippet` fields are truncated by `max_content_chars`.
+- `write` enforces `tools.max_file_bytes` instead of an unrelated `max_file_chars * 8` heuristic.
+- `config show` no longer redacts token budgets and counters such as `max_tokens`, `prompt_tokens`, or `tokenizer`, while `access_token`-style keys stay hidden.
+- A configured `max_results` above the tool cap is clamped instead of silently ignored for the default limit.
+- `import-pi` works when Pi has `models.json` but no `settings.json`.
 
 ### Fixed
 
@@ -31,6 +40,16 @@
 - Web fetch responses reject non-string content and unset provider environment placeholders fail with the variable name.
 - Corrupt or non-object session headers no longer raise `AttributeError`; they are skipped by `list()` and resolved by filename.
 - Full session IDs now resolve against recorded session metadata instead of only the shortened filename.
+- A settings file that exists but cannot be read now raises a configuration error instead of silently falling back to the built-in defaults.
+- An empty model reply is reported as an incomplete task instead of a successful empty answer, and early-stop diagnostics no longer dump the full answer to stderr.
+- A failed turn no longer terminates the interactive session; provider and I/O errors are reported and the prompt continues.
+- Markdown rendering no longer drops a trailing backslash at the end of the answer.
+- `##` and `###` headings are no longer styled as headings of a lower level when the `#` marker is split across stream deltas.
+- Session files are created with private permissions from the first write instead of being tightened afterwards, and a failed usage write no longer discards the model's reply.
+- `sessions` no longer crashes on metadata whose `session_id` is not a string.
+- Provider and web-tool numeric settings reject non-finite values (`Infinity`) instead of raising `OverflowError`.
+- Responses requests no longer send empty `role`/`content` items that strict servers reject.
+- `grep` and `find` agree on recursive globs such as `**/*.py` in the Python fallback, and the fallback skips files larger than `tools.max_file_bytes`.
 
 ## 0.3.0 - 2026-10-24
 

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from minimalcode.cli import run
+from minimalcode.cli import _interactive, run
 from minimalcode.config import ensure_config, load_settings
 from minimalcode.provider import ProviderReply
 from minimalcode.session import SessionStore
@@ -39,6 +41,31 @@ class FakeCliProvider:
 
     def close(self) -> None:
         self.closed = True
+
+
+class StubAgent:
+    """Minimal stand-in for the interactive loop's agent contract."""
+
+    def __init__(self, cwd: Path, *, failures: int = 0) -> None:
+        self.shell = SimpleNamespace(label="stub-shell")
+        self.session = SimpleNamespace(cwd=cwd, path=None)
+        self.provider = None
+        self.tools = SimpleNamespace(web_client=None)
+        self.prompts: list[str] = []
+        self._failures = failures
+
+    def run(self, text: str) -> SimpleNamespace:
+        self.prompts.append(text)
+        if self._failures:
+            self._failures -= 1
+            raise OSError("simulated failure")
+        return SimpleNamespace(text="done\n", completed=True)
+
+    def status(self) -> dict:
+        return {}
+
+    def compact(self) -> bool:
+        return False
 
 
 class CliTests(unittest.TestCase):
@@ -135,6 +162,37 @@ class CliTests(unittest.TestCase):
             settings = load_settings(home, require_file=True)
             self.assertEqual(settings.get("model"), "new-model")
             self.assertEqual(settings.get("provider"), "deepseek")
+
+    def test_interactive_loop_survives_a_failed_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace, failures=1)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["first", "second", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, ["first", "second"])
+            self.assertIn("simulated failure", stderr.getvalue())
 
 
 if __name__ == "__main__":

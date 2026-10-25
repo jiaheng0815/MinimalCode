@@ -112,6 +112,34 @@ class ImporterTests(unittest.TestCase):
                     pi_home=root / "missing",
                 )
 
+    def test_missing_pi_settings_still_imports_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            _write_pi_config(pi_home)
+            (pi_home / "settings.json").unlink()
+
+            result = import_pi_settings(
+                destination_home=root / ".MinimalCode",
+                pi_home=pi_home,
+            )
+
+            self.assertEqual(result.provider, "local")
+            self.assertEqual(result.model, "bonsai2-27b")
+
+    def test_unreadable_pi_config_has_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            _write_pi_config(pi_home)
+            (pi_home / "models.json").write_bytes(b"\xff\xfe\x00")
+
+            with self.assertRaisesRegex(ConfigError, "cannot read"):
+                import_pi_settings(
+                    destination_home=root / ".MinimalCode",
+                    pi_home=pi_home,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

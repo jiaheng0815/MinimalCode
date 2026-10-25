@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from minimalcode import __version__
 from minimalcode.config import load_settings
 from minimalcode.errors import ToolError
 from minimalcode.shell import detect_shell
@@ -155,6 +156,63 @@ class WebToolTests(unittest.TestCase):
                         client.fetch("https://example.com")
                 finally:
                     client.close()
+
+    def test_non_finite_web_settings_are_rejected(self) -> None:
+        for key in ("default_count", "timeout_seconds"):
+            with self.subTest(key=key):
+                config = _web_config()
+                config["web_tools"][key] = float("inf")
+                with self.assertRaisesRegex(ToolError, "web_tools"):
+                    ProviderWebClient("custom", config)
+
+    def test_search_bounds_provider_output(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        "junk",
+                        {"title": "long", "content": "x" * 250},
+                        {"title": "short", "content": "ok"},
+                    ]
+                },
+            )
+
+        client = ProviderWebClient(
+            "custom", _web_config(), transport=httpx.MockTransport(handler)
+        )
+        try:
+            result = client.search("query")
+        finally:
+            client.close()
+
+        self.assertEqual(
+            [item["title"] for item in result["results"]], ["long", "short"]
+        )
+        content = result["results"][0]["content"]
+        self.assertTrue(content.endswith("<content truncated>"))
+        self.assertLessEqual(len(content), 100 + len("\n<content truncated>"))
+        self.assertEqual(
+            requests[0].headers["user-agent"], f"MinimalCode/{__version__}"
+        )
+
+    def test_search_limits_the_number_of_results(self) -> None:
+        payload = {"results": [{"title": str(index)} for index in range(20)]}
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=payload)
+            ),
+        )
+        try:
+            result = client.search("query")
+        finally:
+            client.close()
+        self.assertEqual(len(result["results"]), 5)
 
     def test_fetch_accepts_null_title(self) -> None:
         client = ProviderWebClient(

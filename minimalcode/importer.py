@@ -25,12 +25,18 @@ class ImportResult:
     skipped: list[str]
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(path: Path, *, missing_ok: bool = False) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError as exc:
-        raise ConfigError(f"Pi config file not found: {path}") from exc
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        text = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise ConfigError(f"Pi config file not found: {path}") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: top-level value must be an object")
@@ -85,7 +91,8 @@ def import_pi_settings(
             f"invalid Pi config directory: {pi_home or '~/.pi/agent'}"
         ) from exc
     models_data = _read_json(pi_root / "models.json")
-    settings_data = _read_json(pi_root / "settings.json")
+    # Provider defaults are optional: Pi still works when only models.json exists.
+    settings_data = _read_json(pi_root / "settings.json", missing_ok=True)
     default_provider = str(settings_data.get("defaultProvider") or "")
     default_model = str(settings_data.get("defaultModel") or "")
 

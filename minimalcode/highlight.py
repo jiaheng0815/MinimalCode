@@ -120,6 +120,7 @@ _KEYWORDS = {
     "yield",
 }
 _KEYWORD_RE = re.compile(r"\b(?:" + "|".join(sorted(_KEYWORDS)) + r")\b")
+_RULE_RE = re.compile(r"([*_-])(?:[ \t]*\1){2,}")
 
 
 def strip_ansi(text: str) -> str:
@@ -276,6 +277,11 @@ class MarkdownHighlighter:
             while level_end < len(text) and text[level_end] == "#":
                 level_end += 1
             level = level_end - body_start
+            if level_end == len(text) and not final:
+                # The run of '#' may still be growing. Committing now would fix
+                # `##` and `###` headings to the h1 style whenever the marker is
+                # split across deltas, so wait for the next non-'#' character.
+                return False
             if level <= 6 and (level_end == len(text) or text[level_end].isspace()):
                 style = self.palette[f"h{level}"]
                 self._emit(segments, level_end, style)
@@ -289,6 +295,21 @@ class MarkdownHighlighter:
             self._line_kind = "quote"
             self._at_line_start = False
             return True
+
+        if first in "-*_":
+            line_end = text.find("\n", body_start)
+            line = text[body_start:] if line_end < 0 else text[body_start:line_end]
+            if _RULE_RE.fullmatch(line.strip()):
+                if line_end < 0 and not final:
+                    return False
+                consumed = len(text) if line_end < 0 else line_end + 1
+                self._emit(segments, consumed, self.palette["rule"])
+                self._end_line()
+                return True
+            if line_end < 0 and not final and not line.strip(" \t*_-"):
+                # The line may still become a `---` / `***` rule; wait for the
+                # rest of it instead of styling a partial marker as emphasis.
+                return False
 
         if first in "-+*":
             if body_start + 1 >= len(text):
@@ -406,7 +427,13 @@ class MarkdownHighlighter:
 
             if char == "\\":
                 if start + 1 >= len(text):
-                    return
+                    if not final:
+                        return
+                    # A lone trailing backslash is still text; dropping it would
+                    # silently lose the final character of the answer.
+                    self._append(segments, char, style)
+                    self._advance(1)
+                    continue
                 self._append(segments, text[start : start + 2], style)
                 self._advance(2)
                 continue

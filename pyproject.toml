@@ -31,5 +31,9 @@ include = ["minimalcode*"]
 [tool.setuptools.package-data]
 minimalcode = ["defaults.json"]
 
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

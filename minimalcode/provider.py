@@ -170,13 +170,13 @@ class OpenAICompatibleProvider:
         try:
             self.context_window = int(config.get("context_window", 128_000))
             self.timeout_seconds = float(config.get("timeout_seconds", 120))
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ProviderError(
                 f"provider {name!r} has invalid numeric settings"
             ) from exc
         if self.context_window < 1:
             raise ProviderError(f"provider {name!r} requires a positive context_window")
-        if math.isnan(self.timeout_seconds) or self.timeout_seconds <= 0:
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ProviderError(
                 f"provider {name!r} requires a positive timeout_seconds"
             )
@@ -289,6 +289,10 @@ class OpenAICompatibleProvider:
                         }
                     )
                 continue
+            if content is None or content == "":
+                # Transport items with an empty payload are rejected by strict
+                # Responses-compatible servers; there is nothing to send.
+                continue
             items.append({"role": role, "content": content})
         return items
 
@@ -358,7 +362,7 @@ class OpenAICompatibleProvider:
         reply = self.stream_chat(messages, tools=None, on_text=None)
         return reply.content
 
-    def _open(self, payload: dict[str, Any]):
+    def _open(self, payload: dict[str, Any]) -> httpx.Response:
         last_error: ProviderError | None = None
         for attempt in range(2):
             try:
@@ -376,31 +380,35 @@ class OpenAICompatibleProvider:
                 continue
             if response.status_code < 400:
                 return response
+
+            status_code = response.status_code
+            # Headers must be read before the body is consumed and closed.
+            retry_after = response.headers.get("Retry-After", "1")
             try:
                 body = response.read().decode("utf-8", errors="replace")[:2000]
             except httpx.HTTPError as exc:
                 body = ""
                 last_error = ProviderError(
                     f"provider network error while reading response: {exc}",
-                    status_code=response.status_code,
+                    status_code=status_code,
                 )
             else:
                 last_error = ProviderError(
-                    f"provider returned HTTP {response.status_code}: {body}",
-                    status_code=response.status_code,
+                    f"provider returned HTTP {status_code}: {body}",
+                    status_code=status_code,
                     body=body,
                 )
             finally:
                 response.close()
-            if response.status_code not in {429, 500, 502, 503, 504} or attempt:
+            if status_code not in {429, 500, 502, 503, 504} or attempt:
                 break
-            retry_after = response.headers.get("Retry-After", "1")
             try:
                 delay = min(max(float(retry_after), 0.2), 5.0)
             except ValueError:
                 delay = 1.0
             time.sleep(delay)
-        assert last_error is not None
+        if last_error is None:  # pragma: no cover - defensive
+            raise ProviderError("provider request failed")
         raise last_error
 
     def _chat_stream_request(
@@ -848,7 +856,10 @@ class OpenAICompatibleProvider:
         if not isinstance(data, dict):
             raise ProviderError("provider response must be an object")
         if data.get("status") == "failed" or data.get("error"):
-            raise ProviderError(f"provider response failed: {data.get('error')}")
+            detail = (
+                data.get("error") or data.get("incomplete_details") or "unknown error"
+            )
+            raise ProviderError(f"provider response failed: {detail}")
         output = data.get("output")
         if not isinstance(output, list) and not isinstance(
             data.get("output_text"), str

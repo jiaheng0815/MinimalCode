@@ -10,6 +10,7 @@ from unittest.mock import patch
 from minimalcode.agent import Agent
 from minimalcode.config import load_settings
 from minimalcode.highlight import strip_ansi
+from minimalcode.prompt import build_system_prompt
 from minimalcode.provider import ProviderReply, ToolCall
 from minimalcode.session import SessionStore
 from minimalcode.shell import detect_shell
@@ -135,6 +136,31 @@ class TruncatedToolProvider(FakeProvider):
                 ],
                 finish_reason="length",
             )
+        ]
+
+
+class EmptyReplyProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.responses = [
+            ProviderReply(content="", tool_calls=[], finish_reason="stop", usage={}),
+        ]
+
+
+class FilteredReplyProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.responses = [
+            ProviderReply(
+                content="partial answer",
+                tool_calls=[],
+                finish_reason="content_filter",
+                usage={},
+            ),
         ]
 
 
@@ -312,6 +338,99 @@ class AgentTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn("\x1b[", rendered)
             self.assertEqual(strip_ansi(rendered), "# Result\n\ndone\n")
+
+    def test_system_prompt_is_built_once_per_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            with patch(
+                "minimalcode.agent.build_system_prompt",
+                wraps=build_system_prompt,
+            ) as build:
+                agent = Agent(
+                    settings=settings,
+                    provider=FakeProvider(),
+                    session=session,
+                    tool_runtime=ToolRuntime(settings, workspace, shell),
+                    shell=shell,
+                    quiet=True,
+                    stream_output=False,
+                )
+                agent.run("write result.txt")
+
+            self.assertEqual(build.call_count, 1)
+
+    def test_empty_completion_is_reported_as_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            errors = io.StringIO()
+            agent = Agent(
+                settings=settings,
+                provider=EmptyReplyProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                output=io.StringIO(),
+                error_output=errors,
+                stream_output=False,
+            )
+
+            result = agent.run("say something")
+
+            self.assertFalse(result.completed)
+            self.assertEqual(result.text, "")
+            self.assertIn("empty response", errors.getvalue())
+
+    def test_finish_reason_is_reported_for_a_stopped_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            errors = io.StringIO()
+            agent = Agent(
+                settings=settings,
+                provider=FilteredReplyProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                output=io.StringIO(),
+                error_output=errors,
+                stream_output=False,
+            )
+
+            result = agent.run("say something")
+
+            self.assertFalse(result.completed)
+            self.assertEqual(result.text, "partial answer")
+            self.assertIn("partial answer", errors.getvalue())
+            self.assertIn("content_filter", errors.getvalue())
 
     def test_shell_output_is_shown_in_tool_activity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

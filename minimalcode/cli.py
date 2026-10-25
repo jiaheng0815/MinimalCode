@@ -163,8 +163,6 @@ def _management_command(argv: Sequence[str]) -> int | None:
 
 
 def _resolve_cwd(raw: str | None) -> Path:
-    from .errors import ConfigError
-
     try:
         path = Path(raw).expanduser() if raw else Path.cwd()
         resolved = path.resolve()
@@ -183,8 +181,6 @@ def _load_or_create_session(
     provider: str,
     model: str,
 ) -> tuple[Session, Path]:
-    from .errors import ConfigError
-
     if args.continue_session and args.session:
         raise ConfigError("--continue and --session cannot be used together")
     if args.no_session and (args.continue_session or args.session):
@@ -292,6 +288,7 @@ def _interactive(
                     session.cwd,
                     agent.shell,
                     web_client=agent.tools.web_client,
+                    vision_client=agent.tools.vision_client,
                 ),
                 shell=agent.shell,
                 max_turns=args.max_turns,
@@ -326,8 +323,9 @@ def _interactive(
             _ensure_newline(result)
         except KeyboardInterrupt:
             print("\ncancelled", file=sys.stderr)
-        except ProviderError as exc:
-            print(f"provider error: {exc}", file=sys.stderr)
+        except (MinimalCodeError, OSError) as exc:
+            # A failed turn must not end the session: report and keep reading.
+            print(f"error: {exc}", file=sys.stderr)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -354,6 +352,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     from .session import SessionStore
     from .shell import detect_shell
     from .tools import ToolRuntime
+    from .vision import ProviderVisionClient
     from .web import ProviderWebClient
 
     cwd = _resolve_cwd(args.cwd)
@@ -369,6 +368,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         thinking=args.thinking,
     )
     web_client = None
+    vision_client = None
     try:
         store = SessionStore(settings)
         session, effective_cwd = _load_or_create_session(
@@ -382,11 +382,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         if not effective_cwd.is_dir():
             raise ConfigError(f"session workspace no longer exists: {effective_cwd}")
         web_client = ProviderWebClient(provider_name, provider.config)
+        vision_client = ProviderVisionClient(
+            provider_name, provider.config, model=model
+        )
         tools = ToolRuntime(
             settings,
             effective_cwd,
             shell,
             web_client=web_client,
+            vision_client=vision_client,
         )
         agent = Agent(
             settings=settings,
@@ -413,6 +417,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     finally:
         if web_client is not None:
             web_client.close()
+        if vision_client is not None:
+            vision_client.close()
         provider.close()
 
 

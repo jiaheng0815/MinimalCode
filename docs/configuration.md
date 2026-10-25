@@ -34,7 +34,7 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 |---|---:|---|
 | `allow_outside_workspace` | `false` | Allow file tools outside the workspace |
 | `max_file_chars` | `160000` | Maximum characters returned by one `read` call |
-| `max_file_bytes` | `5000000` | Maximum full-file read/edit size |
+| `max_file_bytes` | `5000000` | Maximum size accepted by `write` and `edit` |
 | `max_results` | `200` | Default `grep`/`find` result limit |
 
 The `shell` tool always inherits the operating-system permissions of the current process.
@@ -42,7 +42,12 @@ The `shell` tool always inherits the operating-system permissions of the current
 `grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
 `dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
 Neither path parses `.gitignore`; install `ripgrep` if ignore-file semantics are
-required.
+required. A configured `max_results` above a tool's hard cap (2000 for `grep`,
+5000 for `find`) is clamped to that cap.
+
+Shell commands write stdout and stderr to temporary files instead of pipes, so a
+command that times out while a background child still holds its output returns
+the partial output instead of blocking.
 
 ## Context
 
@@ -109,6 +114,11 @@ checks. The built-in DeepSeek provider enables them with:
 `api_key` or `api_key_env` inside `web_tools` override the provider credential.
 When omitted, the provider API key is reused.
 
+Search results are normalized before they reach the model: non-object entries are
+dropped, at most `max_count` results are kept, and `content`/`text`/`snippet`
+fields longer than `max_content_chars` are truncated with a
+`<content truncated>` marker. `web_fetch` applies the same limit to page content.
+
 `web_tools.base_url` and its credential are trusted provider configuration.
 `web_fetch` validates that the requested target is HTTP(S), but the target URL
 is fetched by the configured provider rather than directly by MinimalCode.
@@ -123,3 +133,41 @@ Environment placeholders such as `${CUSTOM_PROVIDER_KEY}` are expanded when
 stays unresolved raises a configuration error that names the variable, instead
 of being sent to the provider as literal text. Other providers stay lazy: their
 placeholders are only checked when they become active.
+
+## Vision
+
+`read_image` is provider configuration, like `web_tools`. A `vision` block
+enables it and points at an OpenAI-compatible chat endpoint:
+
+```json
+"vision": {
+  "enabled": true,
+  "base_url": "https://api.deepseek.com/v1",
+  "model": "deepseek-flash",
+  "timeout_seconds": 120,
+  "max_image_bytes": 33554432,
+  "max_chars": 8000,
+  "detail": "auto",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "headers": {}
+}
+```
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Expose `read_image` for this provider |
+| `base_url` | provider `base_url` | Chat endpoint root; a full `/chat/completions` URL is also accepted |
+| `model` | active model | Vision-capable model ID |
+| `timeout_seconds` | `120` | HTTP timeout for one image request |
+| `max_image_bytes` | `33554432` | Largest image accepted before base64 encoding |
+| `max_chars` | `8000` | Maximum description characters returned to the model |
+| `detail` | `"auto"` | `low`, `high`, `original`, or `auto` |
+| `api_key_env` | provider credential | Optional override for the bearer token |
+
+Images are sent inline as base64 data URLs, so `max_image_bytes` must stay
+below the provider's request-body limit (DeepSeek caps base64 requests at
+48 MiB and single images at 32 MiB). Formats are detected from file content;
+JPEG, PNG, GIF, and WebP are accepted. Images are read through the same
+workspace check as `read`, so files outside the workspace require
+`tools.allow_outside_workspace: true`.
+
