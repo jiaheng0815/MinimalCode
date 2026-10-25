@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
@@ -151,13 +152,21 @@ def run_shell(
     if env:
         process_env.update({str(key): str(value) for key, value in env.items()})
 
-    # A subagent reads its prompt from stdin, so the payload is piped in;
-    # otherwise stdin stays closed so an interactive program cannot hang.
+    # A subagent reads its prompt from stdin, so the payload is fed from a file;
+    # otherwise stdin stays closed so an interactive program cannot hang. A file
+    # rather than a pipe keeps the write off this thread, which leaves the child
+    # alive long enough for the timeout path to kill its whole tree.
     stdin_options: dict[str, object]
     if stdin_text is None:
         stdin_options = {"stdin": subprocess.DEVNULL}
     else:
-        stdin_options = {"input": str(stdin_text).encode("utf-8")}
+        stdin_options = {}
+
+    # On POSIX the child leads its own process group so a timeout can signal the
+    # tree; Windows walks the parent links with `taskkill /T`.
+    tree_options: dict[str, object] = (
+        {} if os.name == "nt" else {"start_new_session": True}
+    )
 
     # Output is collected through temporary files instead of pipes. With pipes a
     # timed-out command that left a background child holding the write end made
@@ -167,19 +176,32 @@ def run_shell(
         with (
             tempfile.TemporaryFile() as out_file,
             tempfile.TemporaryFile() as err_file,
+            tempfile.TemporaryFile() as in_file,
         ):
+            if stdin_text is not None:
+                in_file.write(str(stdin_text).encode("utf-8"))
+                in_file.seek(0)
+                stdin_options = {"stdin": in_file}
             try:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     _prefix_command(shell, command),
                     cwd=cwd,
                     env=process_env,
-                    **stdin_options,
                     stdout=out_file,
                     stderr=err_file,
-                    timeout=timeout,
-                    check=False,
+                    **stdin_options,
+                    **tree_options,
                 )
+            except (OSError, ValueError) as exc:
+                return {
+                    "status": "error",
+                    "shell": shell.label,
+                    "message": str(exc),
+                }
+            try:
+                returncode = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
+                _terminate_tree(process)
                 stdout = _read_capture(out_file)
                 stderr = _read_capture(err_file)
                 stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
@@ -204,13 +226,43 @@ def run_shell(
     stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
     stderr, stderr_truncated = truncate_text(stderr, max_output_chars)
     return {
-        "status": "success" if completed.returncode == 0 else "error",
+        "status": "success" if returncode == 0 else "error",
         "shell": shell.label,
-        "exit_code": completed.returncode,
+        "exit_code": returncode,
         "stdout": stdout.rstrip(),
         "stderr": stderr.rstrip(),
         "truncated": stdout_truncated or stderr_truncated,
     }
+
+
+def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill a timed-out command and every process it spawned.
+
+    ``Popen.kill`` signals only the direct child, so a wrapper shell that ran a
+    test runner or tool left its grandchildren behind as orphans that kept
+    burning CPU long after the agent had given up on the command.
+    """
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _read_capture(handle: IO[bytes]) -> str:

@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Fixed a timed-out shell command leaving its children running: the timeout now kills the whole process tree (on Windows via `taskkill /T`, elsewhere via the child's process group) instead of only the direct shell process, so orphaned test runners no longer keep pinning CPU cores. The timed-out `subagent` prompt is fed from a file rather than a pipe for the same reason.
 - Fixed `read` returning empty content when a single line exceeds `max_file_chars`; the oversized line's prefix is now returned with `truncated`.
 - Fixed `edit` rewriting line endings across the whole file and failing on CRLF files when `old_text` used LF; only the matched span is rewritten.
 - Fixed Markdown rendering stalling on deeply indented lines: each delta now finishes the scan where the previous one stopped instead of rescanning the line prefix.

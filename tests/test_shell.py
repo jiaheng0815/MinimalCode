@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import time
 import unittest
@@ -68,6 +69,63 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(result["status"], "timeout", result)
         self.assertIn("started", str(result["stdout"]))
         self.assertLess(elapsed, 15.0)
+
+    def test_stdin_text_reaches_the_command(self) -> None:
+        shell = detect_shell()
+        powershell = shell.kind in {"pwsh7", "windows_powershell"}
+        call = "& " if powershell else ""
+        command = (
+            f'{call}"{sys.executable}" -c '
+            "'import sys; sys.stdout.write(sys.stdin.read().upper())'"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            result = run_shell(
+                command,
+                shell=shell,
+                cwd=Path(temp),
+                timeout=30,
+                max_output_chars=10_000,
+                stdin_text="prompt text",
+            )
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(str(result["stdout"]).strip(), "PROMPT TEXT")
+
+    def test_timeout_kills_the_process_tree(self) -> None:
+        # A timed-out shell used to orphan its grandchildren: they survived the
+        # kill and kept burning CPU for hours, so the whole tree must go.
+        shell = detect_shell()
+        powershell = shell.kind in {"pwsh7", "windows_powershell"}
+        call = "& " if powershell else ""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / "marker.txt"
+            sleeper = root / "sleeper.py"
+            sleeper.write_text(
+                "import pathlib, time\n"
+                "time.sleep(2)\n"
+                f"pathlib.Path({str(marker)!r}).write_text('survived')\n",
+                encoding="utf-8",
+            )
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, {str(sleeper)!r}])\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            command = f'{call}"{sys.executable}" "{parent}"'
+            result = run_shell(
+                command,
+                shell=shell,
+                cwd=root,
+                timeout=1,
+                max_output_chars=10_000,
+            )
+            self.assertEqual(result["status"], "timeout", result)
+            deadline = time.perf_counter() + 4
+            while time.perf_counter() < deadline and not marker.exists():
+                time.sleep(0.1)
+            self.assertFalse(marker.exists(), "the grandchild outlived the timeout")
 
     def test_zero_budget_truncation_drops_the_text(self) -> None:
         self.assertEqual(truncate_text("abc", 0), ("", True))
