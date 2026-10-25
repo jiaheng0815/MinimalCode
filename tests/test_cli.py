@@ -50,7 +50,9 @@ class StubAgent:
     def __init__(self, cwd: Path, *, failures: int = 0) -> None:
         self.shell = SimpleNamespace(label="stub-shell")
         self.session = SimpleNamespace(cwd=cwd, path=None)
-        self.provider = SimpleNamespace(name="fake", model="fake-model", thinking="high")
+        self.provider = SimpleNamespace(
+            name="fake", model="fake-model", thinking="high"
+        )
         self.tools = SimpleNamespace(web_client=None, vision_client=None)
         self.prompts: list[str] = []
         self._failures = failures

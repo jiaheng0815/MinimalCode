@@ -434,9 +434,10 @@ class ToolRuntime:
         self.thinking = thinking
         self.subagent_depth = subagent_depth_from_env()
         self.subagent_max_depth = int(settings.get("subagent.max_depth", 2))
-        self.subagent_enabled = bool(
-            settings.get("subagent.enabled", True)
-        ) and self.subagent_depth < self.subagent_max_depth
+        self.subagent_enabled = (
+            bool(settings.get("subagent.enabled", True))
+            and self.subagent_depth < self.subagent_max_depth
+        )
         self.subagent_timeout = float(settings.get("subagent.timeout_seconds", 900))
         self.subagent_max_turns = int(settings.get("subagent.max_turns", 40))
         self.allow_outside = bool(settings.get("tools.allow_outside_workspace", False))

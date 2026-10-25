@@ -180,7 +180,9 @@ class _SubagentHandler(BaseHTTPRequestHandler):
                 ]
                 self._send(events)
                 return
-        self._send([{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}])
+        self._send(
+            [{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}]
+        )
 
     def _send(self, events: list[dict]) -> None:
         body = _sse(events)

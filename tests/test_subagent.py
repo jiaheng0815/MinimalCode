@@ -77,7 +77,8 @@ class SubagentToolTests(unittest.TestCase):
         names = {tool["function"]["name"] for tool in available_tool_schemas()}
         self.assertNotIn("subagent", names)
         names = {
-            tool["function"]["name"] for tool in available_tool_schemas(None, None, True)
+            tool["function"]["name"]
+            for tool in available_tool_schemas(None, None, True)
         }
         self.assertIn("subagent", names)
 
