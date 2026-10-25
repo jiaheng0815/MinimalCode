@@ -1,14 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 ### Added
 
 - Added a configurable, fail-closed sandbox execution layer (`minimalcode/sandbox.py`). All shell/subagent commands, file reads/writes, and searches now pass through `SandboxRunner`: workspace-confined roots (including symlink-escape checks), sensitive-file blocking, default network deny (optional host allowlist), timeout/output/resource caps, per-command temporary directories that are always removed, and a denial audit trail. Backends are pluggable: the cross-platform `local` baseline uses policy plus POSIX rlimits, while `bwrap`, `firejail`, `sandbox-exec`, and `docker` are optional and never required; an explicitly selected backend that is unavailable refuses to run. New settings: `sandbox.enabled`, `sandbox.backend`, `sandbox.allowed_roots`, `sandbox.network_policy`, `sandbox.allowed_hosts`, `sandbox.timeout_seconds`, `sandbox.max_output_chars`, `sandbox.allow_sensitive_files`, `sandbox.max_memory_mb`, `sandbox.max_processes`, `sandbox.docker_image`; new CLI flags `--sandbox/--no-sandbox`, `--sandbox-backend`, `--sandbox-root`, `--sandbox-network`, `--sandbox-allow-host`, `--sandbox-timeout`, `--sandbox-max-output`, `--sandbox-allow-sensitive`; new `minimalcode sandbox` command.
+- Bumped the version to 0.6.0.
+
+## 0.5.0
+
+### Added
+
 - Added the `max` reasoning-effort level: the highest tier, forwarded verbatim as `reasoning_effort` (Chat) / `reasoning.effort` (Responses) and accepted by `--thinking`, `thinking`, and `/effort`.
 - Added the `subagent` tool: the agent can dispatch a fresh `minimalcode -p` child process through the configured shell and use its final answer, which suits code review, broad analysis, and independent verification. The task travels on stdin, the child inherits `--home`/provider/model/effort/workspace, and nesting is capped by `subagent.max_depth` (default `2`, tracked through `MINIMALCODE_SUBAGENT_DEPTH`). New settings: `subagent.enabled`, `subagent.max_depth`, `subagent.max_turns`, `subagent.timeout_seconds`.
-- Bumped the version to 0.5.0.
 - Added the `/effort` interactive command to inspect or switch reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max`) without restarting; `none` disables thinking and `/status` reports the active effort.
+- Bumped the version to 0.5.0.
 - Added the `read_image` tool: local JPEG/PNG/GIF/WebP images are sent to the provider's vision model and returned as text descriptions or answers. It is enabled by the provider's `vision` block, defaults on for DeepSeek, and stays inside the workspace.
 - Increased the default per-task model/tool loop budget from 50 to 1000 turns.
 - Added streaming Markdown and README rendering for interactive terminals.
