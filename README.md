@@ -275,3 +275,7 @@ minimalcode/
 - RPC/SDK 集成。
 - 扩展、Skills 和主题系统。
 - 更细粒度的工具权限。
+
+## 许可证
+
+[Apache License 2.0](LICENSE)，Copyright 2026 jiaheng0815。

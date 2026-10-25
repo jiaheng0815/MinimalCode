@@ -36,6 +36,7 @@
 - `config show` no longer redacts token budgets and counters such as `max_tokens`, `prompt_tokens`, or `tokenizer`, while `access_token`-style keys stay hidden.
 - A configured `max_results` above the tool cap is clamped instead of silently ignored for the default limit.
 - `import-pi` works when Pi has `models.json` but no `settings.json`.
+- The project is now licensed under the Apache License 2.0: `LICENSE` holds the full text, `pyproject.toml` declares `license = "Apache-2.0"` with `license-files`, and building a wheel or sdist requires setuptools 77 or newer.
 
 ### Fixed
 
