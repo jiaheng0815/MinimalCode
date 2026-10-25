@@ -21,7 +21,8 @@ CLI
 | Module | Responsibility |
 |---|---|
 | `config.py` | Settings merge, validation, environment expansion, atomic config writes |
-| `shell.py` | Shell detection, fast subprocess execution, UTF-8 normalization |
+| `sandbox.py` | Unified sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
+| `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
 | `provider.py` | OpenAI Chat/Responses HTTP and SSE transport |
 | `web.py` | Configurable provider web search and fetch client |

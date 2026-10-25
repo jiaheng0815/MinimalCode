@@ -37,7 +37,9 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 | `max_file_bytes` | `5000000` | Maximum size accepted by `write` and `edit` |
 | `max_results` | `200` | Default `grep`/`find` result limit |
 
-The `shell` tool always inherits the operating-system permissions of the current process.
+The `shell` tool runs through the sandbox layer described below; it no longer
+unconditionally inherits every operating-system permission of the current
+process.
 
 `grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
 `dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
@@ -53,6 +55,96 @@ of unbounded temporary files, so a command that times out while a background
 child still holds its output returns the partial output without blocking or
 filling the disk. A timeout kills the whole process tree, and Ctrl-C follows the
 same cleanup path.
+
+## Sandbox
+
+Every tool that resolves a path or spawns a process goes through the single
+`SandboxRunner` entry point in `minimalcode/sandbox.py`. The layer is
+fail-closed: a path outside the allowed roots, a credential-like file, a denied
+network command, or an unavailable backend is refused instead of quietly
+falling back to unsandboxed execution. Denials are recorded with their reason in
+`SandboxAudit`, surfaced in tool errors and `/status`, and summarized by
+`minimalcode sandbox` together with backend availability.
+
+| Key | Default | Meaning |
+|---|---|---:|
+| `enabled` | `true` | Enforce path, network, timeout, output, and resource policy |
+| `backend` | `"local"` | `auto`, `local`, `bwrap`, `firejail`, `sandbox-exec`, or `docker` |
+| `allowed_roots` | `[]` | Extra readable/writable roots; relative entries resolve against the workspace. The workspace is always allowed |
+| `network_policy` | `"deny"` | `deny`, `allowlist`, or `allow` |
+| `allowed_hosts` | `[]` | Hosts (or parent domains) accepted under `allowlist` |
+| `timeout_seconds` | `120` | Hard cap for one command, on top of `shell.timeout_seconds` |
+| `max_output_chars` | `60000` | Hard cap for one shell command's stdout/stderr |
+| `allow_sensitive_files` | `false` | Permit `.env`, private keys, `.ssh/`, `.aws/`, and similar paths |
+| `max_memory_mb` | `2048` | Linux `RLIMIT_AS` for child processes; `0` disables |
+| `max_processes` | `0` | Linux `RLIMIT_NPROC`; `0` disables |
+| `docker_image` | `"alpine:3"` | Image used by the `docker` backend |
+
+`allowed_roots` and sensitive-file checks apply to `read`, `write`, `edit`,
+`grep`, `find`, `read_image`, and to `shell`/`subagent` working directories and
+their resolved symlinks. Symlinks are resolved before the check, so a link that
+points outside the workspace is refused. Sensitive names are blocked in both
+directions and excluded from bulk searches; `.env.example` and similar templates
+remain readable.
+
+`network_policy` has three distinct meanings:
+
+- `deny` (default): filesystem/namespace backends (`bwrap`, `firejail`,
+  `sandbox-exec`, `docker`) remove network access. The `local` baseline has no
+  network namespace, so it rejects commands that look like network clients
+  (`curl`, `wget`, `ssh`, `git clone`, `pip install`, package managers, ...).
+- `allowlist`: named hosts are checked against `allowed_hosts`; commands whose
+  target host cannot be determined are refused. At least one host is required.
+- `allow`: no network restriction.
+
+Backends are probed at execution time. `auto` picks the first available of
+`bwrap`, `firejail`, `sandbox-exec`, then `local`; the default is `local`.
+Selecting a backend that is not installed refuses to run the command (it never
+silently downgrades). Path and sensitive-file policy is enforced in-process, so
+file tools stay usable even when a command backend is unavailable; only command
+execution is gated by the backend.
+`bwrap` isolates namespaces and mounts the workspace/allowed roots read-write
+with the rest of the filesystem read-only. `firejail` adds a private temp
+directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies
+network traffic for `deny`. `docker` runs `sh -lc` in the configured image with
+the workspace mounted and no host environment; it refuses argv-based search
+children, so `grep`/`find` fall back to the in-process Python scanner.
+
+The local baseline enforces the timeout and output caps on every platform,
+kills the process tree on timeout, and runs children with a private temporary
+directory (`TMPDIR`/`TMP`/`TEMP`) that is removed afterwards. On POSIX it also
+applies `RLIMIT_CORE`, `RLIMIT_CPU`, and, on Linux, `RLIMIT_AS`/`RLIMIT_NPROC`.
+
+CLI overrides (all optional):
+
+```text
+--sandbox / --no-sandbox
+--sandbox-backend auto|local|bwrap|firejail|sandbox-exec|docker
+--sandbox-root PATH          (repeatable)
+--sandbox-network deny|allowlist|allow
+--sandbox-allow-host HOST    (repeatable)
+--sandbox-timeout SECONDS
+--sandbox-max-output CHARS
+--sandbox-allow-sensitive / --no-sandbox-allow-sensitive
+```
+
+`tools.allow_outside_workspace` remains an explicit legacy escape hatch: when
+set, it bypasses the root confinement but still applies sensitive-file and
+network policy. With the sandbox disabled entirely, path checking reverts to the
+old workspace-only behaviour.
+
+Known limits: the `local` baseline is a policy and resource layer, not an
+OS-level filesystem jail, and its network gate is a command-string heuristic
+rather than kernel enforcement. `shell` still inherits the user's environment
+(including credentials) and the user's OS permissions. Windows has no rlimit
+equivalent in this baseline, and `RLIMIT_*` applies to the direct child and its
+descendants only where the platform supports it. Path checks are performed
+before opening a file, so a local attacker who can modify the tree concurrently
+can still win a TOCTOU race. Docker backend availability depends on a working
+Docker daemon and a locally pullable image. `auto` and explicit OS backends use
+binary presence as the availability signal; a binary that exists but cannot
+create its sandbox (for example, unprivileged user namespaces are disabled)
+reports the execution failure instead of falling back to `local`.
 
 ## Subagents
 

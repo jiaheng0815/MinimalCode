@@ -72,6 +72,14 @@ minimalcode [prompt ...] [options]
 | `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
 | `--cwd <dir>` | 指定工作区 |
 | `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
+| `--sandbox`, `--no-sandbox` | 开启/关闭沙箱执行层（默认开启） |
+| `--sandbox-backend <name>` | `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker` |
+| `--sandbox-root <path>` | 额外允许的读写根，可重复 |
+| `--sandbox-network <policy>` | `deny`（默认）、`allowlist`、`allow` |
+| `--sandbox-allow-host <host>` | `allowlist` 允许的主机，可重复 |
+| `--sandbox-timeout <sec>` | 单条命令的硬超时 |
+| `--sandbox-max-output <chars>` | 单条命令返回的 stdout/stderr 上限 |
+| `--sandbox-allow-sensitive` | 允许访问 `.env`、私钥等敏感文件 |
 | `--quiet` | 隐藏工具活动 |
 | `--no-highlight` | 关闭 Markdown 高亮 |
 | `--version` | 打印版本 |
@@ -87,6 +95,7 @@ minimalcode [prompt ...] [options]
 | `minimalcode config set-provider <name>` | 写入默认供应商 |
 | `minimalcode sessions` | 列出已保存会话（时间、ID、模型、工作区） |
 | `minimalcode shell` | 显示探测到的 shell |
+| `minimalcode sandbox` | 打印当前沙箱策略与各后端可用性 |
 | `minimalcode import-pi` | 从 Pi 配置迁移供应商、模型和上下文窗口 |
 
 `import-pi` 默认把 Pi 中已有的 API key 复制到权限受限的配置中，但不会在终端打印密钥。加 `--no-secrets` 则跳过密钥，改用环境变量；`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
@@ -157,7 +166,8 @@ JSON 输出字段：
 
 ### 实现要点
 
-- **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 才放行外部路径。`shell` 子进程继承当前用户权限，不受此限制。
+- **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。
+- **沙箱执行层**：`sandbox.enabled` 默认开启，默认后端 `local`（跨平台策略与子进程限制基线）；可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
 - **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义，且都不解析 `.gitignore`；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
 - **shell**：`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾 `exit $LASTEXITCODE` 保留子进程真实退出码。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
@@ -208,6 +218,26 @@ JSON 输出字段：
 - `include_usage` 仅在服务端接受 `stream_options` 时开启；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。
 - 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可。
 
+沙箱执行层默认开启、默认只允许工作区、默认禁网：
+
+```json
+"sandbox": {
+  "enabled": true,
+  "backend": "local",
+  "allowed_roots": [],
+  "network_policy": "deny",
+  "allowed_hosts": [],
+  "timeout_seconds": 120,
+  "max_output_chars": 60000,
+  "allow_sensitive_files": false,
+  "max_memory_mb": 2048,
+  "max_processes": 0,
+  "docker_image": "alpine:3"
+}
+```
+
+`backend` 可选 `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker`；不可用的后端会拒绝执行而不是降级。命令行提供 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output` 和 `--sandbox-allow-sensitive`，`minimalcode sandbox` 可查看当前策略与后端可用性。
+
 完整字段、默认值、Web 工具和视觉配置见 [docs/configuration.md](docs/configuration.md)；内置默认值以包内 `minimalcode/defaults.json` 为准。
 
 ## 终端高亮
@@ -229,8 +259,11 @@ JSON 输出字段：
 
 ## 安全边界
 
-- MinimalCode 会执行模型生成的 shell 命令，子进程拥有当前用户权限。敏感项目应在容器、虚拟机或受限账户中运行。
-- 文件工具默认限制在工作区内；这不能替代操作系统级隔离。
+- MinimalCode 会执行模型生成的 shell 命令，所有命令统一经过沙箱入口。默认拒绝工作区外路径、符号链接逃逸、常见敏感文件和疑似联网命令；后端不可用时 fail-closed 拒绝执行。
+- 默认的 `local` 基线是策略、超时、输出和子进程资源限制层，不是操作系统级文件系统或网络隔离。需要硬隔离时请选择 `bwrap`/`firejail`/`sandbox-exec`/`docker`，或把 MinimalCode 放进容器、虚拟机或受限账户中运行。
+- `local` 的网络 `deny` 基于命令字符串识别，无法阻止任意程序自行发起网络连接；`allowlist` 同样依赖命令中的主机可被识别。真正的禁网依赖支持网络命名空间的后端。
+- 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
+- `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
 - `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。

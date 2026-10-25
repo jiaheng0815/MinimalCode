@@ -17,6 +17,19 @@
     "max_file_bytes": 5000000,
     "max_results": 200
   },
+  "sandbox": {
+    "enabled": true,
+    "backend": "local",
+    "allowed_roots": [],
+    "network_policy": "deny",
+    "allowed_hosts": [],
+    "timeout_seconds": 120,
+    "max_output_chars": 60000,
+    "allow_sensitive_files": false,
+    "max_memory_mb": 2048,
+    "max_processes": 0,
+    "docker_image": "alpine:3"
+  },
   "subagent": {
     "enabled": true,
     "max_depth": 2,

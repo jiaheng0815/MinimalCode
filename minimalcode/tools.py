@@ -17,6 +17,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from .config import Settings
 from .errors import ToolError
+from .sandbox import SENSITIVE_SEARCH_GLOBS, SandboxRunner
 from .shell import ShellSpec, run_shell
 from .subagent import PREAMBLE as SUBAGENT_PREAMBLE
 from .subagent import build_command as build_subagent_command
@@ -50,6 +51,7 @@ IGNORED_GLOBS: tuple[str, ...] = tuple(
 _MAX_GREP_LINE_CHARS = 300
 _MAX_READ_LINE_CHARS = 1_000_000
 _SEARCH_TIMEOUT_SECONDS = 30
+_SEARCH_MAX_OUTPUT_CHARS = 1_000_000
 
 _PYTHON_GREP_SCRIPT = r"""
 import json
@@ -414,8 +416,28 @@ def _run_bounded_command(
     cwd: Path,
     limit: int,
     timeout: float = _SEARCH_TIMEOUT_SECONDS,
+    sandbox: SandboxRunner | None = None,
 ) -> tuple[int, list[str], bool, str]:
     """Run a search process while keeping only ``limit`` output lines."""
+    if sandbox is not None:
+        result = sandbox.run_argv(
+            command,
+            cwd=cwd,
+            timeout=timeout,
+            max_output_chars=_SEARCH_MAX_OUTPUT_CHARS,
+        )
+        if result.get("status") == "timeout":
+            raise ToolError(f"search timed out after {timeout:g} seconds")
+        if result.get("status") == "error" and result.get("exit_code") is None:
+            detail = str(
+                result.get("message") or result.get("stderr") or "search failed"
+            )
+            raise ToolError(detail)
+        lines = str(result.get("stdout") or "").splitlines()
+        truncated = bool(result.get("truncated")) or len(lines) > limit
+        stderr = str(result.get("stderr") or "").strip()
+        return int(result.get("exit_code", 0) or 0), lines[:limit], truncated, stderr
+
     timed_out = threading.Event()
     finished = threading.Event()
     process: subprocess.Popen[bytes] | None = None
@@ -484,42 +506,9 @@ def _run_bounded_command(
         return process.returncode, lines, truncated, stderr
 
 
-def _run_python_grep(
-    *,
-    pattern: str,
-    files: list[Path],
-    limit: int,
-    max_bytes: int,
-) -> dict[str, Any]:
-    """Run the regex fallback in a child process so a bad pattern can time out."""
-    spec = {
-        "pattern": pattern,
-        "ignore_case": _smart_case_ignore(pattern),
-        "files": [str(path) for path in files],
-        "limit": limit,
-        "max_bytes": max_bytes,
-        "max_line_chars": min(max_bytes + 1, _MAX_READ_LINE_CHARS),
-        "max_columns": _MAX_GREP_LINE_CHARS,
-    }
+def _parse_python_grep(stdout: str, limit: int) -> dict[str, Any]:
     try:
-        completed = subprocess.run(
-            [sys.executable, "-c", _PYTHON_GREP_SCRIPT],
-            input=json.dumps(spec),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=_SEARCH_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ToolError("search timed out") from exc
-    except OSError as exc:
-        raise ToolError(f"search failed: {exc}") from exc
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or f"search exited {completed.returncode}"
-        raise ToolError(detail)
-    try:
-        parsed = json.loads(completed.stdout)
+        parsed = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ToolError("search returned an invalid result") from exc
     if not isinstance(parsed, dict):
@@ -534,6 +523,108 @@ def _run_python_grep(
         "matches": [str(item) for item in matches[:limit]],
         "truncated": bool(parsed.get("truncated")),
     }
+
+
+def _run_python_grep(
+    *,
+    pattern: str,
+    files: list[Path],
+    limit: int,
+    max_bytes: int,
+    sandbox: SandboxRunner | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    """Run the regex fallback in a child process so a bad pattern can time out."""
+    spec = {
+        "pattern": pattern,
+        "ignore_case": _smart_case_ignore(pattern),
+        "files": [str(path) for path in files],
+        "limit": limit,
+        "max_bytes": max_bytes,
+        "max_line_chars": min(max_bytes + 1, _MAX_READ_LINE_CHARS),
+        "max_columns": _MAX_GREP_LINE_CHARS,
+    }
+    script = [sys.executable, "-c", _PYTHON_GREP_SCRIPT]
+    if sandbox is not None:
+        result = sandbox.run_argv(
+            script,
+            cwd=cwd or Path.cwd(),
+            timeout=_SEARCH_TIMEOUT_SECONDS,
+            max_output_chars=_SEARCH_MAX_OUTPUT_CHARS,
+            stdin_text=json.dumps(spec),
+        )
+        if result.get("status") == "timeout":
+            raise ToolError("search timed out")
+        if result.get("status") == "error" and result.get("exit_code") is None:
+            detail = str(
+                result.get("message") or result.get("stderr") or "search failed"
+            )
+            raise ToolError(detail)
+        returncode = int(result.get("exit_code", 0) or 0)
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "").strip()
+    else:
+        try:
+            completed = subprocess.run(
+                script,
+                input=json.dumps(spec),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=_SEARCH_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolError("search timed out") from exc
+        except OSError as exc:
+            raise ToolError(f"search failed: {exc}") from exc
+        returncode = completed.returncode
+        stdout = completed.stdout
+        stderr = completed.stderr.strip()
+    if returncode != 0:
+        detail = stderr or f"search exited {returncode}"
+        raise ToolError(detail)
+    return _parse_python_grep(stdout, limit)
+
+
+def _inline_python_grep(
+    *,
+    pattern: str,
+    files: list[Path],
+    limit: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Pure-Python fallback used when the backend cannot run argv children."""
+    flags = re.IGNORECASE if _smart_case_ignore(pattern) else 0
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as exc:
+        raise ToolError(f"invalid regular expression: {exc}") from exc
+    matches: list[str] = []
+    for path in files:
+        try:
+            if path.stat().st_size > max_bytes:
+                continue
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for number, line in enumerate(handle, start=1):
+                    if not regex.search(line):
+                        continue
+                    text = line.rstrip("\r\n")
+                    if len(text) > _MAX_GREP_LINE_CHARS:
+                        text = (
+                            text[:_MAX_GREP_LINE_CHARS]
+                            + " [... omitted end of long line]"
+                        )
+                    matches.append(f"{path}:{number}:{text}")
+                    if len(matches) >= limit:
+                        return {
+                            "status": "success",
+                            "matches": matches[:limit],
+                            "truncated": True,
+                        }
+        except (OSError, UnicodeError):
+            continue
+    return {"status": "success", "matches": matches, "truncated": False}
 
 
 _UNION_ORIGINS = {Union, UnionType}
@@ -630,23 +721,15 @@ class ToolRuntime:
         self.max_results = int(settings.get("tools.max_results", 200))
         self.shell_timeout = float(settings.get("shell.timeout_seconds", 120))
         self.max_output_chars = int(settings.get("shell.max_output_chars", 60_000))
+        self.sandbox = SandboxRunner.from_settings(settings, self.cwd)
 
-    def _path(self, raw: str) -> Path:
-        if not isinstance(raw, str) or not raw.strip():
-            raise ToolError("path must be a non-empty string")
-        try:
-            path = Path(raw).expanduser()
-            if not path.is_absolute():
-                path = self.cwd / path
-            resolved = path.resolve(strict=False)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ToolError(f"invalid path: {raw}") from exc
-        if not self.allow_outside:
-            try:
-                resolved.relative_to(self.cwd)
-            except ValueError as exc:
-                raise ToolError(f"path is outside workspace: {resolved}") from exc
-        return resolved
+    def _path(self, raw: str, *, operation: str = "read") -> Path:
+        return self.sandbox.resolve_path(
+            raw,
+            cwd=self.cwd,
+            operation=operation,
+            allow_outside=self.allow_outside,
+        )
 
     def read(
         self,
@@ -654,7 +737,7 @@ class ToolRuntime:
         start_line: int = 1,
         end_line: int | None = None,
     ) -> dict[str, Any]:
-        target = self._path(path)
+        target = self._path(path, operation="read")
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
         if isinstance(start_line, bool) or not isinstance(start_line, int):
@@ -765,7 +848,7 @@ class ToolRuntime:
                 f"content is too large for write: {len(encoded)} bytes exceeds "
                 f"tools.max_file_bytes ({self.max_file_bytes})"
             )
-        target = self._path(path)
+        target = self._path(path, operation="write")
         if target.exists() and target.is_dir():
             raise ToolError(f"path is a directory: {target}")
         try:
@@ -795,7 +878,7 @@ class ToolRuntime:
             raise ToolError("new_text must be a string")
         if not isinstance(replace_all, bool):
             raise ToolError("replace_all must be a boolean")
-        target = self._path(path)
+        target = self._path(path, operation="write")
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
         if target.stat().st_size > self.max_file_bytes:
@@ -860,7 +943,7 @@ class ToolRuntime:
     ) -> dict[str, Any]:
         if not isinstance(command, str):
             raise ToolError("command must be a string")
-        workdir = self._path(cwd)
+        workdir = self._path(cwd, operation="execute")
         if not workdir.is_dir():
             raise ToolError(f"working directory not found: {workdir}")
         if timeout is not None and (
@@ -879,6 +962,7 @@ class ToolRuntime:
             cwd=workdir,
             timeout=effective_timeout,
             max_output_chars=self.max_output_chars,
+            sandbox=self.sandbox,
         )
 
     def subagent(
@@ -896,7 +980,7 @@ class ToolRuntime:
             )
         if not isinstance(task, str) or not task.strip():
             raise ToolError("task must be a non-empty string")
-        workdir = self._path(cwd)
+        workdir = self._path(cwd, operation="execute")
         if not workdir.is_dir():
             raise ToolError(f"working directory not found: {workdir}")
         if timeout is not None and (
@@ -931,6 +1015,7 @@ class ToolRuntime:
             max_output_chars=self.max_output_chars,
             env=subagent_env(self.subagent_depth + 1),
             stdin_text=SUBAGENT_PREAMBLE + task.strip(),
+            sandbox=self.sandbox,
         )
         return {**result, "command": command}
 
@@ -945,14 +1030,14 @@ class ToolRuntime:
             raise ToolError("pattern must be a non-empty string")
         if glob is not None and not isinstance(glob, str):
             raise ToolError("glob must be a string or null")
-        target = self._path(path)
+        target = self._path(path, operation="read")
         if not target.exists():
             raise ToolError(f"path not found: {target}")
         if not target.is_file() and not target.is_dir():
             raise ToolError(f"path is not a file or directory: {target}")
         limit = _positive_limit(max_results, self.max_results, 2000, "max_results")
         rg = shutil.which("rg")
-        if rg:
+        if rg and self._can_spawn_argv():
             command = [
                 rg,
                 "--line-number",
@@ -961,6 +1046,7 @@ class ToolRuntime:
                 "never",
                 "--hidden",
                 "--no-ignore",
+                "--no-follow",
                 "--smart-case",
                 "--max-columns",
                 str(_MAX_GREP_LINE_CHARS),
@@ -970,9 +1056,11 @@ class ToolRuntime:
                 command.extend(["--glob", glob])
             for ignored_glob in self._ignore_globs(target):
                 command.extend(["--glob", ignored_glob])
+            for sandbox_glob in self._sandbox_globs():
+                command.extend(["--glob", sandbox_glob])
             command.extend(["--", pattern, str(target)])
             returncode, lines, truncated, stderr = _run_bounded_command(
-                command, cwd=self.cwd, limit=limit
+                command, cwd=self.cwd, limit=limit, sandbox=self.sandbox
             )
             if not truncated and returncode not in (0, 1):
                 raise ToolError(stderr or f"grep exited {returncode}")
@@ -995,6 +1083,17 @@ class ToolRuntime:
             return ()
         return IGNORED_GLOBS
 
+    def _sandbox_globs(self) -> tuple[str, ...]:
+        if not self.sandbox.policy.enabled or self.sandbox.policy.allow_sensitive_files:
+            return ()
+        return SENSITIVE_SEARCH_GLOBS
+
+    def _can_spawn_argv(self) -> bool:
+        return (
+            not self.sandbox.policy.enabled
+            or "argv" in self.sandbox.backend.capabilities
+        )
+
     def _python_grep(
         self,
         pattern: str,
@@ -1016,11 +1115,21 @@ class ToolRuntime:
             ]
         if not files:
             return {"status": "success", "matches": [], "truncated": False}
+        can_spawn = self._can_spawn_argv()
+        if not can_spawn:
+            return _inline_python_grep(
+                pattern=pattern,
+                files=files,
+                limit=limit,
+                max_bytes=self.max_file_bytes,
+            )
         return _run_python_grep(
             pattern=pattern,
             files=files,
             limit=limit,
             max_bytes=self.max_file_bytes,
+            sandbox=self.sandbox,
+            cwd=self.cwd,
         )
 
     @staticmethod
@@ -1047,25 +1156,28 @@ class ToolRuntime:
     ) -> dict[str, Any]:
         if not isinstance(pattern, str) or not pattern:
             raise ToolError("pattern must be a non-empty string")
-        target = self._path(path)
+        target = self._path(path, operation="read")
         if not target.is_dir():
             raise ToolError(f"directory not found: {target}")
         limit = _positive_limit(max_results, self.max_results, 5000, "max_results")
         rg = shutil.which("rg")
-        if rg:
+        if rg and self._can_spawn_argv():
             command = [
                 rg,
                 "--files",
                 "--hidden",
                 "--no-ignore",
+                "--no-follow",
                 "--glob",
                 pattern,
             ]
             for ignored_glob in self._ignore_globs(target):
                 command.extend(["--glob", ignored_glob])
+            for sandbox_glob in self._sandbox_globs():
+                command.extend(["--glob", sandbox_glob])
             command.append(str(target))
             returncode, paths, truncated, stderr = _run_bounded_command(
-                command, cwd=self.cwd, limit=limit
+                command, cwd=self.cwd, limit=limit, sandbox=self.sandbox
             )
             if not truncated and returncode not in (0, 1):
                 raise ToolError(stderr or f"find exited {returncode}")
@@ -1088,7 +1200,7 @@ class ToolRuntime:
             raise ToolError("read_image is not enabled for the current provider")
         if prompt is not None and not isinstance(prompt, str):
             raise ToolError("prompt must be a string or null")
-        target = self._path(path)
+        target = self._path(path, operation="read")
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
         try:
@@ -1148,7 +1260,18 @@ class ToolRuntime:
         for directory, dirnames, filenames in os.walk(root):
             dirnames[:] = [name for name in dirnames if name not in ignored]
             for filename in filenames:
-                yield Path(directory) / filename
+                candidate = Path(directory) / filename
+                # os.walk does not descend into symlinked directories, but a
+                # symlinked file or a configured extra root can still leave the
+                # sandbox, so every candidate is re-checked.
+                if not self.sandbox.is_allowed(
+                    candidate, operation="read", allow_outside=self.allow_outside
+                ):
+                    continue
+                yield candidate
+
+    def sandbox_summary(self) -> dict[str, Any]:
+        return self.sandbox.summary()
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers = {

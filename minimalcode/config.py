@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .errors import ConfigError
+from .sandbox import NETWORK_POLICIES, SANDBOX_BACKENDS
 
 APP_NAME = "MinimalCode"
 APP_DIR_NAME = ".MinimalCode"
@@ -120,7 +121,15 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     ):
         raise ConfigError(f"{path}: max_turns must be an integer from 1 to 10000")
 
-    for key in ("shell", "tools", "subagent", "context", "session", "output"):
+    for key in (
+        "shell",
+        "tools",
+        "subagent",
+        "context",
+        "session",
+        "output",
+        "sandbox",
+    ):
         if not isinstance(data.get(key), dict):
             raise ConfigError(f"{path}: {key} must be an object")
 
@@ -217,6 +226,8 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     if not isinstance(data["session"].get("save"), bool):
         raise ConfigError(f"{path}: session.save must be a boolean")
 
+    _validate_sandbox(data["sandbox"], path)
+
     highlight = data["output"].get("markdown_highlight")
     if not isinstance(highlight, bool):
         raise ConfigError(f"{path}: output.markdown_highlight must be a boolean")
@@ -307,6 +318,68 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
     for key in ("web_tools", "vision"):
         if key in provider and not isinstance(provider[key], dict):
             raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
+
+
+def _validate_string_list(value: Any, path: Path, key: str) -> None:
+    if not isinstance(value, list):
+        raise ConfigError(f"{path}: {key} must be a list of strings")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(f"{path}: {key} must contain non-empty strings")
+
+
+def _validate_sandbox(sandbox: dict[str, Any], path: Path) -> None:
+    if not isinstance(sandbox.get("enabled"), bool):
+        raise ConfigError(f"{path}: sandbox.enabled must be a boolean")
+    backend = sandbox.get("backend")
+    if not isinstance(backend, str) or backend not in SANDBOX_BACKENDS:
+        raise ConfigError(
+            f"{path}: sandbox.backend must be one of {', '.join(SANDBOX_BACKENDS)}"
+        )
+    _validate_string_list(sandbox.get("allowed_roots"), path, "sandbox.allowed_roots")
+    network_policy = sandbox.get("network_policy")
+    if network_policy not in NETWORK_POLICIES:
+        raise ConfigError(
+            f"{path}: sandbox.network_policy must be one of "
+            f"{', '.join(NETWORK_POLICIES)}"
+        )
+    _validate_string_list(sandbox.get("allowed_hosts"), path, "sandbox.allowed_hosts")
+    if network_policy == "allowlist" and not sandbox.get("allowed_hosts"):
+        raise ConfigError(
+            f"{path}: sandbox.network_policy 'allowlist' requires sandbox.allowed_hosts"
+        )
+    _validate_number(
+        sandbox.get("timeout_seconds"),
+        path,
+        "sandbox.timeout_seconds",
+        minimum=1,
+        maximum=3600,
+    )
+    _validate_integer(
+        sandbox.get("max_output_chars"),
+        path,
+        "sandbox.max_output_chars",
+        minimum=1,
+    )
+    if not isinstance(sandbox.get("allow_sensitive_files"), bool):
+        raise ConfigError(f"{path}: sandbox.allow_sensitive_files must be a boolean")
+    _validate_integer(
+        sandbox.get("max_memory_mb"),
+        path,
+        "sandbox.max_memory_mb",
+        minimum=0,
+        maximum=1_048_576,
+    )
+    _validate_integer(
+        sandbox.get("max_processes"),
+        path,
+        "sandbox.max_processes",
+        minimum=0,
+        maximum=65_536,
+    )
+    docker_image = sandbox.get("docker_image")
+    if not isinstance(docker_image, str) or not docker_image.strip():
+        raise ConfigError(f"{path}: sandbox.docker_image must be a non-empty string")
 
 
 def _validate_number(

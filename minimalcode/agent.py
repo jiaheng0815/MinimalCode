@@ -525,6 +525,7 @@ class Agent:
         return text
 
     def status(self) -> dict[str, Any]:
+        summary = getattr(self.tools, "sandbox_summary", None)
         return {
             "provider": self.provider.name,
             "model": self.provider.model,
@@ -535,4 +536,5 @@ class Agent:
             "last_prompt_tokens": self.last_prompt_tokens,
             "context_window": self.provider.context_window,
             "usage": dict(self.total_usage),
+            "sandbox": summary() if callable(summary) else {"enabled": False},
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,6 +22,7 @@ from .config import (
 )
 from .errors import ConfigError, MinimalCodeError, ProviderError
 from .highlight import sanitize_terminal_text
+from .sandbox import NETWORK_POLICIES, SANDBOX_BACKENDS
 
 if TYPE_CHECKING:
     from .agent import Agent, AgentResult
@@ -55,6 +57,54 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-turns", type=int)
     parser.add_argument("--cwd", help="Workspace directory")
     parser.add_argument("--home", help="Config directory (default ~/.MinimalCode)")
+    parser.add_argument(
+        "--sandbox",
+        dest="sandbox_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable the sandbox execution layer (--no-sandbox opts out)",
+    )
+    parser.add_argument(
+        "--sandbox-backend",
+        choices=SANDBOX_BACKENDS,
+        help="Sandbox backend: auto, local, bwrap, firejail, sandbox-exec, docker",
+    )
+    parser.add_argument(
+        "--sandbox-root",
+        action="append",
+        metavar="PATH",
+        help="Extra writable/readable root (repeatable)",
+    )
+    parser.add_argument(
+        "--sandbox-network",
+        choices=NETWORK_POLICIES,
+        help="Network policy: deny (default), allowlist, or allow",
+    )
+    parser.add_argument(
+        "--sandbox-allow-host",
+        action="append",
+        metavar="HOST",
+        help="Allowed host for --sandbox-network allowlist (repeatable)",
+    )
+    parser.add_argument(
+        "--sandbox-timeout",
+        type=float,
+        metavar="SECONDS",
+        help="Maximum runtime for one sandboxed command",
+    )
+    parser.add_argument(
+        "--sandbox-max-output",
+        type=int,
+        metavar="CHARS",
+        help="Maximum stdout/stderr returned for a sandboxed command",
+    )
+    parser.add_argument(
+        "--sandbox-allow-sensitive",
+        dest="sandbox_allow_sensitive",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow sandboxed tools to read and write credential-like files",
+    )
     parser.add_argument("--quiet", action="store_true", help="Hide tool activity")
     parser.add_argument(
         "--no-highlight",
@@ -154,6 +204,21 @@ def _management_command(argv: Sequence[str]) -> int | None:
         print(sanitize_terminal_text(f"{shell.label}\t{shell.executable}"))
         return 0
 
+    if command == "sandbox":
+        from .sandbox import SandboxRunner, available_backends
+
+        parser = argparse.ArgumentParser(prog="minimalcode sandbox")
+        parser.add_argument("--home")
+        parser.add_argument("--cwd", help="Workspace directory")
+        args = parser.parse_args(argv[1:])
+        settings = load_settings(args.home)
+        workspace = _resolve_cwd(args.cwd)
+        runner = SandboxRunner.from_settings(settings, workspace)
+        payload = runner.summary()
+        payload["available_backends"] = available_backends()
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
     if command == "import-pi":
         from .importer import import_pi_settings
 
@@ -189,6 +254,43 @@ def _resolve_cwd(raw: str | None) -> Path:
     if not resolved.is_dir():
         raise ConfigError(f"workspace is not a directory: {resolved}")
     return resolved
+
+
+def _apply_sandbox_overrides(settings: Settings, args: argparse.Namespace) -> None:
+    """Apply CLI sandbox flags on top of the loaded settings (in memory)."""
+    sandbox = settings.data.setdefault("sandbox", {})
+    if args.sandbox_enabled is not None:
+        sandbox["enabled"] = args.sandbox_enabled
+    if args.sandbox_backend is not None:
+        sandbox["backend"] = args.sandbox_backend
+    if args.sandbox_root:
+        roots = list(sandbox.get("allowed_roots") or [])
+        for root in args.sandbox_root:
+            if root not in roots:
+                roots.append(root)
+        sandbox["allowed_roots"] = roots
+    if args.sandbox_network is not None:
+        sandbox["network_policy"] = args.sandbox_network
+    if args.sandbox_allow_host:
+        hosts = list(sandbox.get("allowed_hosts") or [])
+        for host in args.sandbox_allow_host:
+            cleaned = host.strip().lower()
+            if cleaned and cleaned not in hosts:
+                hosts.append(cleaned)
+        sandbox["allowed_hosts"] = hosts
+    if args.sandbox_timeout is not None:
+        sandbox["timeout_seconds"] = args.sandbox_timeout
+    if args.sandbox_max_output is not None:
+        sandbox["max_output_chars"] = args.sandbox_max_output
+    if args.sandbox_allow_sensitive is not None:
+        sandbox["allow_sensitive_files"] = args.sandbox_allow_sensitive
+    if sandbox.get("network_policy") == "allowlist" and not sandbox.get(
+        "allowed_hosts"
+    ):
+        raise ConfigError(
+            "--sandbox-network allowlist requires at least one "
+            "--sandbox-allow-host (or sandbox.allowed_hosts)"
+        )
 
 
 def _load_or_create_session(
@@ -401,6 +503,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(raw_args)
     if args.max_turns is not None and not 1 <= args.max_turns <= 10_000:
         parser.error("--max-turns must be from 1 to 10000")
+    if args.sandbox_timeout is not None and (
+        not math.isfinite(args.sandbox_timeout) or not 1 <= args.sandbox_timeout <= 3600
+    ):
+        parser.error("--sandbox-timeout must be from 1 to 3600")
+    if args.sandbox_max_output is not None and args.sandbox_max_output < 1:
+        parser.error("--sandbox-max-output must be at least 1")
     if args.json_output:
         args.print_mode = True
 
@@ -423,6 +531,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if not settings.source.exists():
         ensure_config(args.home)
         settings = load_settings(args.home, require_file=True)
+    _apply_sandbox_overrides(settings, args)
     shell = detect_shell(settings.get("shell.path"))
     provider, provider_name, model = create_provider(
         settings,

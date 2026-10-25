@@ -31,6 +31,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(created.get("model"), "deepseek-flash")
             self.assertTrue(created.get("output.markdown_highlight"))
             self.assertEqual(created.get("output.theme"), "dark")
+            self.assertTrue(created.get("sandbox.enabled"))
+            self.assertEqual(created.get("sandbox.network_policy"), "deny")
+            self.assertFalse(created.get("sandbox.allow_sensitive_files"))
             _, provider = created.provider_config()
             self.assertEqual(provider["protocol"], "openai_responses")
             self.assertEqual(
@@ -156,6 +159,36 @@ class ConfigTests(unittest.TestCase):
                 with self.subTest(keys=keys):
                     data = json.loads(json.dumps(original))
                     target = data
+                    for key in keys[:-1]:
+                        target = target[key]
+                    target[keys[-1]] = value
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaises(ConfigError):
+                        load_settings(home, require_file=True)
+
+    def test_invalid_sandbox_settings_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            original = json.loads(path.read_text(encoding="utf-8"))
+            cases = (
+                (("enabled",), "yes"),
+                (("backend",), "chroot"),
+                (("network_policy",), "maybe"),
+                (("network_policy",), "allowlist"),
+                (("allowed_roots",), "/tmp"),
+                (("allowed_hosts",), [1]),
+                (("timeout_seconds",), 0),
+                (("max_output_chars",), 0),
+                (("allow_sensitive_files",), "no"),
+                (("max_memory_mb",), -1),
+                (("max_processes",), -1),
+                (("docker_image",), ""),
+            )
+            for keys, value in cases:
+                with self.subTest(keys=keys, value=value):
+                    data = json.loads(json.dumps(original))
+                    target = data["sandbox"]
                     for key in keys[:-1]:
                         target = target[key]
                     target[keys[-1]] = value
