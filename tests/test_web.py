@@ -214,6 +214,51 @@ class WebToolTests(unittest.TestCase):
             client.close()
         self.assertEqual(len(result["results"]), 5)
 
+    def test_search_respects_the_requested_default_count(self) -> None:
+        payload = {"results": [{"title": str(index)} for index in range(5)]}
+        config = _web_config()
+        config["web_tools"]["default_count"] = 2
+        client = ProviderWebClient(
+            "custom",
+            config,
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, json=payload)
+            ),
+        )
+        try:
+            result = client.search("query")
+        finally:
+            client.close()
+        self.assertEqual([item["title"] for item in result["results"]], ["0", "1"])
+
+    def test_search_bounds_every_string_field(self) -> None:
+        payload = {
+            "results": [
+                {
+                    "title": "t" * 250,
+                    "url": "https://example.com/" + "u" * 250,
+                    "nested": {"text": "n" * 250},
+                }
+            ]
+        }
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, json=payload)
+            ),
+        )
+        try:
+            result = client.search("query")
+        finally:
+            client.close()
+        item = result["results"][0]
+        self.assertLessEqual(len(item["title"]), 100 + len("\n<content truncated>"))
+        self.assertLessEqual(len(item["url"]), 100 + len("\n<content truncated>"))
+        self.assertLessEqual(
+            len(item["nested"]["text"]), 100 + len("\n<content truncated>")
+        )
+
     def test_fetch_accepts_null_title(self) -> None:
         client = ProviderWebClient(
             "custom",
@@ -231,6 +276,24 @@ class WebToolTests(unittest.TestCase):
             client.close()
         self.assertEqual(result["title"], "")
         self.assertEqual(result["content"], "body")
+
+    def test_fetch_truncates_a_long_title(self) -> None:
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    json={"title": "t" * 250, "content": "body"},
+                )
+            ),
+        )
+        try:
+            result = client.fetch("https://example.com")
+        finally:
+            client.close()
+        self.assertTrue(result["truncated"])
+        self.assertTrue(result["title"].endswith("<title truncated>"))
 
     def test_fetch_truncates_long_content(self) -> None:
         client = ProviderWebClient(

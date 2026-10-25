@@ -366,6 +366,11 @@ class OpenAICompatibleProvider:
 
     def complete_text(self, messages: list[dict[str, Any]]) -> str:
         reply = self.stream_chat(messages, tools=None, on_text=None)
+        if reply.finish_reason not in {None, "stop", "completed"}:
+            raise ProviderError(
+                "provider stopped the summary with finish reason "
+                f"{reply.finish_reason!r}"
+            )
         return reply.content
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
@@ -380,7 +385,13 @@ class OpenAICompatibleProvider:
                 )
             except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
-                if attempt:
+                # Only a connection that never opened is safe to retry: a
+                # read/write failure may mean the provider already consumed the
+                # request and started a billable generation.
+                retryable = isinstance(
+                    exc, (httpx2.ConnectError, httpx2.ConnectTimeout)
+                )
+                if attempt or not retryable:
                     break
                 time.sleep(0.5)
                 continue
@@ -406,7 +417,7 @@ class OpenAICompatibleProvider:
                 )
             finally:
                 response.close()
-            if status_code not in {429, 500, 502, 503, 504} or attempt:
+            if status_code not in {429, 503} or attempt:
                 break
             try:
                 delay = min(max(float(retry_after), 0.2), 5.0)
@@ -452,6 +463,7 @@ class OpenAICompatibleProvider:
         content_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
+        saw_terminal = False
         usage: dict[str, int] = {}
 
         try:
@@ -461,7 +473,10 @@ class OpenAICompatibleProvider:
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
-                if not data or data == "[DONE]":
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    saw_terminal = True
                     continue
                 try:
                     event = json.loads(data)
@@ -519,6 +534,7 @@ class OpenAICompatibleProvider:
                                 entry["arguments"] = _tool_arguments(arguments)
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
+                    saw_terminal = True
         except httpx2.HTTPError as exc:
             raise ProviderError(f"provider stream interrupted: {exc}") from exc
 
@@ -534,7 +550,14 @@ class OpenAICompatibleProvider:
                     arguments=entry["arguments"] or "{}",
                 )
             )
-        if not content_parts and not tool_calls and finish_reason is None:
+        if not saw_terminal:
+            # The connection closed before the provider sent finish_reason or
+            # [DONE]. Treating that as a normal stop silently truncates answers
+            # and can execute a half-received tool call.
+            finish_reason = "incomplete"
+        elif finish_reason is None:
+            finish_reason = "tool_calls" if tool_calls else "stop"
+        if not content_parts and not tool_calls and not saw_terminal:
             raise ProviderError("provider returned an empty stream")
         return ProviderReply(
             content="".join(content_parts),
@@ -841,11 +864,10 @@ class OpenAICompatibleProvider:
                     )
                 )
 
-        finish_reason = (
-            self._response_finish(final_response, bool(tool_calls))
-            if final_response
-            else ("tool_calls" if tool_calls else "incomplete_stream")
-        )
+        if final_response:
+            finish_reason = self._response_finish(final_response, bool(tool_calls))
+        else:
+            finish_reason = "incomplete"
         return ProviderReply(
             content="".join(content_parts),
             tool_calls=tool_calls,

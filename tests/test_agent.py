@@ -262,7 +262,40 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[-1]["role"], "tool")
             self.assertIn("not executed", session.messages[-1]["content"])
 
-    def test_recovers_interrupted_tool_turn(self) -> None:
+    def test_repair_keeps_tool_results_in_call_order(self) -> None:
+        from minimalcode.agent import _repair_tool_history
+
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "read"}},
+                    {"id": "b", "function": {"name": "read"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "b", "name": "read", "content": "b"},
+        ]
+        repaired, changed = _repair_tool_history(messages)
+        self.assertTrue(changed)
+        ids = [
+            message["tool_call_id"] for message in repaired if message["role"] == "tool"
+        ]
+        self.assertEqual(ids, ["a", "b"])
+
+        repaired, changed = _repair_tool_history(
+            [
+                messages[0],
+                {"role": "tool", "tool_call_id": "a", "name": "read", "content": "a"},
+            ]
+        )
+        self.assertTrue(changed)
+        ids = [
+            message["tool_call_id"] for message in repaired if message["role"] == "tool"
+        ]
+        self.assertEqual(ids, ["a", "b"])
+
+    def test_repair_recovers_interrupted_tool_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"

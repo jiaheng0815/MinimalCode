@@ -6,6 +6,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,68 @@ def truncate_text(text: str, limit: int) -> tuple[str, bool]:
     return text[:head] + marker + text[-tail:], True
 
 
+class _Capture:
+    """Keep a bounded head and tail of a stream instead of all of it."""
+
+    def __init__(self, max_chars: int) -> None:
+        # Four bytes is the widest UTF-8 encoding of one character.
+        self.limit_bytes = max(64, max_chars * 4 + 16)
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.dropped = False
+
+    def consume(self, chunk: bytes) -> None:
+        head_limit = max(1, self.limit_bytes * 3 // 5)
+        if len(self.head) < head_limit:
+            take = min(head_limit - len(self.head), len(chunk))
+            self.head.extend(chunk[:take])
+            chunk = chunk[take:]
+        if chunk:
+            self.tail.extend(chunk)
+            tail_limit = max(0, self.limit_bytes - len(self.head))
+            if len(self.tail) > tail_limit:
+                del self.tail[: len(self.tail) - tail_limit]
+                self.dropped = True
+
+    def text(self) -> str:
+        return _decode_output(bytes(self.head) + bytes(self.tail))
+
+
+def _pump(stream: IO[bytes], capture: _Capture) -> None:
+    try:
+        read = getattr(stream, "read1", stream.read)
+        while True:
+            chunk = read(8192)
+            if not chunk:
+                break
+            capture.consume(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _join_readers(threads: list[threading.Thread], timeout: float) -> None:
+    for thread in threads:
+        thread.join(timeout=timeout)
+
+
+def _finish_capture(capture: _Capture, limit: int) -> tuple[str, bool]:
+    text, truncated = truncate_text(capture.text(), limit)
+    if not capture.dropped:
+        return text, truncated
+    if not truncated:
+        marker = "\n... <truncated> ...\n"
+        if limit <= len(marker):
+            text = text[:limit]
+        else:
+            text = text[: limit - len(marker)] + marker
+    return text, True
+
+
 def run_shell(
     command: str,
     *,
@@ -152,44 +215,28 @@ def run_shell(
     if env:
         process_env.update({str(key): str(value) for key, value in env.items()})
 
-    # A subagent reads its prompt from stdin, so the payload is fed from a file;
-    # otherwise stdin stays closed so an interactive program cannot hang. A file
-    # rather than a pipe keeps the write off this thread, which leaves the child
-    # alive long enough for the timeout path to kill its whole tree.
-    stdin_options: dict[str, object]
-    if stdin_text is None:
-        stdin_options = {"stdin": subprocess.DEVNULL}
-    else:
-        stdin_options = {}
-
     # On POSIX the child leads its own process group so a timeout can signal the
     # tree; Windows walks the parent links with `taskkill /T`.
     tree_options: dict[str, object] = (
         {} if os.name == "nt" else {"start_new_session": True}
     )
 
-    # Output is collected through temporary files instead of pipes. With pipes a
-    # timed-out command that left a background child holding the write end made
-    # the post-kill drain block forever; file handles let the call return with
-    # whatever was written so far.
     try:
-        with (
-            tempfile.TemporaryFile() as out_file,
-            tempfile.TemporaryFile() as err_file,
-            tempfile.TemporaryFile() as in_file,
-        ):
-            if stdin_text is not None:
+        with tempfile.TemporaryFile() as in_file:
+            if stdin_text is None:
+                stdin_source: object = subprocess.DEVNULL
+            else:
                 in_file.write(str(stdin_text).encode("utf-8"))
                 in_file.seek(0)
-                stdin_options = {"stdin": in_file}
+                stdin_source = in_file
             try:
                 process = subprocess.Popen(
                     _prefix_command(shell, command),
                     cwd=cwd,
                     env=process_env,
-                    stdout=out_file,
-                    stderr=err_file,
-                    **stdin_options,
+                    stdin=stdin_source,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     **tree_options,
                 )
             except (OSError, ValueError) as exc:
@@ -198,14 +245,35 @@ def run_shell(
                     "shell": shell.label,
                     "message": str(exc),
                 }
+
+            out_capture = _Capture(max_output_chars)
+            err_capture = _Capture(max_output_chars)
+            assert process.stdout is not None and process.stderr is not None
+            readers = [
+                threading.Thread(
+                    target=_pump,
+                    args=(process.stdout, out_capture),
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=_pump,
+                    args=(process.stderr, err_capture),
+                    daemon=True,
+                ),
+            ]
+            for reader in readers:
+                reader.start()
             try:
                 returncode = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 _terminate_tree(process)
-                stdout = _read_capture(out_file)
-                stderr = _read_capture(err_file)
-                stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
-                stderr, stderr_truncated = truncate_text(stderr, max_output_chars)
+                _join_readers(readers, 2.0)
+                stdout, stdout_truncated = _finish_capture(
+                    out_capture, max_output_chars
+                )
+                stderr, stderr_truncated = _finish_capture(
+                    err_capture, max_output_chars
+                )
                 return {
                     "status": "timeout",
                     "shell": shell.label,
@@ -214,8 +282,12 @@ def run_shell(
                     "stderr": stderr.rstrip(),
                     "truncated": stdout_truncated or stderr_truncated,
                 }
-            stdout = _read_capture(out_file)
-            stderr = _read_capture(err_file)
+            except BaseException:
+                # Ctrl-C must not leave the command's process tree running.
+                _terminate_tree(process)
+                _join_readers(readers, 2.0)
+                raise
+            _join_readers(readers, 5.0)
     except (OSError, ValueError) as exc:
         return {
             "status": "error",
@@ -223,8 +295,8 @@ def run_shell(
             "message": str(exc),
         }
 
-    stdout, stdout_truncated = truncate_text(stdout, max_output_chars)
-    stderr, stderr_truncated = truncate_text(stderr, max_output_chars)
+    stdout, stdout_truncated = _finish_capture(out_capture, max_output_chars)
+    stderr, stderr_truncated = _finish_capture(err_capture, max_output_chars)
     return {
         "status": "success" if returncode == 0 else "error",
         "shell": shell.label,
@@ -243,13 +315,17 @@ def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
     burning CPU long after the agent had given up on the command.
     """
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     else:
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -263,11 +339,6 @@ def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         pass
-
-
-def _read_capture(handle: IO[bytes]) -> str:
-    handle.seek(0)
-    return _decode_output(handle.read())
 
 
 def _decode_output(data: bytes | str | None) -> str:

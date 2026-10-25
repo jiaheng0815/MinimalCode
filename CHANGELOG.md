@@ -4,9 +4,10 @@
 
 ### Added
 
+- Added the `max` reasoning-effort level: the highest tier, forwarded verbatim as `reasoning_effort` (Chat) / `reasoning.effort` (Responses) and accepted by `--thinking`, `thinking`, and `/effort`.
 - Added the `subagent` tool: the agent can dispatch a fresh `minimalcode -p` child process through the configured shell and use its final answer, which suits code review, broad analysis, and independent verification. The task travels on stdin, the child inherits `--home`/provider/model/effort/workspace, and nesting is capped by `subagent.max_depth` (default `2`, tracked through `MINIMALCODE_SUBAGENT_DEPTH`). New settings: `subagent.enabled`, `subagent.max_depth`, `subagent.max_turns`, `subagent.timeout_seconds`.
 - Bumped the version to 0.5.0.
-- Added the `/effort` interactive command to inspect or switch reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`) without restarting; `none` disables thinking and `/status` reports the active effort.
+- Added the `/effort` interactive command to inspect or switch reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max`) without restarting; `none` disables thinking and `/status` reports the active effort.
 - Added the `read_image` tool: local JPEG/PNG/GIF/WebP images are sent to the provider's vision model and returned as text descriptions or answers. It is enabled by the provider's `vision` block, defaults on for DeepSeek, and stays inside the workspace.
 - Increased the default per-task model/tool loop budget from 50 to 1000 turns.
 - Added streaming Markdown and README rendering for interactive terminals.
@@ -28,7 +29,7 @@
 - `grep` and `find` now skip the same ignored directories (`.git`, `node_modules`, `build`, `dist`, caches, virtualenvs) with or without `ripgrep`.
 - An unset `${VAR}` placeholder in the active provider now raises a configuration error naming the variable instead of reaching the provider as literal text.
 - `web_fetch` accepts a `null` title from the provider and rejects only non-string titles.
-- Shell commands capture output through temporary files instead of pipes, so a timed-out command with a live background child returns partial output instead of blocking.
+- Shell commands capture output through bounded in-memory streams, so a timed-out command with a live background child returns partial output without blocking or exhausting memory/disk.
 - The system prompt is built once per agent instead of once per model turn, so `SYSTEM.md`/`AGENTS.md` are not re-read every round trip.
 - Web search results are now normalized: non-object entries are dropped, the count is capped by `max_count`, and long `content`/`text`/`snippet` fields are truncated by `max_content_chars`.
 - `write` enforces `tools.max_file_bytes` instead of an unrelated `max_file_chars * 8` heuristic.
@@ -37,6 +38,21 @@
 - `import-pi` works when Pi has `models.json` but no `settings.json`.
 
 ### Fixed
+
+- A streamed response that ends without `finish_reason` or `[DONE]` is now reported as incomplete instead of a successful truncated answer; incomplete tool calls are not executed.
+- Untrusted model, shell, and error output is stripped of terminal escape sequences before it reaches the terminal, including sequences split across stream deltas.
+- Project instruction files that resolve outside their declaring directory (for example a symlinked `AGENTS.md`) are ignored instead of being injected into the system prompt.
+- Invalid `thinking` values and malformed provider `protocol`/`base_url`/numeric/boolean settings are rejected when settings load rather than failing later or inside a subagent.
+- `/effort` now updates the tool runtime as well as the provider, so subagents use the selected effort.
+- `web_search` honors the requested/default result count instead of only `max_count`, and all provider result strings (including titles and URLs) are bounded.
+- `edit` enforces `tools.max_file_bytes` on the resulting file, not only the original.
+- The Python `grep` fallback uses smart-case, skips the same ignored directories, truncates long lines, and runs under a timeout so a catastrophic regex cannot hang the agent.
+- `grep`/`find` read only the requested number of result lines, and `read` bounds per-line memory and reports a `start_line` beyond EOF instead of returning a fake range.
+- Shell output is collected in bounded captures instead of unbounded temporary files, and a missing `taskkill` or Ctrl-C no longer leaves the process tree running or raises from the timeout path.
+- Compaction transcripts are sized from the model window, and a summarization reply with an incomplete finish reason is no longer allowed to replace history.
+- A session file without metadata now defaults to the requested workspace instead of running tools in the sessions directory.
+- `config` rejects unexpected positional arguments instead of silently ignoring them.
+- Provider POSTs are retried only for connection failures and rate-limit/unavailable responses, avoiding duplicate work after a dropped read.
 
 - Fixed a timed-out shell command leaving its children running: the timeout now kills the whole process tree (on Windows via `taskkill /T`, elsewhere via the child's process group) instead of only the direct shell process, so orphaned test runners no longer keep pinning CPU cores. The timed-out `subagent` prompt is fed from a file rather than a pipe for the same reason.
 - Fixed `read` returning empty content when a single line exceeds `max_file_chars`; the oversized line's prefix is now returned with `truncated`.

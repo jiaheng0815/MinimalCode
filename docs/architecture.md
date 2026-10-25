@@ -37,7 +37,9 @@ CLI
 
 - One reusable `httpx2.Client` maintains the connection pool.
 - Tool schemas are static; the system prompt is built once per agent rather than once per turn.
-- `rg` is used when available; a bounded Python fallback keeps commands working without it.
+- `rg` is used when available; a timeout-bounded Python fallback keeps commands working without it.
+- Shell and search output is captured through bounded head/tail buffers, so a noisy command cannot exhaust memory or disk.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
+- Untrusted model, tool, and error text is stripped of terminal control sequences before display.
 - Session writes are append-only; configuration is the only atomically rewritten file.
 - The renderer treats incomplete inline markers as active styles, emits text without waiting for a newline, and keeps redirected and JSON output as raw Markdown.

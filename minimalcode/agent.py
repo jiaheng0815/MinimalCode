@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .config import Settings
-from .highlight import MarkdownHighlighter, style_activity_tag
+from .highlight import (
+    MarkdownHighlighter,
+    TerminalSanitizer,
+    sanitize_terminal_text,
+    style_activity_tag,
+)
 from .prompt import build_system_prompt
 from .provider import OpenAICompatibleProvider, ProviderError
 from .session import Session
@@ -35,14 +40,17 @@ _ACTIVITY_OUTPUT_MAX_LINES = 12
 _ACTIVITY_OUTPUT_MAX_CHARS = 4000
 _INCOMPLETE_FINISH_REASONS = {
     "length",
+    "max_tokens",
     "content_filter",
     "max_output_tokens",
     "failed",
     "cancelled",
     "canceled",
     "incomplete",
+    "incomplete_stream",
     "in_progress",
     "queued",
+    "server_error",
 }
 
 
@@ -84,36 +92,62 @@ def _repair_tool_history(
     messages: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], bool]:
     repaired: list[dict[str, Any]] = []
-    pending: dict[str, str] = {}
     changed = False
+    call_order: list[str] | None = None
+    call_names: dict[str, str] = {}
+    block_results: list[dict[str, Any]] = []
 
-    def flush_missing() -> None:
-        nonlocal changed
-        for call_id, name in list(pending.items()):
-            repaired.append(
+    def synthetic_result(call_id: str, name: str) -> dict[str, Any]:
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+            "content": json.dumps(
                 {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": json.dumps(
-                        {
-                            "status": "error",
-                            "message": "interrupted before tool result was recorded",
-                        },
-                        separators=(",", ":"),
-                    ),
-                }
-            )
-            pending.pop(call_id, None)
-            changed = True
+                    "status": "error",
+                    "message": "interrupted before tool result was recorded",
+                },
+                separators=(",", ":"),
+            ),
+        }
+
+    def flush_block() -> None:
+        nonlocal changed, call_order, call_names, block_results
+        if call_order is None:
+            repaired.extend(block_results)
+            block_results = []
+            return
+        by_id: dict[str, dict[str, Any]] = {}
+        extras: list[dict[str, Any]] = []
+        for result in block_results:
+            call_id = str(result.get("tool_call_id") or "")
+            if call_id in call_names and call_id not in by_id:
+                by_id[call_id] = result
+            else:
+                extras.append(result)
+        for call_id in call_order:
+            result = by_id.get(call_id)
+            if result is not None:
+                repaired.append(result)
+            else:
+                repaired.append(synthetic_result(call_id, call_names[call_id]))
+                changed = True
+        repaired.extend(extras)
+        call_order = None
+        call_names = {}
+        block_results = []
 
     for message in messages:
         role = message.get("role")
-        if pending and role != "tool":
-            flush_missing()
-        append = dict(message)
-        repaired.append(append)
+        if call_order is not None and role != "tool":
+            flush_block()
+        if role == "tool" and call_order is not None:
+            block_results.append(dict(message))
+            continue
+        repaired.append(dict(message))
         if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            call_order = []
+            call_names = {}
             for call in message["tool_calls"]:
                 if not isinstance(call, dict):
                     continue
@@ -121,10 +155,10 @@ def _repair_tool_history(
                 function = call.get("function") or {}
                 name = str(function.get("name") or "")
                 if call_id:
-                    pending[call_id] = name
-        elif role == "tool":
-            pending.pop(str(message.get("tool_call_id") or ""), None)
-    flush_missing()
+                    if call_id not in call_names:
+                        call_order.append(call_id)
+                    call_names[call_id] = name
+    flush_block()
     return repaired, changed
 
 
@@ -183,6 +217,7 @@ class Agent:
         )
         self.last_prompt_tokens = 0
         self._system_prompt: str | None = None
+        self._plain_sanitizer = TerminalSanitizer()
         self.total_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -244,12 +279,17 @@ class Agent:
             if self._highlighter is not None:
                 self._highlighter.feed(text)
             else:
-                self.output.write(text)
-                self.output.flush()
+                safe = self._plain_sanitizer.feed(text)
+                if safe:
+                    self.output.write(safe)
+                    self.output.flush()
 
     def _finish_delta(self) -> None:
         if self._highlighter is not None:
             self._highlighter.finish()
+        else:
+            self._plain_sanitizer.finish()
+            self._plain_sanitizer = TerminalSanitizer()
 
     def _activity(self, message: str) -> None:
         if not self.quiet:
@@ -375,6 +415,7 @@ class Agent:
             message = f"Provider stopped early: {preview}"
         if finish_reason and finish_reason not in {"stop", "completed", "tool_calls"}:
             message = f"{message} (finish reason: {finish_reason})"
+        message = sanitize_terminal_text(message)
         self.error_output.write(message + "\n")
         self.error_output.flush()
 
@@ -473,7 +514,10 @@ class Agent:
                         f"{function.get('arguments', '')}"
                     )
         text = "\n".join(lines)
-        max_chars = max(20_000, self.provider.context_window * 2)
+        # Fit the transcript comfortably in the model window: roughly half the
+        # token budget converted to characters, bounded so a 1M-token model
+        # does not produce a multi-megabyte summarization request.
+        max_chars = min(200_000, max(4_000, self.provider.context_window // 2))
         if len(text) > max_chars:
             head = int(max_chars * 0.25)
             tail = max_chars - head

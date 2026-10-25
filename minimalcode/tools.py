@@ -8,7 +8,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -42,6 +44,54 @@ IGNORED_DIRECTORIES: tuple[str, ...] = (
 IGNORED_GLOBS: tuple[str, ...] = tuple(
     glob for name in IGNORED_DIRECTORIES for glob in (f"!{name}/**", f"!**/{name}/**")
 )
+
+# Match ripgrep's --max-columns output width and keep the Python fallback from
+# returning a single minified line that swallows the whole context budget.
+_MAX_GREP_LINE_CHARS = 300
+_MAX_READ_LINE_CHARS = 1_000_000
+_SEARCH_TIMEOUT_SECONDS = 30
+
+_PYTHON_GREP_SCRIPT = r"""
+import json
+import os
+import re
+import sys
+
+spec = json.load(sys.stdin)
+try:
+    regex = re.compile(
+        spec["pattern"], re.IGNORECASE if spec["ignore_case"] else 0
+    )
+except re.error as exc:
+    print(json.dumps({"error": f"invalid regular expression: {exc}"}))
+    raise SystemExit(0)
+
+matches = []
+for path in spec["files"]:
+    try:
+        if os.path.getsize(path) > spec["max_bytes"]:
+            continue
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            number = 0
+            while True:
+                line = handle.readline(spec["max_line_chars"])
+                if not line:
+                    break
+                number += 1
+                if not regex.search(line):
+                    continue
+                text = line.rstrip("\r\n")
+                if len(text) > spec["max_columns"]:
+                    text = text[: spec["max_columns"]] + " [... omitted end of long line]"
+                matches.append(f"{path}:{number}:{text}")
+                if len(matches) >= spec["limit"]:
+                    print(json.dumps({"matches": matches, "truncated": True}))
+                    raise SystemExit(0)
+    except (OSError, UnicodeError):
+        continue
+
+print(json.dumps({"matches": matches, "truncated": False}))
+"""
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -352,6 +402,140 @@ def _positive_limit(
     return limit
 
 
+def _smart_case_ignore(pattern: str) -> bool:
+    """Return True when ripgrep's --smart-case would ignore case."""
+    literal = re.sub(r"\\[A-Za-z]", "", pattern)
+    return not any(char.isupper() for char in literal)
+
+
+def _run_bounded_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    limit: int,
+    timeout: float = _SEARCH_TIMEOUT_SECONDS,
+) -> tuple[int, list[str], bool, str]:
+    """Run a search process while keeping only ``limit`` output lines."""
+    timed_out = threading.Event()
+    finished = threading.Event()
+    process: subprocess.Popen[bytes] | None = None
+    with tempfile.TemporaryFile() as err_file:
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=err_file,
+            )
+        except (OSError, ValueError) as exc:
+            raise ToolError(f"search failed: {exc}") from exc
+
+        def kill() -> None:
+            if finished.is_set() or process.poll() is not None:
+                return
+            timed_out.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(timeout, kill)
+        timer.daemon = True
+        timer.start()
+        lines: list[str] = []
+        truncated = False
+        try:
+            assert process.stdout is not None
+            while len(lines) <= limit:
+                raw = process.stdout.readline()
+                if not raw:
+                    break
+                lines.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+            if len(lines) > limit:
+                truncated = True
+                lines = lines[:limit]
+                finished.set()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            process.wait(timeout=5)
+            finished.set()
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            timed_out.set()
+        finally:
+            finished.set()
+            timer.cancel()
+            if process.stdout is not None:
+                process.stdout.close()
+        err_file.seek(0)
+        stderr = err_file.read(4000).decode("utf-8", errors="replace").strip()
+        if timed_out.is_set():
+            raise ToolError(f"search timed out after {timeout:g} seconds")
+        return process.returncode, lines, truncated, stderr
+
+
+def _run_python_grep(
+    *,
+    pattern: str,
+    files: list[Path],
+    limit: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Run the regex fallback in a child process so a bad pattern can time out."""
+    spec = {
+        "pattern": pattern,
+        "ignore_case": _smart_case_ignore(pattern),
+        "files": [str(path) for path in files],
+        "limit": limit,
+        "max_bytes": max_bytes,
+        "max_line_chars": min(max_bytes + 1, _MAX_READ_LINE_CHARS),
+        "max_columns": _MAX_GREP_LINE_CHARS,
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _PYTHON_GREP_SCRIPT],
+            input=json.dumps(spec),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_SEARCH_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ToolError("search timed out") from exc
+    except OSError as exc:
+        raise ToolError(f"search failed: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"search exited {completed.returncode}"
+        raise ToolError(detail)
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ToolError("search returned an invalid result") from exc
+    if not isinstance(parsed, dict):
+        raise ToolError("search returned an invalid result")
+    if parsed.get("error"):
+        raise ToolError(str(parsed["error"]))
+    matches = parsed.get("matches")
+    if not isinstance(matches, list):
+        raise ToolError("search returned an invalid result")
+    return {
+        "status": "success",
+        "matches": [str(item) for item in matches[:limit]],
+        "truncated": bool(parsed.get("truncated")),
+    }
+
+
 _UNION_ORIGINS = {Union, UnionType}
 _TYPE_LABELS: dict[Any, str] = {
     str: "a string",
@@ -494,12 +678,23 @@ class ToolRuntime:
         actual_start = None
         actual_end = 0
         truncated = False
+        last_line = 0
+        line_limit = min(self.max_file_chars + 1, _MAX_READ_LINE_CHARS)
         with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-            for number, line in enumerate(handle, 1):
+            number = 0
+            while True:
+                line = handle.readline(line_limit)
+                if not line:
+                    break
+                number += 1
+                last_line = number
                 if number < start:
                     continue
                 if stop is not None and number > stop:
                     break
+                line_cut = len(line) >= line_limit and not line.endswith(("\n", "\r"))
+                if line_cut:
+                    truncated = True
                 rendered = f"{number:>6}\t{line.rstrip(chr(13) + chr(10))}\n"
                 remaining = self.max_file_chars - used
                 if len(rendered) > remaining:
@@ -516,15 +711,20 @@ class ToolRuntime:
                 chunks.append(rendered)
                 used += len(rendered)
                 actual_end = number
+                if line_cut:
+                    break
 
         if actual_start is None:
+            if start > max(1, last_line):
+                raise ToolError(f"start_line {start} is beyond the end of the file")
             return {
                 "status": "success",
                 "path": str(target),
                 "content": "",
                 "start_line": start,
-                "end_line": start,
+                "end_line": 0,
                 "truncated": truncated,
+                "eof": True,
             }
         return {
             "status": "success",
@@ -639,6 +839,15 @@ class ToolRuntime:
                 span_newline = default_newline
             replacement = normalized_new.replace("\n", span_newline)
             updated = updated[: match.start()] + replacement + updated[match.end() :]
+        try:
+            encoded = updated.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(f"edited content is not valid UTF-8 text: {exc}") from exc
+        if len(encoded) > self.max_file_bytes:
+            raise ToolError(
+                f"edited file is too large: {len(encoded)} bytes exceeds "
+                f"tools.max_file_bytes ({self.max_file_bytes})"
+            )
         self._write_atomic(target, updated, mode=target.stat().st_mode & 0o7777)
         return {
             "status": "success",
@@ -750,38 +959,41 @@ class ToolRuntime:
                 "--no-heading",
                 "--color",
                 "never",
+                "--hidden",
+                "--no-ignore",
                 "--smart-case",
                 "--max-columns",
-                "300",
+                str(_MAX_GREP_LINE_CHARS),
                 "--max-columns-preview",
             ]
             if glob:
                 command.extend(["--glob", glob])
-            for ignored_glob in IGNORED_GLOBS:
+            for ignored_glob in self._ignore_globs(target):
                 command.extend(["--glob", ignored_glob])
             command.extend(["--", pattern, str(target)])
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=self.cwd,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    timeout=30,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise ToolError(f"grep failed: {exc}") from exc
-            stdout = completed.stdout.decode("utf-8", errors="replace")
-            stderr = completed.stderr.decode("utf-8", errors="replace")
-            lines = stdout.splitlines()
-            if completed.returncode not in (0, 1):
-                raise ToolError(stderr.strip() or f"grep exited {completed.returncode}")
+            returncode, lines, truncated, stderr = _run_bounded_command(
+                command, cwd=self.cwd, limit=limit
+            )
+            if not truncated and returncode not in (0, 1):
+                raise ToolError(stderr or f"grep exited {returncode}")
             return {
                 "status": "success",
                 "matches": lines[:limit],
-                "truncated": len(lines) > limit,
+                "truncated": truncated,
             }
         return self._python_grep(pattern, target, glob, limit)
+
+    def _ignore_globs(self, target: Path) -> tuple[str, ...]:
+        # An explicitly requested ignored path must still be searchable;
+        # otherwise `grep(..., path="build")` silently returns nothing.
+        try:
+            relative = target.relative_to(self.cwd)
+        except ValueError:
+            relative = target
+        parts = relative.parts[:-1] if target.is_file() else relative.parts
+        if any(part in IGNORED_DIRECTORIES for part in parts):
+            return ()
+        return IGNORED_GLOBS
 
     def _python_grep(
         self,
@@ -790,31 +1002,26 @@ class ToolRuntime:
         glob_pattern: str | None,
         limit: int,
     ) -> dict[str, Any]:
+        flags = re.IGNORECASE if _smart_case_ignore(pattern) else 0
         try:
-            regex = re.compile(pattern)
+            re.compile(pattern, flags)
         except re.error as exc:
             raise ToolError(f"invalid regular expression: {exc}") from exc
-        files = [target] if target.is_file() else self._walk_files(target)
-        matches: list[str] = []
-        for file_path in files:
-            if glob_pattern and not self._matches_glob(file_path, target, glob_pattern):
-                continue
-            try:
-                if file_path.stat().st_size > self.max_file_bytes:
-                    continue
-                with file_path.open("r", encoding="utf-8", errors="replace") as handle:
-                    for number, line in enumerate(handle, 1):
-                        if regex.search(line):
-                            matches.append(f"{file_path}:{number}:{line.rstrip()}")
-                            if len(matches) >= limit:
-                                return {
-                                    "status": "success",
-                                    "matches": matches,
-                                    "truncated": True,
-                                }
-            except (OSError, UnicodeError):
-                continue
-        return {"status": "success", "matches": matches, "truncated": False}
+        files = [target] if target.is_file() else list(self._walk_files(target))
+        if glob_pattern:
+            files = [
+                file_path
+                for file_path in files
+                if self._matches_glob(file_path, target, glob_pattern)
+            ]
+        if not files:
+            return {"status": "success", "matches": [], "truncated": False}
+        return _run_python_grep(
+            pattern=pattern,
+            files=files,
+            limit=limit,
+            max_bytes=self.max_file_bytes,
+        )
 
     @staticmethod
     def _matches_glob(file_path: Path, root: Path, glob_pattern: str) -> bool:
@@ -846,29 +1053,26 @@ class ToolRuntime:
         limit = _positive_limit(max_results, self.max_results, 5000, "max_results")
         rg = shutil.which("rg")
         if rg:
-            command = [rg, "--files", "--glob", pattern]
-            for ignored_glob in IGNORED_GLOBS:
+            command = [
+                rg,
+                "--files",
+                "--hidden",
+                "--no-ignore",
+                "--glob",
+                pattern,
+            ]
+            for ignored_glob in self._ignore_globs(target):
                 command.extend(["--glob", ignored_glob])
             command.append(str(target))
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=self.cwd,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    timeout=30,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise ToolError(f"find failed: {exc}") from exc
-            if completed.returncode not in (0, 1):
-                stderr = completed.stderr.decode("utf-8", errors="replace")
-                raise ToolError(stderr.strip() or f"find exited {completed.returncode}")
-            paths = completed.stdout.decode("utf-8", errors="replace").splitlines()
+            returncode, paths, truncated, stderr = _run_bounded_command(
+                command, cwd=self.cwd, limit=limit
+            )
+            if not truncated and returncode not in (0, 1):
+                raise ToolError(stderr or f"find exited {returncode}")
             return {
                 "status": "success",
                 "files": paths[:limit],
-                "truncated": len(paths) > limit,
+                "truncated": truncated,
             }
 
         paths: list[str] = []

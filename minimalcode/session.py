@@ -153,7 +153,7 @@ class SessionStore:
     def latest(self, cwd: Path) -> Session | None:
         for path in self._candidate_files(cwd):
             if self._first_event(path) is not None:
-                return self.load(path)
+                return self.load(path, default_workspace=cwd)
         return None
 
     def resolve(self, identifier: str, cwd: Path) -> Session:
@@ -164,7 +164,7 @@ class SessionStore:
             is_file = False
             candidate = None
         if is_file and candidate is not None:
-            return self.load(candidate)
+            return self.load(candidate, default_workspace=cwd)
 
         files = self._candidate_files(cwd)
         if not files:
@@ -188,7 +188,7 @@ class SessionStore:
             if len(exact) != 1:
                 raise ValueError(f"session identifier is ambiguous: {identifier}")
             matches = exact
-        return self.load(matches[0])
+        return self.load(matches[0], default_workspace=cwd)
 
     @staticmethod
     def _first_event(path: Path) -> dict[str, Any] | None:
@@ -211,10 +211,12 @@ class SessionStore:
                 return session_id
         return path.stem
 
-    def load(self, path: Path) -> Session:
+    def load(self, path: Path, *, default_workspace: Path | None = None) -> Session:
         messages: list[dict[str, Any]] = []
         session_id = path.stem
-        workspace = path.parent
+        # Never default to the sessions directory: a metadata-less file loaded
+        # through --session would otherwise run every tool there.
+        workspace = default_workspace or Path.cwd()
         try:
             with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
                 for line in handle:

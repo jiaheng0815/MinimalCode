@@ -20,6 +20,7 @@ from .config import (
     write_settings,
 )
 from .errors import ConfigError, MinimalCodeError, ProviderError
+from .highlight import sanitize_terminal_text
 
 if TYPE_CHECKING:
     from .agent import Agent, AgentResult
@@ -76,7 +77,7 @@ def _management_command(argv: Sequence[str]) -> int | None:
         parser.add_argument("--home")
         args = parser.parse_args(argv[1:])
         path = ensure_config(args.home, overwrite=args.force)
-        print(path)
+        print(sanitize_terminal_text(str(path)))
         return 0
 
     if command == "config":
@@ -90,12 +91,14 @@ def _management_command(argv: Sequence[str]) -> int | None:
         parser.add_argument("value", nargs="?")
         parser.add_argument("--home")
         args = parser.parse_args(argv[1:])
+        if args.action in {"show", "path", "init"} and args.value is not None:
+            parser.error(f"unexpected argument: {args.value}")
         if args.action == "init":
             path = ensure_config(args.home)
-            print(path)
+            print(sanitize_terminal_text(str(path)))
             return 0
         if args.action == "path":
-            print(settings_path(args.home))
+            print(sanitize_terminal_text(str(settings_path(args.home))))
             return 0
         settings = load_settings(args.home)
         if args.action == "set-model":
@@ -103,7 +106,7 @@ def _management_command(argv: Sequence[str]) -> int | None:
                 raise ConfigError("model ID must not be empty")
             settings.data["model"] = args.value.strip()
             path = write_settings(settings.data, args.home)
-            print(f"{path}: model={args.value.strip()}")
+            print(sanitize_terminal_text(f"{path}: model={args.value.strip()}"))
             return 0
         if args.action == "set-provider":
             if not args.value:
@@ -113,7 +116,7 @@ def _management_command(argv: Sequence[str]) -> int | None:
                 raise ConfigError(f"provider {provider!r} is not defined")
             settings.data["provider"] = provider
             path = write_settings(settings.data, args.home)
-            print(f"{path}: provider={provider}")
+            print(sanitize_terminal_text(f"{path}: provider={provider}"))
             return 0
         print(
             json.dumps(
@@ -133,10 +136,11 @@ def _management_command(argv: Sequence[str]) -> int | None:
         settings = load_settings(args.home)
         rows = SessionStore(settings).list()
         for row in rows:
-            print(
+            line = (
                 f"{row['created_at']}  {row['session_id'][:10]}  "
                 f"{row['provider']}/{row['model']}  {row['workspace']}"
             )
+            print(sanitize_terminal_text(line))
         return 0
 
     if command == "shell":
@@ -147,7 +151,7 @@ def _management_command(argv: Sequence[str]) -> int | None:
         args = parser.parse_args(argv[1:])
         settings = load_settings(args.home)
         shell = detect_shell(settings.get("shell.path"))
-        print(f"{shell.label}\t{shell.executable}")
+        print(sanitize_terminal_text(f"{shell.label}\t{shell.executable}"))
         return 0
 
     if command == "import-pi":
@@ -165,9 +169,13 @@ def _management_command(argv: Sequence[str]) -> int | None:
             include_secrets=not args.no_secrets,
             overwrite=args.overwrite,
         )
-        print(f"imported {result.provider}/{result.model} into {result.settings_path}")
+        print(
+            sanitize_terminal_text(
+                f"imported {result.provider}/{result.model} into {result.settings_path}"
+            )
+        )
         if result.skipped:
-            print(f"skipped: {', '.join(result.skipped)}")
+            print(sanitize_terminal_text(f"skipped: {', '.join(result.skipped)}"))
         return 0
     return None
 
@@ -225,12 +233,14 @@ def _print_banner(
     session: Session,
 ) -> None:
     print(
-        f"{APP_NAME} {__version__} | {provider}/{model} | {shell_label}"
-        f" | effort {effort}"
+        sanitize_terminal_text(
+            f"{APP_NAME} {__version__} | {provider}/{model} | {shell_label}"
+            f" | effort {effort}"
+        )
     )
-    print(f"cwd: {cwd}")
+    print(f"cwd: {sanitize_terminal_text(str(cwd))}")
     if session.path:
-        print(f"session: {session.path}")
+        print(f"session: {sanitize_terminal_text(str(session.path))}")
     print("Type /help for commands.")
 
 
@@ -252,11 +262,15 @@ def _handle_effort(agent: Agent, text: str) -> None:
     requested = parts[1].lower()
     if requested not in EFFORT_LEVELS:
         print(
-            f"unknown effort: {parts[1]} (choose from {', '.join(EFFORT_LEVELS)})",
+            f"unknown effort: {sanitize_terminal_text(parts[1])} "
+            f"(choose from {', '.join(EFFORT_LEVELS)})",
             file=sys.stderr,
         )
         return
     agent.provider.thinking = requested
+    tools = getattr(agent, "tools", None)
+    if tools is not None and hasattr(tools, "thinking"):
+        tools.thinking = requested
     print(f"effort: {requested}")
 
 
@@ -344,12 +358,19 @@ def _interactive(
             try:
                 changed = agent.compact()
             except (ProviderError, RuntimeError) as exc:
-                print(f"compact failed: {exc}", file=sys.stderr)
+                print(
+                    f"compact failed: {sanitize_terminal_text(str(exc))}",
+                    file=sys.stderr,
+                )
                 continue
             print("compacted" if changed else "nothing to compact")
             continue
         if command == "/session":
-            print(agent.session.path or "<memory>")
+            print(
+                sanitize_terminal_text(
+                    str(agent.session.path) if agent.session.path else "<memory>"
+                )
+            )
             continue
         if command.split()[0] == "/effort":
             _handle_effort(agent, text)
@@ -358,7 +379,7 @@ def _interactive(
             print("/new  /clear  /compact  /session  /status  /effort  /exit")
             continue
         if text.startswith("/"):
-            print(f"unknown command: {text}", file=sys.stderr)
+            print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)
             continue
         try:
             result = agent.run(text)
@@ -367,7 +388,7 @@ def _interactive(
             print("\ncancelled", file=sys.stderr)
         except (MinimalCodeError, OSError) as exc:
             # A failed turn must not end the session: report and keep reading.
-            print(f"error: {exc}", file=sys.stderr)
+            print(f"error: {sanitize_terminal_text(str(exc))}", file=sys.stderr)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -474,7 +495,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\ncancelled", file=sys.stderr)
         return 130
     except (MinimalCodeError, OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {sanitize_terminal_text(str(exc))}", file=sys.stderr)
         return 2
 
 

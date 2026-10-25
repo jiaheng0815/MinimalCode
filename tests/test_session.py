@@ -126,6 +126,21 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(resolved.session_id, session.session_id)
             self.assertEqual(resolved.path, session.path)
 
+    def test_metadata_less_session_uses_the_requested_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            session.path.write_text(
+                '{"type":"message","message":{"role":"user","content":"hi"}}\n',
+                encoding="utf-8",
+            )
+            loaded = store.resolve(str(session.path), workspace)
+            self.assertEqual(loaded.cwd, workspace.resolve())
+
     def test_corrupt_session_metadata_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

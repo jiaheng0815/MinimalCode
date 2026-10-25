@@ -171,20 +171,31 @@ class ProviderWebClient:
             raise ToolError("provider web search results must be a list")
         # Provider output is untrusted: keep only object results, cap the count,
         # and bound every text field so one search cannot flood the context.
+        objects = [item for item in results if isinstance(item, dict)]
         normalized = [
             self._normalize_result(item)
-            for item in results[: self.max_count]
-            if isinstance(item, dict)
+            for item in objects[: min(effective_count, self.max_count)]
         ]
         return {"status": "success", "results": normalized}
 
     def _normalize_result(self, item: dict[str, Any]) -> dict[str, Any]:
-        result = dict(item)
-        for key in ("content", "text", "snippet"):
-            value = result.get(key)
-            if isinstance(value, str) and len(value) > self.max_content_chars:
-                result[key] = value[: self.max_content_chars] + "\n<content truncated>"
-        return result
+        return {key: self._normalize_value(value) for key, value in item.items()}
+
+    def _normalize_value(self, value: Any, depth: int = 0) -> Any:
+        if isinstance(value, str):
+            if len(value) > self.max_content_chars:
+                return value[: self.max_content_chars] + "\n<content truncated>"
+            return value
+        if depth >= 32:
+            return "<nested value omitted>"
+        if isinstance(value, dict):
+            return {
+                key: self._normalize_value(item, depth + 1)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._normalize_value(item, depth + 1) for item in value]
+        return value
 
     def fetch(self, url: str) -> dict[str, Any]:
         if not self.enabled:
@@ -209,6 +220,9 @@ class ProviderWebClient:
             raise ToolError("provider web fetch title must be a string")
         if not isinstance(content, str):
             raise ToolError("provider web fetch content must be a string")
+        title_truncated = len(title) > self.max_content_chars
+        if title_truncated:
+            title = title[: self.max_content_chars] + "...<title truncated>"
         truncated = len(content) > self.max_content_chars
         if truncated:
             content = content[: self.max_content_chars] + "\n<content truncated>"
@@ -216,5 +230,5 @@ class ProviderWebClient:
             "status": "success",
             "title": title,
             "content": content,
-            "truncated": truncated,
+            "truncated": truncated or title_truncated,
         }

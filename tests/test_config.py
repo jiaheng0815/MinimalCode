@@ -107,6 +107,38 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "output.theme"):
                 load_settings(home, require_file=True)
 
+    def test_invalid_thinking_level_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["thinking"] = "maximum"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "thinking"):
+                load_settings(home, require_file=True)
+
+    def test_invalid_provider_settings_are_rejected(self) -> None:
+        cases = (
+            ("protocol", "native"),
+            ("base_url", "not a url"),
+            ("context_window", 0),
+            ("timeout_seconds", 0),
+            ("stream", "yes"),
+            ("headers", "not-an-object"),
+        )
+        for key, value in cases:
+            with (
+                self.subTest(key=key),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                home = Path(temp)
+                path = ensure_config(home)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["providers"]["deepseek"][key] = value
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    load_settings(home, require_file=True)
+
     def test_invalid_nested_settings_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

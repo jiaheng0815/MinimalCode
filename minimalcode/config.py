@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 import tempfile
@@ -9,13 +10,23 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ConfigError
 
 APP_NAME = "MinimalCode"
 APP_DIR_NAME = ".MinimalCode"
 HOME_ENV = "MINIMALCODE_HOME"
-EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "ultra")
+EFFORT_LEVELS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "ultra",
+    "max",
+)
 SETTINGS_FILENAME = "settings.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = json.loads(
@@ -94,6 +105,12 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         raise ConfigError(f"{path}: model must be a non-empty string")
     if not isinstance(providers, dict) or provider not in providers:
         raise ConfigError(f"{path}: provider {provider!r} is not defined in providers")
+    for name, provider_config in providers.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{path}: provider names must be non-empty strings")
+        if not isinstance(provider_config, dict):
+            raise ConfigError(f"{path}: provider {name!r} must be an object")
+        _validate_provider(name, provider_config, path)
 
     max_turns = data.get("max_turns")
     if (
@@ -207,8 +224,89 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     if not isinstance(theme, str) or theme not in {"dark", "light"}:
         raise ConfigError(f"{path}: output.theme must be 'dark' or 'light'")
 
-    if "thinking" in data and not isinstance(data["thinking"], str):
-        raise ConfigError(f"{path}: thinking must be a string")
+    if "thinking" in data:
+        thinking = data["thinking"]
+        if not isinstance(thinking, str) or thinking not in EFFORT_LEVELS:
+            raise ConfigError(
+                f"{path}: thinking must be one of {', '.join(EFFORT_LEVELS)}"
+            )
+
+
+def _has_env_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and _ENV_PATTERN.search(value) is not None
+
+
+def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
+    protocol = provider.get("protocol", "openai_chat")
+    if not _has_env_placeholder(protocol) and protocol not in {
+        "openai_chat",
+        "openai_responses",
+    }:
+        raise ConfigError(
+            f"{path}: provider {name!r} uses unsupported protocol {protocol!r}"
+        )
+
+    base_url = provider.get("base_url")
+    if not isinstance(base_url, str) or not base_url:
+        raise ConfigError(f"{path}: provider {name!r} requires base_url")
+    if not _has_env_placeholder(base_url):
+        try:
+            parsed = urlsplit(base_url)
+            _ = parsed.port
+            hostname = parsed.hostname
+        except ValueError as exc:
+            raise ConfigError(
+                f"{path}: provider {name!r} has an invalid base_url"
+            ) from exc
+        if parsed.scheme not in {"http", "https"} or not hostname:
+            raise ConfigError(f"{path}: provider {name!r} has an invalid base_url")
+
+    model = provider.get("model")
+    if (
+        model is not None
+        and not _has_env_placeholder(model)
+        and (not isinstance(model, str) or not model.strip())
+    ):
+        raise ConfigError(f"{path}: provider {name!r} model must be a string")
+
+    for key in ("stream", "include_usage", "send_reasoning_effort", "require_api_key"):
+        if (
+            key in provider
+            and not _has_env_placeholder(provider[key])
+            and not isinstance(provider[key], bool)
+        ):
+            raise ConfigError(f"{path}: provider {name!r} {key} must be a boolean")
+
+    if "context_window" in provider and not _has_env_placeholder(
+        provider["context_window"]
+    ):
+        _validate_integer(
+            provider["context_window"],
+            path,
+            f"providers.{name}.context_window",
+            minimum=1,
+        )
+    if "timeout_seconds" in provider and not _has_env_placeholder(
+        provider["timeout_seconds"]
+    ):
+        _validate_number(
+            provider["timeout_seconds"],
+            path,
+            f"providers.{name}.timeout_seconds",
+            minimum=0,
+            inclusive_minimum=False,
+        )
+
+    for key in ("headers", "extra_body"):
+        if key in provider and not isinstance(provider[key], dict):
+            raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
+    for key in ("api_key", "api_key_env"):
+        value = provider.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"{path}: provider {name!r} {key} must be a string")
+    for key in ("web_tools", "vision"):
+        if key in provider and not isinstance(provider[key], dict):
+            raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
 
 
 def _validate_number(
@@ -222,6 +320,12 @@ def _validate_number(
 ) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ConfigError(f"{path}: {key} must be a number")
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ConfigError(f"{path}: {key} must be a finite number") from exc
+    if not math.isfinite(numeric):
+        raise ConfigError(f"{path}: {key} must be a finite number")
     minimum_ok = value >= minimum if inclusive_minimum else value > minimum
     if not minimum_ok or (maximum is not None and value > maximum):
         bounds = f">{minimum}" if not inclusive_minimum else f">={minimum}"

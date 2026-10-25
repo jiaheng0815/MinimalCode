@@ -15,11 +15,22 @@ Shell：{shell}
 """
 
 
-def _read_limited(path: Path, limit: int) -> str:
+def _read_limited(path: Path, limit: int, *, directory: Path) -> str:
     if limit <= 0:
         return ""
+    # Instruction discovery walks parent directories, so an absolute path check
+    # against the workspace would reject legitimate repo-level files. Instead,
+    # require the resolved file to stay in the directory that declared it; this
+    # blocks a symlinked AGENTS.md from leaking an unrelated file into the prompt.
     try:
-        with path.open(
+        resolved = path.resolve(strict=False)
+        base = directory.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if resolved.parent != base:
+        return ""
+    try:
+        with resolved.open(
             "r", encoding="utf-8-sig", errors="replace", newline=""
         ) as handle:
             return handle.read(limit)
@@ -33,14 +44,19 @@ def _agent_files(cwd: Path) -> list[Path]:
     for directory in [*parents, cwd]:
         for filename in ("AGENTS.md", "CLAUDE.md"):
             candidate = directory / filename
-            if candidate.is_file():
-                paths.append(candidate)
+            try:
+                if candidate.is_file():
+                    paths.append(candidate)
+            except OSError:
+                continue
     return paths
 
 
 def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:
     max_chars = int(settings.get("context.max_instruction_chars", 60_000))
-    custom_prompt = _read_limited(settings.home / "SYSTEM.md", max_chars)
+    custom_prompt = _read_limited(
+        settings.home / "SYSTEM.md", max_chars, directory=settings.home
+    )
     base = (
         custom_prompt.strip()
         or DEFAULT_SYSTEM_PROMPT.format(
@@ -48,24 +64,37 @@ def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:
             shell=shell.label,
         ).strip()
     )
+    remaining = max(0, max_chars - len(base))
 
     instructions: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     global_agents = settings.home / "AGENTS.md"
-    if global_agents.is_file():
-        seen.add(global_agents.resolve())
-        text = _read_limited(global_agents, max_chars).strip()
+    try:
+        global_is_file = global_agents.is_file()
+    except OSError:
+        global_is_file = False
+    if global_is_file:
+        try:
+            seen.add(global_agents.resolve())
+        except (OSError, RuntimeError, ValueError):
+            pass
+        # Reserve at least half the remaining budget for project instructions.
+        text = _read_limited(
+            global_agents, remaining // 2, directory=settings.home
+        ).strip()
         if text:
             instructions.append((global_agents, text))
-            max_chars -= len(text)
+            remaining -= len(text)
 
-    remaining = max_chars
     for path in _agent_files(cwd):
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
         if resolved in seen:
             continue
         seen.add(resolved)
-        text = _read_limited(path, remaining).strip()
+        text = _read_limited(path, remaining, directory=path.parent).strip()
         if text:
             instructions.append((path, text))
             remaining -= len(text)

@@ -605,6 +605,132 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(reply.content, "once")
 
+    def test_stream_without_a_terminal_event_is_incomplete(self) -> None:
+        body = b'data: {"choices":[{"delta":{"content":"half an answer"}}]}\n\n'
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body,
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+        self.assertEqual(reply.content, "half an answer")
+        self.assertEqual(reply.finish_reason, "incomplete")
+
+    def test_complete_text_rejects_an_incomplete_summary(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "partial"},
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with self.assertRaisesRegex(ProviderError, "finish reason"):
+                provider.complete_text([{"role": "user", "content": "summarize"}])
+        finally:
+            provider.close()
+
+    def test_max_effort_reaches_both_protocols(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def chat_handler(request: httpx2.Request) -> httpx2.Response:
+            seen.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+                },
+            )
+
+        def responses_handler(request: httpx2.Request) -> httpx2.Response:
+            seen.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [{"type": "message", "content": [{"text": "ok"}]}],
+                },
+            )
+
+        chat = OpenAICompatibleProvider(
+            name="chat",
+            config={
+                "base_url": "https://provider.test/v1",
+                "stream": False,
+                "send_reasoning_effort": True,
+            },
+            model="model-a",
+            thinking="max",
+            transport=httpx2.MockTransport(chat_handler),
+        )
+        responses = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+                "send_reasoning_effort": True,
+            },
+            model="model-r",
+            thinking="max",
+            transport=httpx2.MockTransport(responses_handler),
+        )
+        try:
+            chat.stream_chat([{"role": "user", "content": "hello"}])
+            responses.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            chat.close()
+            responses.close()
+
+        self.assertEqual(seen[0]["reasoning_effort"], "max")
+        self.assertEqual(seen[1]["reasoning"], {"effort": "max"})
+
+    def test_read_errors_are_not_retried(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            raise httpx2.ReadError("connection dropped")
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with self.assertRaises(ProviderError):
+                provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+        self.assertEqual(attempts, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

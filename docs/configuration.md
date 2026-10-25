@@ -11,7 +11,7 @@ Built-in defaults are data, not Python literals: they live in
 |---|---|---:|---|
 | `provider` | string | `"deepseek"` | Default provider name |
 | `model` | string | `"deepseek-flash"` | Default model ID |
-| `thinking` | string | `"high"` | Reasoning effort: `none` (disabled), `minimal`, `low`, `medium`, `high`, `xhigh`, or `ultra` |
+| `thinking` | string | `"high"` | Reasoning effort: `none` (disabled), `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, or `max`; other values are rejected at startup |
 | `max_turns` | integer | `1000` | Maximum model/tool rounds per user task |
 
 ## Session
@@ -41,13 +41,18 @@ The `shell` tool always inherits the operating-system permissions of the current
 
 `grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
 `dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
-Neither path parses `.gitignore`; install `ripgrep` if ignore-file semantics are
-required. A configured `max_results` above a tool's hard cap (2000 for `grep`,
-5000 for `find`) is clamped to that cap.
+The Python fallback uses ripgrep-compatible smart-case matching, runs the regex
+in a timeout-bounded child process, and truncates long result lines. An explicit
+`path` pointing at an ignored directory is still searched. Neither path parses
+`.gitignore`; install `ripgrep` if ignore-file semantics are required. A
+configured `max_results` above a tool's hard cap (2000 for `grep`, 5000 for
+`find`) is clamped to that cap.
 
-Shell commands write stdout and stderr to temporary files instead of pipes, so a
-command that times out while a background child still holds its output returns
-the partial output instead of blocking.
+Shell commands stream stdout and stderr through bounded in-memory captures instead
+of unbounded temporary files, so a command that times out while a background
+child still holds its output returns the partial output without blocking or
+filling the disk. A timeout kills the whole process tree, and Ctrl-C follows the
+same cleanup path.
 
 ## Subagents
 
@@ -73,7 +78,7 @@ final answer and leaves no session files behind.
 |---|---:|---|
 | `compact_at` | `0.8` | Compact when estimated context reaches this fraction |
 | `keep_messages` | `12` | Minimum recent messages retained after compaction |
-| `max_instruction_chars` | `60000` | Limit for `SYSTEM.md` and `AGENTS.md` content |
+| `max_instruction_chars` | `60000` | Combined budget for `SYSTEM.md`, global `AGENTS.md`, and project instruction files |
 
 Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading.
 
@@ -105,6 +110,11 @@ output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
 
+Provider entries are validated when settings load: `protocol`, `base_url`,
+numeric limits, booleans, and object fields are checked before the first request.
+Values containing `${VAR}` placeholders are expanded later, so they are checked
+again when that provider becomes active.
+
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`.
 
 For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}` (`none` disables thinking); reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`. For `openai_chat`, it sends `reasoning_effort`; `none` instead sends `{"thinking":{"type":"disabled"}}`.
@@ -133,9 +143,10 @@ checks. The built-in DeepSeek provider enables them with:
 When omitted, the provider API key is reused.
 
 Search results are normalized before they reach the model: non-object entries are
-dropped, at most `max_count` results are kept, and `content`/`text`/`snippet`
-fields longer than `max_content_chars` are truncated with a
-`<content truncated>` marker. `web_fetch` applies the same limit to page content.
+dropped, at most the requested count (capped by `max_count`) results are kept,
+and every string field is truncated to `max_content_chars` with a
+`<content truncated>` marker. `web_fetch` applies the same limit to page content
+and the title.
 
 `web_tools.base_url` and its credential are trusted provider configuration.
 `web_fetch` validates that the requested target is HTTP(S), but the target URL

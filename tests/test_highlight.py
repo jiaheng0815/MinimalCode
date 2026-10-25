@@ -6,7 +6,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from minimalcode.highlight import MarkdownHighlighter, strip_ansi
+from minimalcode.highlight import (
+    MarkdownHighlighter,
+    sanitize_terminal_text,
+    strip_ansi,
+)
 
 SAMPLE = """# MinimalCode README
 
@@ -132,6 +136,27 @@ class HighlightTests(unittest.TestCase):
             highlighter.feed(delta)
         highlighter.finish()
         self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
+    def test_terminal_control_sequences_are_removed(self) -> None:
+        text = "safe\x1b[2J\x1b]0;title\x07 still\x1b[31mred\x08\nnext"
+        self.assertEqual(sanitize_terminal_text(text), "safe stillred\nnext")
+
+    def test_split_escape_sequences_do_not_leak(self) -> None:
+        stream = io.StringIO()
+        highlighter = MarkdownHighlighter(stream, color=True)
+        for delta in ("safe\x1b", "[2", "Jtext\n"):
+            highlighter.feed(delta)
+        highlighter.finish()
+        rendered = strip_ansi(stream.getvalue())
+        self.assertEqual(rendered, "safetext\n")
+
+    def test_trailing_lone_carriage_return_is_dropped(self) -> None:
+        stream = io.StringIO()
+        highlighter = MarkdownHighlighter(stream, color=True)
+        highlighter.feed("line\r")
+        highlighter.feed("\nnext")
+        highlighter.finish()
+        self.assertEqual(strip_ansi(stream.getvalue()), "line\r\nnext")
 
     def test_non_tty_output_stays_plain(self) -> None:
         rendered = _render(SAMPLE, io.StringIO())

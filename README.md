@@ -68,7 +68,7 @@ minimalcode [prompt ...] [options]
 | `--no-session` | 本次运行不读写会话 |
 | `--provider <name>` | 覆盖配置中的供应商 |
 | `-m`, `--model <id>` | 覆盖模型 |
-| `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra` |
+| `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
 | `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
 | `--cwd <dir>` | 指定工作区 |
 | `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
@@ -106,7 +106,7 @@ JSON 输出字段：
 | `/new`、`/clear` | 新建会话 |
 | `/compact` | 立即压缩历史 |
 | `/session` | 显示会话文件路径 |
-| `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
+| `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
 | `/status` | 显示模型、推理强度、shell、上下文和 token 统计（JSON） |
 | `/help` | 显示命令 |
 | `/exit`、`/quit` | 退出 |
@@ -158,8 +158,8 @@ JSON 输出字段：
 ### 实现要点
 
 - **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 才放行外部路径。`shell` 子进程继承当前用户权限，不受此限制。
-- **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），且都不解析 `.gitignore`。
-- **shell**：`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。输出重定向到临时文件而不是管道，超时后仍能返回已产生的部分输出，不会因后台子进程占住管道而死锁。
+- **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义，且都不解析 `.gitignore`；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
+- **shell**：`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾 `exit $LASTEXITCODE` 保留子进程真实退出码。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
 - **输出裁剪**：工具结果按首尾保留截断，超长输出中间以 `... <truncated N chars> ...` 标记，既保留开头上下文也保留结尾错误信息。
 
@@ -212,7 +212,7 @@ JSON 输出字段：
 
 ## 终端高亮
 
-当输出目标是支持 ANSI 的交互式终端时，模型输出中的标题、强调、行内代码、引用、列表、表格和围栏代码块会被着色，并按流式 delta 逐词显示，不等待整行或完整回复。未闭合的 Markdown 标记会立即按对应样式渲染且不打印语法字符；`#` 到 `######` 标题标记本身也不打印，`## 标题` 只输出着色的标题文字；链接显示为 `文本 (URL)`。正文不重排，会话中保存的仍是模型返回的原始 Markdown。
+当输出目标是支持 ANSI 的交互式终端时，模型输出中的标题、强调、行内代码、引用、列表、表格和围栏代码块会被着色，并按流式 delta 逐词显示，不等待整行或完整回复。未闭合的 Markdown 标记会立即按对应样式渲染且不打印语法字符；`#` 到 `######` 标题标记本身也不打印，`## 标题` 只输出着色的标题文字；链接显示为 `文本 (URL)`。正文不重排，会话中保存的仍是模型返回的原始 Markdown。模型输出、工具输出和错误信息在写到终端前会移除 ANSI/OSC 等控制序列，只保留换行和制表符，避免转义序列操纵终端。
 
 主题通过配置切换：
 
@@ -231,6 +231,7 @@ JSON 输出字段：
 
 - MinimalCode 会执行模型生成的 shell 命令，子进程拥有当前用户权限。敏感项目应在容器、虚拟机或受限账户中运行。
 - 文件工具默认限制在工作区内；这不能替代操作系统级隔离。
+- `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
 

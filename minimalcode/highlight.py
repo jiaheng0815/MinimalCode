@@ -128,8 +128,115 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+_CONTROL_PENDING_LIMIT = 64_000
+
+
+def _csi_length(data: str, start: int) -> int | None:
+    """Return the length of a CSI sequence beginning at ``start``."""
+    index = start + 2
+    while index < len(data):
+        code = ord(data[index])
+        if 0x40 <= code <= 0x7E:
+            return index + 1 - start
+        if not 0x20 <= code <= 0x3F:
+            return 2
+        index += 1
+    return None
+
+
+def _string_sequence_length(data: str, start: int, sequence_start: int) -> int | None:
+    """Return the length of an OSC/DCS-style string sequence."""
+    index = start
+    while index < len(data):
+        if data[index] == "\x07":
+            return index + 1 - sequence_start
+        if data[index] == "\x1b":
+            if index + 1 >= len(data):
+                return None
+            if data[index + 1] == "\\":
+                return index + 2 - sequence_start
+        index += 1
+    return None
+
+
+class TerminalSanitizer:
+    """Strip terminal control sequences before writing untrusted text.
+
+    Model output and shell output are untrusted, but they still reach a real
+    terminal. Keep newlines and tabs, drop every other C0/C1 control character,
+    and remove complete or partially streamed escape sequences. Splitting the
+    state across ``feed`` calls also covers sequences cut between stream deltas.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    @staticmethod
+    def _escape_length(data: str, start: int) -> int | None:
+        if start + 1 >= len(data):
+            return None
+        marker = data[start + 1]
+        if marker == "[":
+            return _csi_length(data, start)
+        if marker == "]":
+            return _string_sequence_length(data, start + 2, start)
+        if marker in "PX^_":
+            return _string_sequence_length(data, start + 2, start)
+        return 2
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        data = self._pending + text
+        self._pending = ""
+        rendered: list[str] = []
+        index = 0
+        while index < len(data):
+            char = data[index]
+            if char == "\x1b":
+                length = self._escape_length(data, index)
+                if length is None:
+                    self._pending = data[index:]
+                    break
+                index += length
+                continue
+            if char == "\r":
+                if index + 1 >= len(data):
+                    self._pending = "\r"
+                    break
+                if data[index + 1] == "\n":
+                    rendered.append("\r\n")
+                    index += 2
+                else:
+                    index += 1
+                continue
+            code = ord(char)
+            if char in "\n\t":
+                rendered.append(char)
+            elif code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
+                pass
+            else:
+                rendered.append(char)
+            index += 1
+        if len(self._pending) > _CONTROL_PENDING_LIMIT:
+            self._pending = ""
+        return "".join(rendered)
+
+    def finish(self) -> str:
+        # A trailing lone CR or an unterminated escape has no safe text left.
+        self._pending = ""
+        return ""
+
+
+def sanitize_terminal_text(text: str) -> str:
+    """Return ``text`` with all terminal escape/control sequences removed."""
+    sanitizer = TerminalSanitizer()
+    return sanitizer.feed(text) + sanitizer.finish()
+
+
 def style_activity_tag(text: str, stream: TextIO) -> str:
     """Color a leading ``[tool]`` activity tag when the stream supports ANSI."""
+    text = sanitize_terminal_text(text)
     match = re.match(r"^(\[[^\]\n]+\])", text)
     if match is None or not _supports_color(stream):
         return text
@@ -200,8 +307,10 @@ class MarkdownHighlighter:
         self._code_escape = False
         self._code_word: list[str] = []
         self._code_last = ""
+        self._sanitizer = TerminalSanitizer()
 
     def feed(self, delta: str) -> None:
+        delta = self._sanitizer.feed(delta)
         if not delta:
             return
         if not self.enabled:
@@ -216,6 +325,7 @@ class MarkdownHighlighter:
         self._write(self._render_segments(segments))
 
     def finish(self) -> None:
+        self._sanitizer.finish()
         if self.enabled:
             segments: list[tuple[str | None, list[str]]] = []
             self._consume(segments, final=True)
@@ -848,6 +958,7 @@ class MarkdownHighlighter:
         self._fence_char = ""
         self._fence_length = 0
         self._reset_code_line()
+        self._sanitizer = TerminalSanitizer()
 
     @staticmethod
     def _append(

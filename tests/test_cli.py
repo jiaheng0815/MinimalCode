@@ -53,7 +53,9 @@ class StubAgent:
         self.provider = SimpleNamespace(
             name="fake", model="fake-model", thinking="high"
         )
-        self.tools = SimpleNamespace(web_client=None, vision_client=None)
+        self.tools = SimpleNamespace(
+            web_client=None, vision_client=None, thinking="high"
+        )
         self.prompts: list[str] = []
         self._failures = failures
 
@@ -147,7 +149,17 @@ class CliTests(unittest.TestCase):
                 for message in provider.messages
                 if message["role"] == "system"
             )
-            self.assertIn(f"Workspace: {requested.resolve()}", system_message)
+            self.assertIn(str(requested.resolve()), system_message)
+
+    def test_max_effort_is_accepted_and_forwarded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["thinking"] = "max"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            settings = load_settings(home, require_file=True)
+            self.assertEqual(settings.get("thinking"), "max")
 
     def test_config_set_model_and_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -192,6 +204,7 @@ class CliTests(unittest.TestCase):
                     "/effort minimal",
                     "/effort xhigh",
                     "/effort ULTRA",
+                    "/effort max",
                     "/effort turbo",
                     "/exit",
                 ]
@@ -206,7 +219,8 @@ class CliTests(unittest.TestCase):
                 code = _interactive(stub, args, settings, store, "fake", "model")
 
             self.assertEqual(code, 0)
-            self.assertEqual(stub.provider.thinking, "ultra")
+            self.assertEqual(stub.provider.thinking, "max")
+            self.assertEqual(stub.tools.thinking, "max")
             self.assertEqual(stub.prompts, [])
             self.assertIn("| stub-shell | effort high", stdout.getvalue())
             for level in EFFORT_LEVELS:
@@ -215,6 +229,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("effort: low", stdout.getvalue())
             self.assertIn("effort: none", stdout.getvalue())
             self.assertIn("effort: ultra", stdout.getvalue())
+            self.assertIn("effort: max", stdout.getvalue())
             self.assertIn("unknown effort: turbo", stderr.getvalue())
 
     def test_interactive_loop_survives_a_failed_turn(self) -> None:

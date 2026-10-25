@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +57,24 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertTrue(result["content"].strip())
         self.assertLessEqual(len(result["content"]), 200)
+
+    def test_edit_rejects_content_over_max_file_bytes(self) -> None:
+        self.tools.write("small.txt", "x")
+        self.tools.max_file_bytes = 20
+        with self.assertRaisesRegex(ToolError, "max_file_bytes"):
+            self.tools.edit("small.txt", "x", "y" * 100)
+        self.assertEqual(
+            (self.workspace / "small.txt").read_text(encoding="utf-8"), "x"
+        )
+
+    def test_read_start_beyond_eof_is_reported(self) -> None:
+        self.tools.write("short.txt", "one\ntwo\n")
+        with self.assertRaisesRegex(ToolError, "beyond the end"):
+            self.tools.read("short.txt", start_line=10)
+        self.tools.write("empty.txt", "")
+        empty = self.tools.read("empty.txt")
+        self.assertEqual(empty["content"], "")
+        self.assertEqual(empty["end_line"], 0)
 
     def test_ambiguous_edit_fails(self) -> None:
         self.tools.write("duplicate.txt", "same\nsame\n")
@@ -155,12 +172,13 @@ class ToolTests(unittest.TestCase):
 
     def test_default_result_limit_is_capped_by_the_tool_schema(self) -> None:
         self.tools.max_results = 5000
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"a.py:1:needle\n" * 3000, stderr=b""
-        )
+        lines = [f"a.py:1:needle-{index}" for index in range(3000)]
         with (
             patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
-            patch("minimalcode.tools.subprocess.run", return_value=completed),
+            patch(
+                "minimalcode.tools._run_bounded_command",
+                return_value=(0, lines, True, ""),
+            ),
         ):
             result = self.tools.grep("needle")
         self.assertEqual(len(result["matches"]), 2000)
@@ -182,12 +200,12 @@ class ToolTests(unittest.TestCase):
 
     def test_ripgrep_paths_apply_the_same_ignore_globs(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout=b"", stderr=b""
-        )
         with (
             patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
-            patch("minimalcode.tools.subprocess.run", return_value=completed) as run,
+            patch(
+                "minimalcode.tools._run_bounded_command",
+                return_value=(1, [], False, ""),
+            ) as run,
         ):
             self.tools.grep("needle")
             grep_command = run.call_args.args[0]
@@ -195,6 +213,8 @@ class ToolTests(unittest.TestCase):
             find_command = run.call_args.args[0]
 
         for command in (grep_command, find_command):
+            self.assertIn("--hidden", command)
+            self.assertIn("--no-ignore", command)
             self.assertIn("!**/build/**", command)
             self.assertIn("!**/node_modules/**", command)
             self.assertIn("!**/__pycache__/**", command)
@@ -248,6 +268,34 @@ class ToolTests(unittest.TestCase):
             any(path.endswith("current.py") for path in find_result["files"])
         )
         self.assertFalse(any("build" in path for path in find_result["files"]))
+
+    def test_python_grep_uses_smart_case(self) -> None:
+        self.tools.write("case.py", "UPPER = 1\nlower = 2\n")
+        with patch("minimalcode.tools.shutil.which", return_value=None):
+            insensitive = self.tools.grep("upper")
+            sensitive = self.tools.grep("UPPER")
+        self.assertTrue(any("UPPER" in line for line in insensitive["matches"]))
+        self.assertTrue(any("UPPER" in line for line in sensitive["matches"]))
+        self.assertFalse(any("lower" in line for line in sensitive["matches"]))
+
+    def test_explicit_ignored_directory_is_searchable(self) -> None:
+        self.tools.write("build/generated.py", "needle = 1\n")
+        with patch("minimalcode.tools.shutil.which", return_value=None):
+            result = self.tools.grep("needle", path="build")
+            files = self.tools.find("*.py", path="build")
+        self.assertTrue(any("generated.py" in line for line in result["matches"]))
+        self.assertTrue(any(path.endswith("generated.py") for path in files["files"]))
+
+        with (
+            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
+            patch(
+                "minimalcode.tools._run_bounded_command",
+                return_value=(0, [], False, ""),
+            ) as run,
+        ):
+            self.tools.grep("needle", path="build")
+            self.tools.grep("needle", path="build/generated.py")
+        self.assertNotIn("!**/build/**", run.call_args.args[0])
 
     def test_shell_tool(self) -> None:
         shell = detect_shell()
