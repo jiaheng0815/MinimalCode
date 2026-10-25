@@ -157,7 +157,7 @@ class Agent:
         self.session = session
         self.tools = tool_runtime
         self.tool_schemas = available_tool_schemas(
-            self.tools.web_client, self.tools.vision_client
+            self.tools.web_client, self.tools.vision_client, self.tools.subagent_enabled
         )
         self.shell = shell
         configured_turns = (
@@ -336,7 +336,7 @@ class Agent:
                     "content": tool_result_text(result),
                 }
                 self.session.append_message(tool_message)
-                if call.name == "shell":
+                if call.name in {"shell", "subagent"}:
                     self._activity(_shell_output_activity(result))
                 else:
                     self._activity(f"  {_tool_output_preview(result)}")
@@ -484,6 +484,7 @@ class Agent:
         return {
             "provider": self.provider.name,
             "model": self.provider.model,
+            "effort": self.provider.thinking,
             "shell": self.shell.label,
             "session": str(self.session.path) if self.session.path else "<memory>",
             "messages": len(self.session.messages),

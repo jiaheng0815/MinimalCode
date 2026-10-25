@@ -126,6 +126,7 @@ def run_shell(
     timeout: float,
     max_output_chars: int,
     env: Mapping[str, str] | None = None,
+    stdin_text: str | None = None,
 ) -> dict[str, object]:
     if not isinstance(command, str):
         return {"status": "error", "message": "command must be a string"}
@@ -150,6 +151,14 @@ def run_shell(
     if env:
         process_env.update({str(key): str(value) for key, value in env.items()})
 
+    # A subagent reads its prompt from stdin, so the payload is piped in;
+    # otherwise stdin stays closed so an interactive program cannot hang.
+    stdin_options: dict[str, object]
+    if stdin_text is None:
+        stdin_options = {"stdin": subprocess.DEVNULL}
+    else:
+        stdin_options = {"input": str(stdin_text).encode("utf-8")}
+
     # Output is collected through temporary files instead of pipes. With pipes a
     # timed-out command that left a background child holding the write end made
     # the post-kill drain block forever; file handles let the call return with
@@ -164,7 +173,7 @@ def run_shell(
                     _prefix_command(shell, command),
                     cwd=cwd,
                     env=process_env,
-                    stdin=subprocess.DEVNULL,
+                    **stdin_options,
                     stdout=out_file,
                     stderr=err_file,
                     timeout=timeout,

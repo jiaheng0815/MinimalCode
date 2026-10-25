@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from . import __version__
 from .config import (
     APP_NAME,
+    EFFORT_LEVELS,
     Settings,
     ensure_config,
     home_dir,
@@ -40,7 +41,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-session", action="store_true")
     parser.add_argument("--provider", help="Provider name from settings")
     parser.add_argument("-m", "--model", help="Provider model ID")
-    parser.add_argument("--thinking", help="Provider reasoning effort")
+    parser.add_argument(
+        "--thinking",
+        type=str.lower,
+        choices=EFFORT_LEVELS,
+        metavar="EFFORT",
+        help=(
+            f"Provider reasoning effort ({', '.join(EFFORT_LEVELS)}); "
+            "'none' disables thinking"
+        ),
+    )
     parser.add_argument("--max-turns", type=int)
     parser.add_argument("--cwd", help="Workspace directory")
     parser.add_argument("--home", help="Config directory (default ~/.MinimalCode)")
@@ -210,10 +220,14 @@ def _print_banner(
     provider: str,
     model: str,
     shell_label: str,
+    effort: str,
     cwd: Path,
     session: Session,
 ) -> None:
-    print(f"{APP_NAME} {__version__} | {provider}/{model} | {shell_label}")
+    print(
+        f"{APP_NAME} {__version__} | {provider}/{model} | {shell_label}"
+        f" | effort {effort}"
+    )
     print(f"cwd: {cwd}")
     if session.path:
         print(f"session: {session.path}")
@@ -223,6 +237,27 @@ def _print_banner(
 def _ensure_newline(result: AgentResult) -> None:
     if result.text and not result.text.endswith("\n"):
         print()
+
+
+def _handle_effort(agent: Agent, text: str) -> None:
+    parts = text.split()
+    if len(parts) > 2:
+        print(f"usage: /effort [{'|'.join(EFFORT_LEVELS)}]", file=sys.stderr)
+        return
+    if len(parts) == 1:
+        print(
+            f"effort: {agent.provider.thinking} (available: {', '.join(EFFORT_LEVELS)})"
+        )
+        return
+    requested = parts[1].lower()
+    if requested not in EFFORT_LEVELS:
+        print(
+            f"unknown effort: {parts[1]} (choose from {', '.join(EFFORT_LEVELS)})",
+            file=sys.stderr,
+        )
+        return
+    agent.provider.thinking = requested
+    print(f"effort: {requested}")
 
 
 def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
@@ -256,6 +291,7 @@ def _interactive(
         provider_name,
         model,
         agent.shell.label,
+        agent.provider.thinking,
         agent.session.cwd,
         agent.session,
     )
@@ -289,6 +325,9 @@ def _interactive(
                     agent.shell,
                     web_client=agent.tools.web_client,
                     vision_client=agent.tools.vision_client,
+                    provider_name=agent.provider.name,
+                    model=agent.provider.model,
+                    thinking=agent.provider.thinking,
                 ),
                 shell=agent.shell,
                 max_turns=args.max_turns,
@@ -312,8 +351,11 @@ def _interactive(
         if command == "/session":
             print(agent.session.path or "<memory>")
             continue
+        if command.split()[0] == "/effort":
+            _handle_effort(agent, text)
+            continue
         if command == "/help":
-            print("/new  /clear  /compact  /session  /status  /exit")
+            print("/new  /clear  /compact  /session  /status  /effort  /exit")
             continue
         if text.startswith("/"):
             print(f"unknown command: {text}", file=sys.stderr)
@@ -391,6 +433,9 @@ def run(argv: Sequence[str] | None = None) -> int:
             shell,
             web_client=web_client,
             vision_client=vision_client,
+            provider_name=provider_name,
+            model=model,
+            thinking=provider.thinking,
         )
         agent = Agent(
             settings=settings,

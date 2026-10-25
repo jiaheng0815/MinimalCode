@@ -17,6 +17,12 @@
     "max_file_bytes": 5000000,
     "max_results": 200
   },
+  "subagent": {
+    "enabled": true,
+    "max_depth": 2,
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
   "context": {
     "compact_at": 0.8,
     "keep_messages": 12,

@@ -24,7 +24,7 @@ print("hello")  # a comment
 ```
 """
 
-RENDERED_SAMPLE = """# MinimalCode README
+RENDERED_SAMPLE = """MinimalCode README
 
 Use bold, italic, old text and inline code.
 
@@ -144,11 +144,23 @@ class HighlightTests(unittest.TestCase):
     def test_deltas_are_visible_before_stream_finishes(self) -> None:
         stream = io.StringIO()
         highlighter = MarkdownHighlighter(stream, color=True)
-        visible = ""
+        visible: list[str] = []
         for delta in ("# ", "README", "\n\n", "Hello", " ", "world"):
             highlighter.feed(delta)
-            visible += delta
-            self.assertEqual(strip_ansi(stream.getvalue()), visible)
+            visible.append(strip_ansi(stream.getvalue()))
+        # The heading marker is consumed, so nothing is printed until the
+        # heading text itself arrives; later deltas render without waiting.
+        self.assertEqual(
+            visible,
+            [
+                "",
+                "README",
+                "README\n\n",
+                "README\n\nHello",
+                "README\n\nHello ",
+                "README\n\nHello world",
+            ],
+        )
         self.assertIn("\x1b[", stream.getvalue())
 
     def test_rendered_output_is_independent_of_chunk_size(self) -> None:
@@ -203,7 +215,7 @@ class HighlightTests(unittest.TestCase):
     def test_crlf_and_unclosed_fence_are_preserved(self) -> None:
         sample = "# Title\r\n\r\n```text\r\nplain\r\n"
         rendered = _render(sample, io.StringIO(), color=True)
-        self.assertEqual(strip_ansi(rendered), sample)
+        self.assertEqual(strip_ansi(rendered), "Title\r\n\r\n```text\r\nplain\r\n")
 
     def test_trailing_backslash_is_preserved(self) -> None:
         for size in (1, 2, 3, len("path\\")):
@@ -215,6 +227,36 @@ class HighlightTests(unittest.TestCase):
                     highlighter.feed(sample[index : index + size])
                 highlighter.finish()
                 self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
+    def test_indented_fence_closes_so_later_headings_render_as_markdown(self) -> None:
+        from minimalcode.highlight import _PALETTES
+
+        palette = _PALETTES["dark"]
+        for indent in (0, 1, 2, 3, 4, 6):
+            pad = " " * indent
+            sample = (
+                f"1. step\n\n{pad}```python\n{pad}print(1)\n{pad}```\n\n## 二级标题\n"
+            )
+            expected = (
+                f"1. step\n\n{pad}```python\n{pad}print(1)\n{pad}```\n\n二级标题\n"
+            )
+            for size in (1, 2, 3, 7, len(sample)):
+                with self.subTest(indent=indent, size=size):
+                    rendered = _render(sample, io.StringIO(), color=True, size=size)
+                    self.assertEqual(strip_ansi(rendered), expected)
+                    self.assertIn(palette["h2"], rendered)
+
+    def test_indented_marker_with_trailing_text_does_not_close_a_fence(self) -> None:
+        from minimalcode.highlight import _PALETTES
+
+        sample = "```text\n    ```not a closing fence\n```\n## After\n"
+        rendered = _render(sample, io.StringIO(), color=True)
+        self.assertEqual(
+            strip_ansi(rendered), "```text\n    ```not a closing fence\n```\nAfter\n"
+        )
+        # The fence opened at the first line still ends at the bare marker, so
+        # the heading after it is styled instead of staying code.
+        self.assertIn(_PALETTES["dark"]["h2"], rendered)
 
     def test_thematic_breaks_are_preserved(self) -> None:
         for sample in ("---\n", "***\n", "___\n", "- - -\n"):
@@ -232,6 +274,32 @@ class HighlightTests(unittest.TestCase):
         rendered = _render(sample, io.StringIO(), color=True)
         self.assertEqual(strip_ansi(rendered), sample)
 
+    def test_heading_marker_is_not_printed(self) -> None:
+        from minimalcode.highlight import _PALETTES
+
+        palette = _PALETTES["dark"]
+        for level in (1, 2, 3, 4, 5, 6):
+            sample = f"{'#' * level} 二级标题\nnext line\n"
+            for size in range(1, len(sample) + 1):
+                with self.subTest(level=level, size=size):
+                    rendered = _render(sample, io.StringIO(), color=True, size=size)
+                    # The `#` run and its separating space are consumed, so the
+                    # heading reads as plain styled text like `**bold**` does.
+                    self.assertEqual(strip_ansi(rendered), "二级标题\nnext line\n")
+                    self.assertIn(palette[f"h{level}"], rendered)
+                    self.assertNotIn("#", rendered)
+
+    def test_heading_marker_alone_at_end_of_stream_is_preserved(self) -> None:
+        for sample in ("#", "##", "######"):
+            for size in range(1, len(sample) + 1):
+                with self.subTest(sample=sample, size=size):
+                    stream = io.StringIO()
+                    highlighter = MarkdownHighlighter(stream, color=True)
+                    for index in range(0, len(sample), size):
+                        highlighter.feed(sample[index : index + size])
+                    highlighter.finish()
+                    self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
     def test_heading_level_does_not_depend_on_delta_size(self) -> None:
         from minimalcode.highlight import _PALETTES
 
@@ -242,7 +310,7 @@ class HighlightTests(unittest.TestCase):
             for size in (1, 2, 3, level, len(sample)):
                 with self.subTest(level=level, size=size):
                     rendered = _render(sample, io.StringIO(), color=True, size=size)
-                    self.assertEqual(strip_ansi(rendered), sample)
+                    self.assertEqual(strip_ansi(rendered), "Heading\n")
                     self.assertIn(expected_style, rendered)
                     other_styles = {
                         style

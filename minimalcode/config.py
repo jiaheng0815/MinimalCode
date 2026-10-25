@@ -15,6 +15,7 @@ from .errors import ConfigError
 APP_NAME = "MinimalCode"
 APP_DIR_NAME = ".MinimalCode"
 HOME_ENV = "MINIMALCODE_HOME"
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "ultra")
 SETTINGS_FILENAME = "settings.json"
 
 DEFAULT_SETTINGS: dict[str, Any] = json.loads(
@@ -102,7 +103,7 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     ):
         raise ConfigError(f"{path}: max_turns must be an integer from 1 to 10000")
 
-    for key in ("shell", "tools", "context", "session", "output"):
+    for key in ("shell", "tools", "subagent", "context", "session", "output"):
         if not isinstance(data.get(key), dict):
             raise ConfigError(f"{path}: {key} must be an object")
 
@@ -147,6 +148,31 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         "tools.max_results",
         minimum=1,
         maximum=5000,
+    )
+
+    subagent = data["subagent"]
+    if not isinstance(subagent.get("enabled"), bool):
+        raise ConfigError(f"{path}: subagent.enabled must be a boolean")
+    _validate_integer(
+        subagent.get("max_depth"),
+        path,
+        "subagent.max_depth",
+        minimum=0,
+        maximum=10,
+    )
+    _validate_integer(
+        subagent.get("max_turns"),
+        path,
+        "subagent.max_turns",
+        minimum=1,
+        maximum=10_000,
+    )
+    _validate_number(
+        subagent.get("timeout_seconds"),
+        path,
+        "subagent.timeout_seconds",
+        minimum=1,
+        maximum=3600,
     )
 
     context = data["context"]

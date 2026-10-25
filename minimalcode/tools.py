@@ -16,6 +16,10 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 from .config import Settings
 from .errors import ToolError
 from .shell import ShellSpec, run_shell
+from .subagent import PREAMBLE as SUBAGENT_PREAMBLE
+from .subagent import build_command as build_subagent_command
+from .subagent import child_env as subagent_env
+from .subagent import depth_from_env as subagent_depth_from_env
 from .vision import SUPPORTED_IMAGE_FORMATS, ProviderVisionClient, image_media_type
 from .web import ProviderWebClient
 
@@ -212,11 +216,55 @@ READ_IMAGE_SCHEMA: dict[str, Any] = {
 }
 
 
+SUBAGENT_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "subagent",
+        "description": (
+            "Delegate a self-contained task to a fresh MinimalCode agent in a child "
+            "shell and return its final answer. Use it for code review, broad "
+            "analysis, or independent verification whose output would flood this "
+            "context. The subagent is workspace-aware and uses the same provider."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Complete instruction for the subagent",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory, relative to the workspace",
+                },
+                "timeout": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 3600,
+                    "description": "Timeout in seconds, capped by subagent.timeout_seconds",
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "Model/tool rounds allowed in the child, capped by config",
+                },
+            },
+            "required": ["task"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
     vision_client: ProviderVisionClient | None = None,
+    subagent: bool = False,
 ) -> list[dict[str, Any]]:
     schemas = list(TOOL_SCHEMAS)
+    if subagent:
+        schemas.append(SUBAGENT_SCHEMA)
     if vision_client is not None and vision_client.enabled:
         schemas.append(READ_IMAGE_SCHEMA)
     if web_client is None or not web_client.enabled:
@@ -370,6 +418,9 @@ class ToolRuntime:
         *,
         web_client: ProviderWebClient | None = None,
         vision_client: ProviderVisionClient | None = None,
+        provider_name: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
     ):
         self.settings = settings
         self.cwd = cwd.resolve()
@@ -378,6 +429,16 @@ class ToolRuntime:
         self.web_enabled = bool(web_client and web_client.enabled)
         self.vision_client = vision_client
         self.vision_enabled = bool(vision_client and vision_client.enabled)
+        self.provider_name = provider_name
+        self.model = model
+        self.thinking = thinking
+        self.subagent_depth = subagent_depth_from_env()
+        self.subagent_max_depth = int(settings.get("subagent.max_depth", 2))
+        self.subagent_enabled = bool(
+            settings.get("subagent.enabled", True)
+        ) and self.subagent_depth < self.subagent_max_depth
+        self.subagent_timeout = float(settings.get("subagent.timeout_seconds", 900))
+        self.subagent_max_turns = int(settings.get("subagent.max_turns", 40))
         self.allow_outside = bool(settings.get("tools.allow_outside_workspace", False))
         self.max_file_chars = int(settings.get("tools.max_file_chars", 160_000))
         self.max_file_bytes = int(settings.get("tools.max_file_bytes", 5_000_000))
@@ -610,6 +671,59 @@ class ToolRuntime:
             max_output_chars=self.max_output_chars,
         )
 
+    def subagent(
+        self,
+        task: str,
+        cwd: str = ".",
+        timeout: float | None = None,
+        max_turns: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a nested ``minimalcode -p`` process and return its answer."""
+        if not self.subagent_enabled:
+            raise ToolError(
+                "subagent is disabled here: set subagent.enabled or raise "
+                f"subagent.max_depth (currently {self.subagent_max_depth})"
+            )
+        if not isinstance(task, str) or not task.strip():
+            raise ToolError("task must be a non-empty string")
+        workdir = self._path(cwd)
+        if not workdir.is_dir():
+            raise ToolError(f"working directory not found: {workdir}")
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+        ):
+            raise ToolError("timeout must be a number")
+        requested_timeout = float(
+            timeout if timeout is not None else self.subagent_timeout
+        )
+        if math.isnan(requested_timeout):
+            raise ToolError("timeout must be a number")
+        effective_timeout = max(1.0, min(requested_timeout, self.subagent_timeout))
+        turns = self.subagent_max_turns if max_turns is None else max_turns
+        if isinstance(turns, bool) or not isinstance(turns, int):
+            raise ToolError("max_turns must be an integer")
+        turns = max(1, min(turns, self.subagent_max_turns))
+
+        command = build_subagent_command(
+            self.shell_spec,
+            cwd=workdir,
+            home=self.settings.home,
+            provider=self.provider_name,
+            model=self.model,
+            thinking=self.thinking,
+            max_turns=turns,
+        )
+        result = run_shell(
+            command,
+            shell=self.shell_spec,
+            cwd=workdir,
+            timeout=effective_timeout,
+            max_output_chars=self.max_output_chars,
+            env=subagent_env(self.subagent_depth + 1),
+            stdin_text=SUBAGENT_PREAMBLE + task.strip(),
+        )
+        return {**result, "command": command}
+
     def grep(
         self,
         pattern: str,
@@ -837,6 +951,7 @@ class ToolRuntime:
             "write": self.write,
             "edit": self.edit,
             "shell": self.shell,
+            "subagent": self.subagent,
             "grep": self.grep,
             "find": self.find,
             "read_image": self.read_image,
@@ -859,6 +974,8 @@ class ToolRuntime:
     def activity(name: str, arguments: dict[str, Any]) -> str:
         if name == "shell":
             detail = _clip(str(arguments.get("command", "")))
+        elif name == "subagent":
+            detail = _clip(str(arguments.get("task", "")))
         elif name in {"read", "write", "edit", "read_image"}:
             detail = _clip(str(arguments.get("path", "")))
         elif name == "grep":

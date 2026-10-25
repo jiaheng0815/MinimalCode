@@ -132,5 +132,126 @@ class EndToEndTests(unittest.TestCase):
             thread.join(timeout=5)
 
 
+class _SubagentHandler(BaseHTTPRequestHandler):
+    requests: ClassVar[list[dict]] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length))
+        self.requests.append(payload)
+        messages = payload.get("messages", [])
+        tool_results = [
+            message for message in messages if message.get("role") == "tool"
+        ]
+        if tool_results:
+            text = "parent-done"
+        else:
+            users = [m for m in messages if m.get("role") == "user"]
+            last_user = str(users[-1].get("content", "")) if users else ""
+            if "SUBAGENT-REVIEW" in last_user:
+                text = "child-report"
+            else:
+                events = [
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_subagent",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "subagent",
+                                                "arguments": json.dumps(
+                                                    {
+                                                        "task": "SUBAGENT-REVIEW app.py",
+                                                        "timeout": 120,
+                                                    }
+                                                ),
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ]
+                    }
+                ]
+                self._send(events)
+                return
+        self._send([{"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}])
+
+    def _send(self, events: list[dict]) -> None:
+        body = _sse(events)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args) -> None:
+        return
+
+
+class SubagentEndToEndTests(unittest.TestCase):
+    def test_parent_dispatches_a_real_child_process(self) -> None:
+        _SubagentHandler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _SubagentHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / ".MinimalCode"
+                workspace = root / "workspace"
+                workspace.mkdir()
+                ensure_config(home)
+                settings = load_settings(home, require_file=True)
+                data = settings.data
+                port = server.server_address[1]
+                data["provider"] = "local"
+                data["model"] = "test-model"
+                data["providers"] = {
+                    "local": {
+                        "protocol": "openai_chat",
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key_env": None,
+                        "context_window": 4096,
+                    }
+                }
+                write_settings(data, home)
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = run(
+                        [
+                            "--json",
+                            "--no-session",
+                            "--home",
+                            str(home),
+                            "--cwd",
+                            str(workspace),
+                            "review the project",
+                        ]
+                    )
+                self.assertEqual(code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["text"], "parent-done")
+                # Parent turn, one child turn, then the parent's follow-up.
+                self.assertEqual(len(_SubagentHandler.requests), 3)
+                tool_messages = [
+                    message
+                    for message in _SubagentHandler.requests[-1]["messages"]
+                    if message.get("role") == "tool"
+                ]
+                self.assertTrue(tool_messages)
+                self.assertIn("child-report", tool_messages[-1]["content"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ import unittest
 
 import httpx
 
+from minimalcode.config import EFFORT_LEVELS
 from minimalcode.provider import OpenAICompatibleProvider, ProviderError
 
 
@@ -108,6 +109,79 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.tool_calls[0].arguments, '{"path":"README.md"}')
         self.assertEqual(seen_request["model"], "model-a")
         self.assertTrue(seen_request["stream"])
+
+    def test_effort_levels_are_forwarded(self) -> None:
+        chat_requests: list[dict[str, object]] = []
+        responses_requests: list[dict[str, object]] = []
+
+        def chat_handler(request: httpx.Request) -> httpx.Response:
+            chat_requests.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+                },
+            )
+
+        def responses_handler(request: httpx.Request) -> httpx.Response:
+            responses_requests.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ],
+                },
+            )
+
+        chat = OpenAICompatibleProvider(
+            name="chat",
+            config={
+                "base_url": "https://provider.test/v1",
+                "stream": False,
+                "send_reasoning_effort": True,
+            },
+            model="model-a",
+            thinking="high",
+            transport=httpx.MockTransport(chat_handler),
+        )
+        responses = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+                "send_reasoning_effort": True,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx.MockTransport(responses_handler),
+        )
+        try:
+            for effort in EFFORT_LEVELS:
+                chat.thinking = effort
+                responses.thinking = effort
+                chat.stream_chat([{"role": "user", "content": "hello"}])
+                responses.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            chat.close()
+            responses.close()
+
+        for effort, payload in zip(EFFORT_LEVELS, chat_requests):
+            with self.subTest(protocol="chat", effort=effort):
+                if effort == "none":
+                    self.assertEqual(payload["thinking"], {"type": "disabled"})
+                    self.assertNotIn("reasoning_effort", payload)
+                else:
+                    self.assertEqual(payload["reasoning_effort"], effort)
+                    self.assertNotIn("thinking", payload)
+        for effort, payload in zip(EFFORT_LEVELS, responses_requests):
+            with self.subTest(protocol="responses", effort=effort):
+                self.assertEqual(payload["reasoning"], {"effort": effort})
 
     def test_non_finite_numeric_settings_are_rejected(self) -> None:
         with self.assertRaisesRegex(ProviderError, "numeric settings"):

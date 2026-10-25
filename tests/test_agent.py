@@ -337,7 +337,7 @@ class AgentTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn("\x1b[", rendered)
-            self.assertEqual(strip_ansi(rendered), "# Result\n\ndone\n")
+            self.assertEqual(strip_ansi(rendered), "Result\n\ndone\n")
 
     def test_system_prompt_is_built_once_per_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

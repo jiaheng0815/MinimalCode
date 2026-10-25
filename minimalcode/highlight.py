@@ -283,8 +283,19 @@ class MarkdownHighlighter:
                 # split across deltas, so wait for the next non-'#' character.
                 return False
             if level <= 6 and (level_end == len(text) or text[level_end].isspace()):
-                style = self.palette[f"h{level}"]
-                self._emit(segments, level_end, style)
+                if level_end == len(text):
+                    # The stream ended inside the marker; print it rather than
+                    # swallowing the only characters the model produced.
+                    self._emit(segments, level_end, self.palette[f"h{level}"])
+                    self._line_kind = "heading"
+                    self._heading_level = level
+                    self._at_line_start = False
+                    return True
+                # Consume the marker (and its separating space) instead of
+                # printing it, so `## Title` renders as styled heading text the
+                # same way `**bold**` drops its delimiters.
+                body_end = level_end + 1 if text[level_end] == " " else level_end
+                self._advance(body_end - self._cursor)
                 self._line_kind = "heading"
                 self._heading_level = level
                 self._at_line_start = False
@@ -623,7 +634,11 @@ class MarkdownHighlighter:
         start = self._cursor
         line_end = text.find("\n", start)
         line = text[start:] if line_end < 0 else text[start:line_end]
-        marker = re.match(rf"^ {{0,3}}({re.escape(self._fence_char)}+)(.*)$", line)
+        # The opening side accepts any indentation (models nest fences inside
+        # list items), so the closing side must accept it too. Otherwise an
+        # indented fence never closes and every later heading, list, or table
+        # is rendered as code.
+        marker = re.match(rf"^[ \t]*({re.escape(self._fence_char)}+)(.*)$", line)
         if marker:
             marker_text = marker.group(1)
             remainder = marker.group(2).strip()
@@ -639,6 +654,11 @@ class MarkdownHighlighter:
                 return True
             if line_end < 0 and not remainder and not final:
                 return False
+        elif line_end < 0 and not final and not line.strip(" \t"):
+            # Only indentation has arrived so far; the line may still become a
+            # closing fence, so wait for the next non-space byte instead of
+            # committing the indentation as code content.
+            return False
 
         self._line_kind = "code"
         self._at_line_start = False

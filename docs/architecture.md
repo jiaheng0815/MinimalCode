@@ -26,7 +26,8 @@ CLI
 | `provider.py` | OpenAI Chat/Responses HTTP and SSE transport |
 | `web.py` | Configurable provider web search and fetch client |
 | `vision.py` | Configurable provider vision client for inline image understanding |
-| `tools.py` | Workspace-bound file, search, shell, image, and web tool dispatch |
+| `tools.py` | Workspace-bound file, search, shell, subagent, image, and web tool dispatch |
+| `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
 | `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |
 | `highlight.py` | Incremental Markdown rendering and ANSI styling for streamed text |

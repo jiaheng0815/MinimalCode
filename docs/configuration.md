@@ -11,7 +11,7 @@ Built-in defaults are data, not Python literals: they live in
 |---|---|---:|---|
 | `provider` | string | `"deepseek"` | Default provider name |
 | `model` | string | `"deepseek-flash"` | Default model ID |
-| `thinking` | string | `"high"` | Reasoning effort passed only when enabled |
+| `thinking` | string | `"high"` | Reasoning effort: `none` (disabled), `minimal`, `low`, `medium`, `high`, `xhigh`, or `ultra` |
 | `max_turns` | integer | `1000` | Maximum model/tool rounds per user task |
 
 ## Session
@@ -49,6 +49,24 @@ Shell commands write stdout and stderr to temporary files instead of pipes, so a
 command that times out while a background child still holds its output returns
 the partial output instead of blocking.
 
+## Subagents
+
+`subagent` delegates a self-contained task (code review, broad analysis,
+independent verification) to a fresh `minimalcode -p` process. There is no new
+protocol: the child is spawned through the configured shell.
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `enabled` | `true` | Offer the `subagent` tool at all |
+| `max_depth` | `2` | Maximum nesting level; a child at this depth no longer receives the tool |
+| `max_turns` | `40` | Default and maximum model/tool rounds for one child |
+| `timeout_seconds` | `900` | Default and maximum runtime for one child |
+
+The child inherits the parent's `--home`, provider, model, reasoning effort, and
+workspace. The task text is piped through stdin, so it never appears on the
+command line. The child runs with `-p --no-session --quiet`: it prints only its
+final answer and leaves no session files behind.
+
 ## Context
 
 | Key | Default | Meaning |
@@ -83,13 +101,13 @@ output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 | `timeout_seconds` | no | HTTP read timeout, default `120` |
 | `stream` | no | SSE streaming, default `true` |
 | `include_usage` | no | Send `stream_options`, default `true` |
-| `send_reasoning_effort` | no | Send top-level `reasoning_effort`, default `false` |
+| `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`.
 
-For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}`; reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`.
+For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}` (`none` disables thinking); reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`. For `openai_chat`, it sends `reasoning_effort`; `none` instead sends `{"thinking":{"type":"disabled"}}`.
 
 ## Web tools
 

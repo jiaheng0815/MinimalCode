@@ -247,8 +247,12 @@ class OpenAICompatibleProvider:
             payload["tool_choice"] = "auto"
         if self.stream_enabled and self.include_usage:
             payload["stream_options"] = {"include_usage": True}
-        if self.send_reasoning_effort and self.thinking:
-            payload["reasoning_effort"] = self.thinking
+        if self.send_reasoning_effort:
+            effort = self.thinking.strip().lower()
+            if effort == "none":
+                payload["thinking"] = {"type": "disabled"}
+            elif effort:
+                payload["reasoning_effort"] = effort
         extra = self.config.get("extra_body")
         if isinstance(extra, dict):
             reserved = {"model", "messages", "stream", "tools", "tool_choice"}
@@ -331,8 +335,10 @@ class OpenAICompatibleProvider:
         if response_tools:
             payload["tools"] = response_tools
             payload["tool_choice"] = "auto"
-        if self.send_reasoning_effort and self.thinking:
-            payload["reasoning"] = {"effort": self.thinking}
+        if self.send_reasoning_effort:
+            effort = self.thinking.strip().lower()
+            if effort:
+                payload["reasoning"] = {"effort": effort}
         extra = self.config.get("extra_body")
         if isinstance(extra, dict):
             reserved = {"model", "input", "stream", "tools", "tool_choice"}

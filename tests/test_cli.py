@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from minimalcode.cli import _interactive, run
-from minimalcode.config import ensure_config, load_settings
+from minimalcode.config import EFFORT_LEVELS, ensure_config, load_settings
 from minimalcode.provider import ProviderReply
 from minimalcode.session import SessionStore
 
@@ -19,6 +19,7 @@ from minimalcode.session import SessionStore
 class FakeCliProvider:
     name = "fake"
     model = "fake-model"
+    thinking = "high"
     context_window = 1000
 
     def __init__(self) -> None:
@@ -49,8 +50,8 @@ class StubAgent:
     def __init__(self, cwd: Path, *, failures: int = 0) -> None:
         self.shell = SimpleNamespace(label="stub-shell")
         self.session = SimpleNamespace(cwd=cwd, path=None)
-        self.provider = None
-        self.tools = SimpleNamespace(web_client=None)
+        self.provider = SimpleNamespace(name="fake", model="fake-model", thinking="high")
+        self.tools = SimpleNamespace(web_client=None, vision_client=None)
         self.prompts: list[str] = []
         self._failures = failures
 
@@ -162,6 +163,57 @@ class CliTests(unittest.TestCase):
             settings = load_settings(home, require_file=True)
             self.assertEqual(settings.get("model"), "new-model")
             self.assertEqual(settings.get("provider"), "deepseek")
+
+    def test_interactive_effort_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            stub.provider = SimpleNamespace(thinking="high")
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(
+                [
+                    "/effort",
+                    "/effort LOW",
+                    "/effort none",
+                    "/effort minimal",
+                    "/effort xhigh",
+                    "/effort ULTRA",
+                    "/effort turbo",
+                    "/exit",
+                ]
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.provider.thinking, "ultra")
+            self.assertEqual(stub.prompts, [])
+            self.assertIn("| stub-shell | effort high", stdout.getvalue())
+            for level in EFFORT_LEVELS:
+                self.assertIn(level, stdout.getvalue())
+            self.assertIn("effort: high", stdout.getvalue())
+            self.assertIn("effort: low", stdout.getvalue())
+            self.assertIn("effort: none", stdout.getvalue())
+            self.assertIn("effort: ultra", stdout.getvalue())
+            self.assertIn("unknown effort: turbo", stderr.getvalue())
 
     def test_interactive_loop_survives_a_failed_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

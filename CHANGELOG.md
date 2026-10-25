@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added the `subagent` tool: the agent can dispatch a fresh `minimalcode -p` child process through the configured shell and use its final answer, which suits code review, broad analysis, and independent verification. The task travels on stdin, the child inherits `--home`/provider/model/effort/workspace, and nesting is capped by `subagent.max_depth` (default `2`, tracked through `MINIMALCODE_SUBAGENT_DEPTH`). New settings: `subagent.enabled`, `subagent.max_depth`, `subagent.max_turns`, `subagent.timeout_seconds`.
+- Bumped the version to 0.4.0.
+- Added the `/effort` interactive command to inspect or switch reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`) without restarting; `none` disables thinking and `/status` reports the active effort.
 - Added the `read_image` tool: local JPEG/PNG/GIF/WebP images are sent to the provider's vision model and returned as text descriptions or answers. It is enabled by the provider's `vision` block, defaults on for DeepSeek, and stays inside the workspace.
 - Increased the default per-task model/tool loop budget from 50 to 1000 turns.
 - Added streaming Markdown and README rendering for interactive terminals.
@@ -15,6 +18,8 @@
 - Thematic breaks (`---`, `***`, `___`) are highlighted instead of being swallowed as emphasis markers.
 
 ### Changed
+
+- Heading markers are no longer printed: `## Title` renders as blue styled text like bold and italic drop their delimiters.
 
 - Shell tool activity clips stdout/stderr to the first and last few lines so long commands no longer flood the terminal; the model still receives the full output.
 - `grep` and `find` now skip the same ignored directories (`.git`, `node_modules`, `build`, `dist`, caches, virtualenvs) with or without `ripgrep`.
@@ -45,6 +50,7 @@
 - A failed turn no longer terminates the interactive session; provider and I/O errors are reported and the prompt continues.
 - Markdown rendering no longer drops a trailing backslash at the end of the answer.
 - `##` and `###` headings are no longer styled as headings of a lower level when the `#` marker is split across stream deltas.
+- Indented closing fences now end a code block, so second-level headings and other Markdown after a fence nested in a list item are rendered instead of being treated as code content.
 - Session files are created with private permissions from the first write instead of being tightened afterwards, and a failed usage write no longer discards the model's reply.
 - `sessions` no longer crashes on metadata whose `session_id` is not a string.
 - Provider and web-tool numeric settings reject non-finite values (`Infinity`) instead of raising `OverflowError`.
