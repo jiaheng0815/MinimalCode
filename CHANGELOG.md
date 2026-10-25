@@ -7,6 +7,12 @@
 - 新增可配置、fail-closed 的沙箱执行层（`minimalcode/sandbox.py`）。所有 shell/subagent 命令、文件读写和搜索现在都经过 `SandboxRunner`：工作区限定的允许根（含符号链接逃逸检查）、敏感文件拦截、默认禁网（可选主机白名单）、超时/输出/资源上限、每条命令的临时目录用后必定清理，以及拒绝原因审计。后端可插拔：跨平台的 `local` 基线由策略加 POSIX rlimit 组成，`bwrap`、`firejail`、`sandbox-exec`、`docker` 均为可选且不是强依赖；显式选择但不可用的后端会拒绝执行而不是降级。新增配置：`sandbox.enabled`、`sandbox.backend`、`sandbox.allowed_roots`、`sandbox.network_policy`、`sandbox.allowed_hosts`、`sandbox.timeout_seconds`、`sandbox.max_output_chars`、`sandbox.allow_sensitive_files`、`sandbox.max_memory_mb`、`sandbox.max_processes`、`sandbox.docker_image`；新增 CLI 参数 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output`、`--sandbox-allow-sensitive`；新增 `minimalcode sandbox` 命令。
 - 版本号升级到 0.6.0。
 
+### 修复
+
+- 修复 Linux 上启用沙箱后 PowerShell 7 报 `Out of memory` 的问题：`sandbox.max_memory_mb` 的默认值从 `2048` 改为 `0`（关闭）。`RLIMIT_AS` 限制的是进程预留的地址空间而不是实际占用，.NET（pwsh）、JVM 和 Go 子进程在 2 GB 上限下会在真正运行前中止；需要该限制时仍可显式配置。
+- 修复 shell 探测只检查可执行文件是否存在、不检查能否启动的问题：`detect_shell` 现在先用一条 `exit 0` 验证候选 shell，`pwsh` 因缺少 libicu 或无法预留内存而崩溃时会回退到 `bash`/`sh`（Windows 回退到 `powershell`），`ShellError` 会带上每个候选的失败原因；显式配置的 `shell.path` 启动失败会直接报错而不是静默换 shell。探测结果按可执行文件缓存，每个进程只付一次启动开销。
+- 修复 `subagent` 端到端测试在 shell 不可用时只观察到 2 次供应商请求的问题：断言现在会附带父进程收到的工具结果，便于定位子进程失败原因；环境完全没有可用 shell 时改为跳过。
+
 ## 0.5.0
 
 ### 新增

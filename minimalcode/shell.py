@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +14,18 @@ from .sandbox import SandboxRunner, truncate_text
 __all__ = [
     "ShellSpec",
     "detect_shell",
+    "probe_shell",
     "run_shell",
     "select_shell",
     "truncate_text",
 ]
+
+# A shell that exists on disk is not necessarily a shell that can start: a
+# pwsh build without libicu, or one whose .NET runtime cannot reserve memory,
+# aborts before reading the command. Detection verifies each candidate once so
+# a broken binary cannot make every shell command fail.
+_PROBE_TIMEOUT_SECONDS = 10
+_PROBE_CACHE: dict[tuple[str, str], str | None] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,29 +71,90 @@ def _resolve_override(preferred: str) -> ShellSpec:
 
 
 def detect_shell(preferred: str | None = None) -> ShellSpec:
-    """Prefer pwsh, then the native fallback for the current platform."""
+    """Prefer pwsh, then the native fallback for the current platform.
+
+    Candidates are verified with a trivial command before they are accepted, so
+    an installed-but-unusable shell (missing ICU, no memory, wrong architecture)
+    falls through to the next one instead of failing every command later.
+    """
     if preferred:
-        return _resolve_override(preferred)
-    return select_shell(os.name == "nt", shutil.which)
+        shell = _resolve_override(preferred)
+        reason = probe_shell(shell)
+        if reason is not None:
+            raise ShellError(
+                f"configured shell failed to start: {shell.executable}: {reason}"
+            )
+        return shell
+    return select_shell(os.name == "nt", shutil.which, probe=probe_shell)
+
+
+def probe_shell(shell: ShellSpec) -> str | None:
+    """Return None when ``shell`` can start, otherwise a short failure reason.
+
+    The result is cached per executable for the lifetime of the process: the
+    probe costs one shell startup (~0.2 s for pwsh) and is therefore paid once.
+    """
+    key = (shell.executable, shell.kind)
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    reason = _probe_once(shell)
+    _PROBE_CACHE[key] = reason
+    return reason
+
+
+def _probe_once(shell: ShellSpec) -> str | None:
+    try:
+        completed = subprocess.run(
+            prefix_command(shell, "exit 0"),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"did not answer within {_PROBE_TIMEOUT_SECONDS:g} seconds"
+    except (OSError, ValueError) as exc:
+        return str(exc)
+    if completed.returncode == 0:
+        return None
+    detail = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+    if not detail:
+        detail = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    first_line = detail.splitlines()[0] if detail else ""
+    if not first_line:
+        return f"exited with code {completed.returncode}"
+    return first_line[:200]
 
 
 def select_shell(
     is_windows: bool,
     finder: Callable[[str], str | None],
+    *,
+    probe: Callable[[ShellSpec], str | None] | None = None,
 ) -> ShellSpec:
     """Resolve the shell order without depending on the host platform."""
     candidates = ("pwsh", "powershell") if is_windows else ("pwsh", "bash", "sh")
+    unusable: list[str] = []
     for name in candidates:
         executable = finder(name)
         if executable:
             kind, label = _kind_for_executable(executable)
-            return ShellSpec(
+            shell = ShellSpec(
                 kind=kind,
                 executable=executable,
                 label=label,
                 is_windows=is_windows,
             )
-    raise ShellError("no supported shell found (tried pwsh, powershell/bash/sh)")
+            if probe is not None:
+                reason = probe(shell)
+                if reason is not None:
+                    unusable.append(f"{name}: {reason}")
+                    continue
+            return shell
+    message = "no supported shell found (tried pwsh, powershell/bash/sh)"
+    if unusable:
+        message = f"{message}: {'; '.join(unusable)}"
+    raise ShellError(message)
 
 
 def prefix_command(shell: ShellSpec, command: str) -> list[str]:

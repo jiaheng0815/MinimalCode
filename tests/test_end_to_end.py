@@ -12,6 +12,8 @@ from typing import ClassVar
 
 from minimalcode.cli import run
 from minimalcode.config import ensure_config, load_settings, write_settings
+from minimalcode.errors import ShellError
+from minimalcode.shell import detect_shell
 
 
 def _sse(events: list[dict]) -> bytes:
@@ -198,6 +200,10 @@ class _SubagentHandler(BaseHTTPRequestHandler):
 
 class SubagentEndToEndTests(unittest.TestCase):
     def test_parent_dispatches_a_real_child_process(self) -> None:
+        try:
+            detect_shell()
+        except ShellError as exc:
+            self.skipTest(f"no usable shell in this environment: {exc}")
         _SubagentHandler.requests = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), _SubagentHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -240,11 +246,21 @@ class SubagentEndToEndTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 payload = json.loads(stdout.getvalue())
                 self.assertEqual(payload["text"], "parent-done")
+                requests = _SubagentHandler.requests
                 # Parent turn, one child turn, then the parent's follow-up.
-                self.assertEqual(len(_SubagentHandler.requests), 3)
+                self.assertEqual(
+                    len(requests),
+                    3,
+                    "the child process never reached the provider; the parent's "
+                    "last message was: "
+                    + json.dumps(
+                        requests[-1].get("messages", []) if requests else [],
+                        ensure_ascii=False,
+                    )[-2000:],
+                )
                 tool_messages = [
                     message
-                    for message in _SubagentHandler.requests[-1]["messages"]
+                    for message in requests[-1]["messages"]
                     if message.get("role") == "tool"
                 ]
                 self.assertTrue(tool_messages)

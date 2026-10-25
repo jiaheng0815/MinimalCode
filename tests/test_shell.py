@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from minimalcode.errors import ShellError
-from minimalcode.shell import detect_shell, run_shell, select_shell, truncate_text
+from minimalcode.shell import (
+    _PROBE_CACHE,
+    ShellSpec,
+    detect_shell,
+    probe_shell,
+    run_shell,
+    select_shell,
+    truncate_text,
+)
 
 
 class ShellTests(unittest.TestCase):
@@ -159,6 +170,106 @@ class ShellTests(unittest.TestCase):
             lambda name: "/usr/bin/pwsh" if name == "pwsh" else None,
         )
         self.assertEqual(powershell_on_posix.kind, "pwsh7")
+
+    def test_unusable_candidate_falls_through_to_the_next_shell(self) -> None:
+        # A pwsh that aborts before reading its command (missing ICU, no memory,
+        # wrong architecture) must not be selected just because it exists.
+        found = {
+            "pwsh": "/usr/bin/pwsh",
+            "powershell": "C:/Windows/powershell.exe",
+            "bash": "/usr/bin/bash",
+        }
+
+        def probe(shell: ShellSpec) -> str | None:
+            if shell.kind == "pwsh7":
+                return "Process terminated. Couldn't find a valid ICU package"
+            return None
+
+        shell = select_shell(False, found.get, probe=probe)
+        self.assertEqual(shell.kind, "bash")
+        self.assertEqual(shell.executable, "/usr/bin/bash")
+
+    def test_detect_shell_falls_back_past_an_unusable_pwsh(self) -> None:
+        found = {
+            "pwsh": "/usr/bin/pwsh",
+            "powershell": "C:/Windows/powershell.exe",
+            "bash": "/usr/bin/bash",
+            "sh": "/bin/sh",
+        }
+
+        def probe(shell: ShellSpec) -> str | None:
+            return "Out of memory" if shell.kind == "pwsh7" else None
+
+        with (
+            patch(
+                "minimalcode.shell.shutil.which",
+                side_effect=lambda name: found.get(name),
+            ),
+            patch("minimalcode.shell.probe_shell", side_effect=probe),
+        ):
+            shell = detect_shell()
+        expected = "windows_powershell" if os.name == "nt" else "bash"
+        self.assertEqual(shell.kind, expected)
+
+    def test_every_unusable_candidate_is_reported(self) -> None:
+        found = {"pwsh": "/usr/bin/pwsh", "bash": "/usr/bin/bash", "sh": "/bin/sh"}
+        with self.assertRaises(ShellError) as context:
+            select_shell(
+                False,
+                found.get,
+                probe=lambda shell: "Couldn't find a valid ICU package",
+            )
+        message = str(context.exception)
+        self.assertIn("no supported shell found", message)
+        self.assertIn("pwsh: Couldn't find a valid ICU package", message)
+        self.assertIn("bash:", message)
+
+    def test_broken_configured_shell_is_reported(self) -> None:
+        with (
+            patch(
+                "minimalcode.shell.probe_shell",
+                return_value="Process terminated: libicuuc.so not found",
+            ),
+            self.assertRaisesRegex(ShellError, "configured shell failed to start"),
+        ):
+            detect_shell(sys.executable)
+
+    def test_probe_result_is_cached_per_executable(self) -> None:
+        shell = ShellSpec(kind="sh", executable="/bin/sh", label="sh", is_windows=False)
+        _PROBE_CACHE.clear()
+        self.addCleanup(_PROBE_CACHE.clear)
+        completed = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with patch("minimalcode.shell.subprocess.run", return_value=completed) as run:
+            self.assertIsNone(probe_shell(shell))
+            self.assertIsNone(probe_shell(shell))
+        self.assertEqual(run.call_count, 1)
+
+    def test_probe_reports_the_first_stderr_line(self) -> None:
+        shell = ShellSpec(kind="sh", executable="/bin/sh", label="sh", is_windows=False)
+        _PROBE_CACHE.clear()
+        self.addCleanup(_PROBE_CACHE.clear)
+        completed = SimpleNamespace(
+            returncode=134,
+            stdout=b"",
+            stderr=b"Process terminated. Couldn't find a valid ICU package\nstack\n",
+        )
+        with patch("minimalcode.shell.subprocess.run", return_value=completed):
+            reason = probe_shell(shell)
+        self.assertEqual(
+            reason,
+            "Process terminated. Couldn't find a valid ICU package",
+        )
+
+    def test_probe_timeout_is_reported_instead_of_hanging(self) -> None:
+        shell = ShellSpec(kind="sh", executable="/bin/sh", label="sh", is_windows=False)
+        _PROBE_CACHE.clear()
+        self.addCleanup(_PROBE_CACHE.clear)
+        with patch(
+            "minimalcode.shell.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("pwsh", 10),
+        ):
+            reason = probe_shell(shell)
+        self.assertIn("did not answer", str(reason))
 
 
 if __name__ == "__main__":

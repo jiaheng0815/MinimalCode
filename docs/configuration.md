@@ -28,6 +28,15 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 | `timeout_seconds` | `120` | Default and maximum command timeout; model-requested timeouts are capped at this value |
 | `max_output_chars` | `60000` | Maximum stdout and stderr returned to the model |
 
+Auto-detection probes each candidate (`pwsh`, then `bash`/`sh`, or
+`powershell` on Windows) with a trivial command before accepting it, so an
+installed shell that cannot start — a pwsh build without libicu, a .NET runtime
+that cannot reserve memory, a wrong-architecture binary — falls through to the
+next one instead of failing every command. The probe costs one shell start
+(roughly 0.2 s for pwsh) per process and is cached per executable. A
+`shell.path` override is probed too and reports the failure instead of silently
+switching shells. The fallback reason is printed by `minimalcode shell`.
+
 ## Tools
 
 | Key | Default | Meaning |
@@ -76,7 +85,7 @@ falling back to unsandboxed execution. Denials are recorded with their reason in
 | `timeout_seconds` | `120` | Hard cap for one command, on top of `shell.timeout_seconds` |
 | `max_output_chars` | `60000` | Hard cap for one shell command's stdout/stderr |
 | `allow_sensitive_files` | `false` | Permit `.env`, private keys, `.ssh/`, `.aws/`, and similar paths |
-| `max_memory_mb` | `2048` | Linux `RLIMIT_AS` for child processes; `0` disables |
+| `max_memory_mb` | `0` | Linux `RLIMIT_AS` for child processes; `0` disables. Opt-in because address-space caps break .NET/JVM/Go children |
 | `max_processes` | `0` | Linux `RLIMIT_NPROC`; `0` disables |
 | `docker_image` | `"alpine:3"` | Image used by the `docker` backend |
 
@@ -113,7 +122,11 @@ children, so `grep`/`find` fall back to the in-process Python scanner.
 The local baseline enforces the timeout and output caps on every platform,
 kills the process tree on timeout, and runs children with a private temporary
 directory (`TMPDIR`/`TMP`/`TEMP`) that is removed afterwards. On POSIX it also
-applies `RLIMIT_CORE`, `RLIMIT_CPU`, and, on Linux, `RLIMIT_AS`/`RLIMIT_NPROC`.
+applies `RLIMIT_CORE` and `RLIMIT_CPU`; `RLIMIT_AS` (`max_memory_mb`) and
+`RLIMIT_NPROC` (`max_processes`) are Linux-only and opt-in. `RLIMIT_AS` is off by
+default because it limits reserved address space: .NET (pwsh), JVM, and Go
+children reserve gigabytes of virtual memory and abort with "Out of memory"
+under a 2 GB cap even when their real usage is small.
 
 CLI overrides (all optional):
 

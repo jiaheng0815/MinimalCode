@@ -26,7 +26,7 @@
     "timeout_seconds": 120,
     "max_output_chars": 60000,
     "allow_sensitive_files": false,
-    "max_memory_mb": 2048,
+    "max_memory_mb": 0,
     "max_processes": 0,
     "docker_image": "alpine:3"
   },

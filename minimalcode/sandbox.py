@@ -319,7 +319,7 @@ class SandboxPolicy:
         allow_sensitive = data.get("allow_sensitive_files", False)
         if not isinstance(allow_sensitive, bool):
             raise ConfigError("sandbox.allow_sensitive_files must be a boolean")
-        max_memory = data.get("max_memory_mb", 2048)
+        max_memory = data.get("max_memory_mb", 0)
         if (
             isinstance(max_memory, bool)
             or not isinstance(max_memory, int)
@@ -808,10 +808,32 @@ def _set_limit(resource: Any, kind: int, value: int) -> None:
         pass
 
 
+def _posix_limits(
+    policy: SandboxPolicy, timeout: float, *, linux: bool
+) -> list[tuple[str, int]]:
+    """Return the ``(rlimit name, value)`` pairs the baseline should apply."""
+    limits: list[tuple[str, int]] = [
+        ("RLIMIT_CORE", 0),
+        ("RLIMIT_CPU", max(1, math.ceil(timeout) + 1)),
+    ]
+    if linux:
+        if policy.max_memory_mb:
+            limits.append(("RLIMIT_AS", policy.max_memory_mb * 1024 * 1024))
+        if policy.max_processes:
+            limits.append(("RLIMIT_NPROC", policy.max_processes))
+    return limits
+
+
 def _resource_limiter(
     policy: SandboxPolicy, timeout: float
 ) -> Callable[[], None] | None:
-    """Return a POSIX pre-exec hook that caps CPU and (on Linux) memory/procs."""
+    """Return a POSIX pre-exec hook that caps CPU and opt-in memory/processes.
+
+    Address-space (`RLIMIT_AS`) limits are opt-in because they are per-process
+    reservations, not resident memory: .NET (pwsh), JVM, and Go children reserve
+    several gigabytes of virtual address space and abort with "Out of memory"
+    long before they touch that much RAM.
+    """
     if os.name == "nt":
         return None
     try:
@@ -819,16 +841,13 @@ def _resource_limiter(
     except ImportError:  # pragma: no cover - POSIX always ships resource
         return None
 
+    limits = _posix_limits(policy, timeout, linux=sys.platform.startswith("linux"))
+
     def apply() -> None:
-        _set_limit(resource, resource.RLIMIT_CORE, 0)
-        _set_limit(resource, resource.RLIMIT_CPU, max(1, math.ceil(timeout) + 1))
-        if sys.platform.startswith("linux"):
-            if policy.max_memory_mb:
-                _set_limit(
-                    resource, resource.RLIMIT_AS, policy.max_memory_mb * 1024 * 1024
-                )
-            if policy.max_processes:
-                _set_limit(resource, resource.RLIMIT_NPROC, policy.max_processes)
+        for name, value in limits:
+            kind = getattr(resource, name, None)
+            if kind is not None:
+                _set_limit(resource, kind, value)
 
     return apply
 

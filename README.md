@@ -169,7 +169,8 @@ JSON 输出字段：
 - **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。
 - **沙箱执行层**：`sandbox.enabled` 默认开启，默认后端 `local`（跨平台策略与子进程限制基线）；可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
 - **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义，且都不解析 `.gitignore`；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
-- **shell**：`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
+- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash`/`sh`（Windows 为 `powershell`）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
+- **资源限制**：POSIX 下对子进程设置 `RLIMIT_CORE` 和按超时推算的 `RLIMIT_CPU`；Linux 的 `RLIMIT_AS`（`sandbox.max_memory_mb`）和 `RLIMIT_NPROC`（`sandbox.max_processes`）默认关闭，因为 `RLIMIT_AS` 限制的是预留地址空间而非实际占用，2 GB 的默认值会让 .NET（pwsh）、JVM、Go 子进程在真正运行前就报 `Out of memory`。
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾 `exit $LASTEXITCODE` 保留子进程真实退出码。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
 - **输出裁剪**：工具结果按首尾保留截断，超长输出中间以 `... <truncated N chars> ...` 标记，既保留开头上下文也保留结尾错误信息。
 
@@ -230,7 +231,7 @@ JSON 输出字段：
   "timeout_seconds": 120,
   "max_output_chars": 60000,
   "allow_sensitive_files": false,
-  "max_memory_mb": 2048,
+  "max_memory_mb": 0,
   "max_processes": 0,
   "docker_image": "alpine:3"
 }

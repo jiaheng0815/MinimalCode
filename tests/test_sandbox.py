@@ -21,6 +21,7 @@ from minimalcode.sandbox import (
     LocalSandboxBackend,
     SandboxPolicy,
     SandboxRunner,
+    _posix_limits,
     available_backends,
     is_sensitive_path,
 )
@@ -262,6 +263,33 @@ class ExecutionBaselineTests(SandboxTestBase):
         )
         self.assertEqual(result["status"], "success", result)
         self.assertTrue(backend.requests)
+
+
+class ResourceLimitTests(SandboxTestBase):
+    def test_default_policy_does_not_cap_address_space(self) -> None:
+        # RLIMIT_AS caps reserved address space, not RSS: a 2 GB default broke
+        # .NET/pwsh children on Linux with "Out of memory" before they ran.
+        policy = SandboxPolicy.from_settings(self._settings(), self.workspace)
+        self.assertEqual(policy.max_memory_mb, 0)
+        names = [name for name, _ in _posix_limits(policy, 10, linux=True)]
+        self.assertNotIn("RLIMIT_AS", names)
+        self.assertIn("RLIMIT_CPU", names)
+        self.assertIn("RLIMIT_CORE", names)
+
+    def test_address_space_limit_is_applied_only_when_configured(self) -> None:
+        policy = SandboxPolicy.from_settings(
+            self._settings(max_memory_mb=512, max_processes=32), self.workspace
+        )
+        limits = dict(_posix_limits(policy, 10, linux=True))
+        self.assertEqual(limits["RLIMIT_AS"], 512 * 1024 * 1024)
+        self.assertEqual(limits["RLIMIT_NPROC"], 32)
+
+    def test_non_linux_hosts_only_get_cpu_and_core_limits(self) -> None:
+        policy = SandboxPolicy.from_settings(
+            self._settings(max_memory_mb=512, max_processes=32), self.workspace
+        )
+        names = [name for name, _ in _posix_limits(policy, 10, linux=False)]
+        self.assertEqual(names, ["RLIMIT_CORE", "RLIMIT_CPU"])
 
 
 class BackendTests(SandboxTestBase):
