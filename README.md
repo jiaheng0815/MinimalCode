@@ -7,7 +7,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 ## 特性
 
 - **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` 选择，其他平台按 `pwsh` → `bash` → `sh` 选择；启动时解析一次，可在配置中固定路径。
-- **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。
+- **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
 - **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
 - **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。
@@ -124,13 +124,36 @@ JSON 输出字段：
 | `grep` | 正则搜索文本，返回 `path:line:text` | `pattern`、`path`、`glob`、`max_results` |
 | `find` | 按 glob 查找文件 | `pattern`、`path`、`max_results` |
 | `subagent` | 在子 shell 中启动一个新的 `minimalcode`，只返回它的最终答复 | `task`、`cwd`、`timeout`、`max_turns` |
-| `read_image` | 让供应商视觉模型描述图片、截图或图表 | `path`、`prompt` |
+| `read_image` | 读取本地图片并交给配置的 OpenAI 兼容视觉端点，返回描述或对 `prompt` 的回答 | `path`、`prompt` |
 | `web_search` | 通过供应商检索网页 | `query`、`count`、`need_content` |
 | `web_fetch` | 通过供应商抓取 HTTP/HTTPS 页面 | `url` |
 
-`read_image`、`web_search`、`web_fetch` 由供应商配置启用；未启用的供应商既收不到这些工具定义，直接调用也会被拒绝。
+`web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
 
 `subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。
+
+### 图像理解
+
+`read_image` 是通用工具，不绑定某个供应商，也不受供应商自身 `protocol` 限制：只要在供应商配置里加一个 `vision` 块，指向任意 OpenAI 兼容的 `/chat/completions` 端点，该供应商就能获得这个工具。`base_url`、`model` 和密钥默认沿用供应商的同名字段，也可以单独覆盖：
+
+```json
+"vision": {
+  "enabled": true,
+  "base_url": "https://api.example.com/v1",
+  "model": "vision-model",
+  "timeout_seconds": 120,
+  "max_image_bytes": 33554432,
+  "max_chars": 8000,
+  "detail": "auto",
+  "api_key_env": "EXAMPLE_API_KEY",
+  "headers": {}
+}
+```
+
+- 图片以 base64 data URL 内联发送，格式按文件内容判断，支持 JPEG、PNG、GIF 和 WebP，不依赖扩展名。
+- `prompt` 可选；缺省时要求模型详细描述图片并逐字转写可见文字，结果超过 `max_chars` 时截断并标记 `<description truncated>`。
+- `read_image` 和其他文件工具一样受工作区限制，读取工作区外的图片需要 `tools.allow_outside_workspace`。
+- 内置默认配置只为 DeepSeek 打开了 `vision`（`deepseek-flash`），其他供应商默认关闭，需要时按上面的结构自行添加。
 
 ### 实现要点
 
@@ -209,7 +232,7 @@ JSON 输出字段：
 - MinimalCode 会执行模型生成的 shell 命令，子进程拥有当前用户权限。敏感项目应在容器、虚拟机或受限账户中运行。
 - 文件工具默认限制在工作区内；这不能替代操作系统级隔离。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
-- `read_image` 同样受工作区限制；图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。
+- `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
 
 ## 开发
 
