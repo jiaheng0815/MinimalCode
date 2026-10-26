@@ -238,7 +238,7 @@ class ProviderTests(unittest.TestCase):
         notices: list[str] = []
         provider.notify = notices.append
         try:
-            with patch("minimalcode.provider.time.sleep") as sleep:
+            with patch("minimalcode.provider.transport.time.sleep") as sleep:
                 reply = provider.stream_chat([{"role": "user", "content": "hello"}])
         finally:
             provider.close()
@@ -269,7 +269,7 @@ class ProviderTests(unittest.TestCase):
         )
         try:
             with (
-                patch("minimalcode.provider.time.sleep") as sleep,
+                patch("minimalcode.provider.transport.time.sleep") as sleep,
                 self.assertRaises(ProviderError) as context,
             ):
                 provider.stream_chat([{"role": "user", "content": "hello"}])

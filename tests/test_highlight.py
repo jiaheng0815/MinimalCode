@@ -295,7 +295,7 @@ class HighlightTests(unittest.TestCase):
                 self.assertEqual(strip_ansi(rendered), expected)
 
     def test_indented_fence_closes_so_later_headings_render_as_markdown(self) -> None:
-        from minimalcode.highlight import _PALETTES
+        from minimalcode.highlight.palette import _PALETTES
 
         palette = _PALETTES["dark"]
         for indent in (0, 1, 2, 3, 4, 6):
@@ -311,7 +311,7 @@ class HighlightTests(unittest.TestCase):
                     self.assertIn(palette["h2"], rendered)
 
     def test_indented_marker_with_trailing_text_does_not_close_a_fence(self) -> None:
-        from minimalcode.highlight import _PALETTES
+        from minimalcode.highlight.palette import _PALETTES
 
         sample = "```text\n    ```not a closing fence\n```\n## After\n"
         rendered = _render(sample, io.StringIO(), color=True)
@@ -337,7 +337,7 @@ class HighlightTests(unittest.TestCase):
         self.assertEqual(strip_ansi(rendered), sample)
 
     def test_heading_marker_is_not_printed(self) -> None:
-        from minimalcode.highlight import _PALETTES
+        from minimalcode.highlight.palette import _PALETTES
 
         palette = _PALETTES["dark"]
         for level in (1, 2, 3, 4, 5, 6):
@@ -363,7 +363,7 @@ class HighlightTests(unittest.TestCase):
                     self.assertEqual(strip_ansi(stream.getvalue()), sample)
 
     def test_heading_level_does_not_depend_on_delta_size(self) -> None:
-        from minimalcode.highlight import _PALETTES
+        from minimalcode.highlight.palette import _PALETTES
 
         palette = _PALETTES["dark"]
         for level in (1, 2, 3, 6):

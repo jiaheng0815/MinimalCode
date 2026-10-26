@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 from minimalcode.config import load_settings
 from minimalcode.shell import detect_shell
-from minimalcode.tools import ToolError, ToolRuntime, _run_python_grep
+from minimalcode.tools import ToolError, ToolRuntime
+from minimalcode.tools.search import run_python_grep
 
 
 class ToolTests(unittest.TestCase):
@@ -62,7 +63,7 @@ class ToolTests(unittest.TestCase):
         # counted each fragment, reporting the match one line too late.
         target = self.workspace / "minified.js"
         target.write_text("y" * 1_200_000 + "\nneedle\n", encoding="utf-8")
-        result = _run_python_grep(
+        result = run_python_grep(
             pattern="needle",
             files=[target],
             limit=5,
@@ -166,7 +167,7 @@ class ToolTests(unittest.TestCase):
     def test_unresolvable_path_is_reported_as_tool_error(self) -> None:
         with (
             patch(
-                "minimalcode.tools.Path.expanduser",
+                "minimalcode.sandbox.runner.Path.expanduser",
                 side_effect=RuntimeError("no home"),
             ),
             self.assertRaisesRegex(ToolError, "invalid path"),
@@ -187,7 +188,7 @@ class ToolTests(unittest.TestCase):
     def test_python_grep_supports_recursive_glob_prefix(self) -> None:
         self.tools.write("root.py", "needle = 1\n")
         self.tools.write("src/nested.py", "needle = 2\n")
-        with patch("minimalcode.tools.shutil.which", return_value=None):
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             grep_result = self.tools.grep("needle", glob="**/*.py")
             find_result = self.tools.find("**/*.py")
         self.assertTrue(any("root.py" in line for line in grep_result["matches"]))
@@ -198,9 +199,12 @@ class ToolTests(unittest.TestCase):
         self.tools.max_results = 5000
         lines = [f"a.py:1:needle-{index}" for index in range(3000)]
         with (
-            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
             patch(
-                "minimalcode.tools._run_bounded_command",
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
                 return_value=(0, lines, True, ""),
             ),
         ):
@@ -225,9 +229,12 @@ class ToolTests(unittest.TestCase):
     def test_ripgrep_paths_apply_the_same_ignore_globs(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
         with (
-            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
             patch(
-                "minimalcode.tools._run_bounded_command",
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
                 return_value=(1, [], False, ""),
             ) as run,
         ):
@@ -255,7 +262,7 @@ class ToolTests(unittest.TestCase):
 
     def test_grep_rejects_missing_path(self) -> None:
         with (
-            patch("minimalcode.tools.shutil.which", return_value=None),
+            patch("minimalcode.tools.search_tools.shutil.which", return_value=None),
             self.assertRaisesRegex(ToolError, "path not found"),
         ):
             self.tools.grep("needle", path="missing")
@@ -277,7 +284,7 @@ class ToolTests(unittest.TestCase):
     def test_python_search_fallback_skips_build_artifacts(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
         self.tools.write("build/lib/stale.py", "needle = 1\n")
-        with patch("minimalcode.tools.shutil.which", return_value=None):
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             grep_result = self.tools.grep("needle", glob="*.py")
             find_result = self.tools.find("*.py")
 
@@ -295,7 +302,7 @@ class ToolTests(unittest.TestCase):
 
     def test_python_grep_uses_smart_case(self) -> None:
         self.tools.write("case.py", "UPPER = 1\nlower = 2\n")
-        with patch("minimalcode.tools.shutil.which", return_value=None):
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             insensitive = self.tools.grep("upper")
             sensitive = self.tools.grep("UPPER")
         self.assertTrue(any("UPPER" in line for line in insensitive["matches"]))
@@ -304,16 +311,19 @@ class ToolTests(unittest.TestCase):
 
     def test_explicit_ignored_directory_is_searchable(self) -> None:
         self.tools.write("build/generated.py", "needle = 1\n")
-        with patch("minimalcode.tools.shutil.which", return_value=None):
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             result = self.tools.grep("needle", path="build")
             files = self.tools.find("*.py", path="build")
         self.assertTrue(any("generated.py" in line for line in result["matches"]))
         self.assertTrue(any(path.endswith("generated.py") for path in files["files"]))
 
         with (
-            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
             patch(
-                "minimalcode.tools._run_bounded_command",
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
                 return_value=(0, [], False, ""),
             ) as run,
         ):
@@ -336,14 +346,14 @@ class ToolTests(unittest.TestCase):
     def test_shell_timeout_is_capped_by_configuration(self) -> None:
         self.tools.shell_timeout = 120
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success"},
         ) as run:
             self.tools.shell("echo test", timeout=3600)
         self.assertEqual(run.call_args.kwargs["timeout"], 120)
 
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success"},
         ) as run:
             self.tools.shell("echo test", timeout=5)

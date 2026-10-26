@@ -23,10 +23,10 @@ from minimalcode.sandbox import (
     LocalSandboxBackend,
     SandboxPolicy,
     SandboxRunner,
-    _posix_limits,
     available_backends,
     is_sensitive_path,
 )
+from minimalcode.sandbox.execution import _posix_limits
 from minimalcode.shell import detect_shell, run_shell
 from minimalcode.tools import ToolRuntime
 
@@ -263,7 +263,7 @@ class ExecutionBaselineTests(SandboxTestBase):
 
     def test_unavailable_backend_refuses_to_execute(self) -> None:
         tools = self._tools(backend="bwrap")
-        with patch("minimalcode.sandbox.shutil.which", return_value=None):
+        with patch("minimalcode.sandbox.backends.shutil.which", return_value=None):
             result = tools.shell("echo should-not-run")
         self.assertEqual(result["status"], "error", result)
         self.assertIn("unavailable", str(result["message"]))
@@ -420,7 +420,7 @@ class SearchLeakTests(SandboxTestBase):
         (self.workspace / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
         (self.workspace / ".env").write_text("needle=secret\n", encoding="utf-8")
         tools = self._tools()
-        with patch("minimalcode.tools.shutil.which", return_value=None):
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             grep_result = tools.grep("needle")
             find_result = tools.find("*")
         self.assertTrue(any("app.py" in line for line in grep_result["matches"]))
@@ -430,9 +430,12 @@ class SearchLeakTests(SandboxTestBase):
     def test_ripgrep_receives_sensitive_globs(self) -> None:
         tools = self._tools()
         with (
-            patch("minimalcode.tools.shutil.which", return_value="/usr/bin/rg"),
             patch(
-                "minimalcode.tools._run_bounded_command",
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
                 return_value=(0, [], False, ""),
             ) as run,
         ):

@@ -21,18 +21,22 @@ CLI
 | Module | Responsibility |
 |---|---|
 | `config.py` | Settings merge, validation, environment expansion, atomic config writes |
-| `sandbox.py` | Unified sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
+| `sandbox/` | Sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
-| `provider.py` | OpenAI Chat/Responses HTTP and SSE transport |
+| `provider/` | OpenAI Chat/Responses payloads, HTTP retries, and SSE parsing |
 | `web.py` | Configurable provider web search and fetch client |
 | `vision.py` | Configurable provider vision client for inline image understanding |
-| `tools.py` | Workspace-bound file, search, shell, subagent, image, and web tool dispatch |
+| `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
 | `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |
-| `highlight.py` | Incremental Markdown rendering and ANSI styling for streamed text |
+| `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling |
+
+Pre-split module-level names are still served by temporary, warning shims. Their
+replacement imports and patch targets are listed in
+[compatibility.md](compatibility.md); they are removed in 0.7.0.
 
 ## Performance choices
 

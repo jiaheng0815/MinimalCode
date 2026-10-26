@@ -293,15 +293,32 @@ python main.py -p "inspect this repository"
 minimalcode/
 ├── cli.py         # 参数解析、管理命令、交互循环
 ├── agent.py       # 工具循环、用量统计、上下文压缩
-├── provider.py    # OpenAI Chat / Responses 传输与 SSE 解析
-├── tools.py       # 工具 schema、工作区校验、搜索与文件操作
+├── provider/      # OpenAI Chat / Responses 传输与 SSE 解析
+│   ├── client.py  #   共享客户端与协议分派
+│   ├── chat.py    #   Chat Completions 载荷与流
+│   ├── responses.py # Responses 载荷与事件流
+│   └── transport.py # HTTP 建立与重试
+├── tools/         # 工具 schema、工作区校验、搜索与文件操作
+│   ├── runtime.py #   共享状态与工具分派
+│   ├── files.py   #   read / write / edit
+│   ├── search.py  #   grep / find 与子进程搜索
+│   ├── process.py #   shell / subagent
+│   └── remote.py  #   vision / web 工具
+├── sandbox/       # 沙箱策略、后端与有界执行
+│   ├── policy.py  #   路径与网络策略
+│   ├── backends.py #  bwrap / firejail / docker 等后端
+│   ├── execution.py # 子进程捕获、超时与资源限制
+│   └── runner.py  #   统一入口
 ├── shell.py       # shell 探测与子进程执行
 ├── prompt.py      # 系统提示词与 AGENTS.md 发现
 ├── session.py     # JSONL 会话存储与检索
 ├── config.py      # 配置合并、校验、脱敏、原子写入
 ├── web.py         # 供应商 web_search / web_fetch 客户端
 ├── vision.py      # 供应商视觉客户端
-├── highlight.py   # 流式 Markdown 渲染
+├── highlight/     # 流式 Markdown 渲染
+│   ├── markdown.py #  增量渲染状态机
+│   ├── code.py     #  围栏代码着色
+│   └── sanitize.py #  终端控制序列清理
 └── defaults.json  # 内置默认配置
 ```
 

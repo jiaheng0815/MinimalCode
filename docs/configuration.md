@@ -68,7 +68,7 @@ same cleanup path.
 ## Sandbox
 
 Every tool that resolves a path or spawns a process goes through the single
-`SandboxRunner` entry point in `minimalcode/sandbox.py`. The execution layer is
+`SandboxRunner` entry point in `minimalcode/sandbox/`. The execution layer is
 off by default (`--no-sandbox`), so only the filesystem policy applies out of the
 box; enable it with `--sandbox` or `sandbox.enabled: true`. When enabled, the
 layer is fail-closed: a path outside the allowed roots, a credential-like file,

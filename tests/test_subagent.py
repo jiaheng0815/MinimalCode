@@ -84,7 +84,7 @@ class SubagentToolTests(unittest.TestCase):
 
     def test_dispatch_runs_minimalcode_through_the_shell(self) -> None:
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success", "exit_code": 0, "stdout": "report"},
         ) as run:
             result = self.tools.dispatch(
@@ -106,7 +106,7 @@ class SubagentToolTests(unittest.TestCase):
         self.tools.subagent_timeout = 60
         self.tools.subagent_max_turns = 5
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success", "exit_code": 0},
         ) as run:
             result = self.tools.subagent("review", timeout=3600, max_turns=500)
@@ -124,7 +124,7 @@ class SubagentToolTests(unittest.TestCase):
         tools = ToolRuntime(self.settings, self.workspace, detect_shell())
         self.assertEqual(tools.subagent_timeout, 45)
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success", "exit_code": 0},
         ) as run:
             result = tools.subagent("review")
@@ -144,7 +144,7 @@ class SubagentToolTests(unittest.TestCase):
         tools = ToolRuntime(self.settings, self.workspace, detect_shell())
         self.assertEqual(tools.subagent_timeout, 900)
         with patch(
-            "minimalcode.tools.run_shell",
+            "minimalcode.tools.process.run_shell",
             return_value={"status": "success", "exit_code": 0},
         ) as run:
             result = tools.subagent("review")

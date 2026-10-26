@@ -1,284 +1,26 @@
+"""Incremental Markdown renderer for streamed assistant text."""
+
 from __future__ import annotations
 
-import os
 import re
 from typing import TextIO
 
-RESET = "\x1b[0m"
-ACTIVITY_TAG = "\x1b[38;5;114m"
+from . import color
+from .code import CodeHighlightMixin
+from .palette import _PALETTES, _styled
+from .sanitize import TerminalSanitizer
 
-_PALETTES = {
-    "dark": {
-        "h1": "\x1b[1;38;5;51m",
-        "h2": "\x1b[1;38;5;45m",
-        "h3": "\x1b[1;38;5;48m",
-        "h4": "\x1b[1;38;5;111m",
-        "h5": "\x1b[1;38;5;249m",
-        "h6": "\x1b[2;38;5;245m",
-        "rule": "\x1b[38;5;238m",
-        "bold": "\x1b[1;38;5;229m",
-        "italic": "\x1b[3;38;5;250m",
-        "strike": "\x1b[9;38;5;245m",
-        "inline_code": "\x1b[38;5;222;48;5;236m",
-        "code_comment": "\x1b[3;38;5;244m",
-        "code_string": "\x1b[38;5;186m",
-        "code_number": "\x1b[38;5;141m",
-        "code_keyword": "\x1b[38;5;197m",
-        "code_name": "\x1b[38;5;81m",
-        "code_variable": "\x1b[38;5;114m",
-        "bullet": "\x1b[38;5;214m",
-        "quote": "\x1b[38;5;244m",
-        "link": "\x1b[4;38;5;75m",
-        "url": "\x1b[38;5;242m",
-    },
-    "light": {
-        "h1": "\x1b[1;38;5;25m",
-        "h2": "\x1b[1;38;5;24m",
-        "h3": "\x1b[1;38;5;29m",
-        "h4": "\x1b[1;38;5;55m",
-        "h5": "\x1b[1;38;5;238m",
-        "h6": "\x1b[2;38;5;240m",
-        "rule": "\x1b[38;5;250m",
-        "bold": "\x1b[1;38;5;130m",
-        "italic": "\x1b[3;38;5;238m",
-        "strike": "\x1b[9;38;5;240m",
-        "inline_code": "\x1b[38;5;166;48;5;254m",
-        "code_comment": "\x1b[3;38;5;244m",
-        "code_string": "\x1b[38;5;130m",
-        "code_number": "\x1b[38;5;91m",
-        "code_keyword": "\x1b[38;5;161m",
-        "code_name": "\x1b[38;5;25m",
-        "code_variable": "\x1b[38;5;28m",
-        "bullet": "\x1b[38;5;166m",
-        "quote": "\x1b[38;5;243m",
-        "link": "\x1b[4;38;5;25m",
-        "url": "\x1b[38;5;242m",
-    },
-}
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-_NUMBER_RE = re.compile(
-    r"(?<![\w.])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?!\w)"
-)
-_VARIABLE_RE = re.compile(r"\$(?:\w+:)?\w+|\b[A-Za-z_]\w*-\w+\b")
-_KEYWORDS = {
-    "and",
-    "as",
-    "async",
-    "await",
-    "begin",
-    "break",
-    "case",
-    "catch",
-    "class",
-    "const",
-    "continue",
-    "def",
-    "do",
-    "else",
-    "elseif",
-    "end",
-    "enum",
-    "except",
-    "export",
-    "False",
-    "false",
-    "finally",
-    "for",
-    "foreach",
-    "from",
-    "function",
-    "if",
-    "import",
-    "in",
-    "is",
-    "lambda",
-    "let",
-    "match",
-    "new",
-    "None",
-    "not",
-    "null",
-    "or",
-    "param",
-    "pass",
-    "process",
-    "raise",
-    "return",
-    "switch",
-    "throw",
-    "True",
-    "true",
-    "try",
-    "undefined",
-    "using",
-    "var",
-    "while",
-    "with",
-    "yield",
-}
-_KEYWORD_RE = re.compile(r"\b(?:" + "|".join(sorted(_KEYWORDS)) + r")\b")
 _RULE_RE = re.compile(r"([*_-])(?:[ \t]*\1){2,}")
 _TABLE_SEPARATOR_RE = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?")
 _TABLE_SEPARATOR_PREFIX_RE = re.compile(r"[ \t|:-]+")
 
 
-def strip_ansi(text: str) -> str:
-    """Return text without SGR color sequences."""
-    return _ANSI_RE.sub("", text)
+def _detect_color(stream: TextIO) -> bool:
+    """Delegate to the color module so a single patch target stays effective."""
+    return color._supports_color(stream)
 
 
-_CONTROL_PENDING_LIMIT = 64_000
-
-
-def _csi_length(data: str, start: int) -> int | None:
-    """Return the length of a CSI sequence beginning at ``start``."""
-    index = start + 2
-    while index < len(data):
-        code = ord(data[index])
-        if 0x40 <= code <= 0x7E:
-            return index + 1 - start
-        if not 0x20 <= code <= 0x3F:
-            return 2
-        index += 1
-    return None
-
-
-def _string_sequence_length(data: str, start: int, sequence_start: int) -> int | None:
-    """Return the length of an OSC/DCS-style string sequence."""
-    index = start
-    while index < len(data):
-        if data[index] == "\x07":
-            return index + 1 - sequence_start
-        if data[index] == "\x1b":
-            if index + 1 >= len(data):
-                return None
-            if data[index + 1] == "\\":
-                return index + 2 - sequence_start
-        index += 1
-    return None
-
-
-class TerminalSanitizer:
-    """Strip terminal control sequences before writing untrusted text.
-
-    Model output and shell output are untrusted, but they still reach a real
-    terminal. Keep newlines and tabs, drop every other C0/C1 control character,
-    and remove complete or partially streamed escape sequences. Splitting the
-    state across ``feed`` calls also covers sequences cut between stream deltas.
-    """
-
-    def __init__(self) -> None:
-        self._pending = ""
-
-    @staticmethod
-    def _escape_length(data: str, start: int) -> int | None:
-        if start + 1 >= len(data):
-            return None
-        marker = data[start + 1]
-        if marker == "[":
-            return _csi_length(data, start)
-        if marker == "]":
-            return _string_sequence_length(data, start + 2, start)
-        if marker in "PX^_":
-            return _string_sequence_length(data, start + 2, start)
-        return 2
-
-    def feed(self, text: str) -> str:
-        if not text:
-            return ""
-        data = self._pending + text
-        self._pending = ""
-        rendered: list[str] = []
-        index = 0
-        while index < len(data):
-            char = data[index]
-            if char == "\x1b":
-                length = self._escape_length(data, index)
-                if length is None:
-                    self._pending = data[index:]
-                    break
-                index += length
-                continue
-            if char == "\r":
-                if index + 1 >= len(data):
-                    self._pending = "\r"
-                    break
-                if data[index + 1] == "\n":
-                    rendered.append("\r\n")
-                    index += 2
-                else:
-                    index += 1
-                continue
-            code = ord(char)
-            if char in "\n\t":
-                rendered.append(char)
-            elif code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
-                pass
-            else:
-                rendered.append(char)
-            index += 1
-        if len(self._pending) > _CONTROL_PENDING_LIMIT:
-            self._pending = ""
-        return "".join(rendered)
-
-    def finish(self) -> str:
-        # A trailing lone CR or an unterminated escape has no safe text left.
-        self._pending = ""
-        return ""
-
-
-def sanitize_terminal_text(text: str) -> str:
-    """Return ``text`` with all terminal escape/control sequences removed."""
-    sanitizer = TerminalSanitizer()
-    return sanitizer.feed(text) + sanitizer.finish()
-
-
-def style_activity_tag(text: str, stream: TextIO) -> str:
-    """Color a leading ``[tool]`` activity tag when the stream supports ANSI."""
-    text = sanitize_terminal_text(text)
-    match = re.match(r"^(\[[^\]\n]+\])", text)
-    if match is None or not _supports_color(stream):
-        return text
-    tag = match.group(1)
-    return f"{ACTIVITY_TAG}{tag}{RESET}{text[len(tag) :]}"
-
-
-def _supports_color(stream: TextIO) -> bool:
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    if os.environ.get("TERM", "").lower() == "dumb":
-        return False
-    try:
-        if not stream.isatty():
-            return False
-    except (AttributeError, OSError, ValueError):
-        return False
-    _enable_windows_ansi(stream)
-    return True
-
-
-def _enable_windows_ansi(stream: TextIO) -> None:
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        import msvcrt
-
-        handle = msvcrt.get_osfhandle(stream.fileno())
-        kernel32 = ctypes.windll.kernel32
-        mode = ctypes.c_uint32()
-        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-    except (AttributeError, OSError, ValueError):
-        pass
-
-
-def _styled(text: str, style: str) -> str:
-    return f"{style}{text}{RESET}"
-
-
-class MarkdownHighlighter:
+class MarkdownHighlighter(CodeHighlightMixin):
     """Render streamed Markdown with linear cursor-based parsing."""
 
     def __init__(
@@ -290,7 +32,7 @@ class MarkdownHighlighter:
     ) -> None:
         self.stream = stream
         self.palette = _PALETTES.get(theme, _PALETTES["dark"])
-        self.enabled = _supports_color(stream) if color is None else color
+        self.enabled = _detect_color(stream) if color is None else color
         self._pending = ""
         self._cursor = 0
         self._previous = ""
@@ -310,10 +52,12 @@ class MarkdownHighlighter:
         self._sanitizer = TerminalSanitizer()
 
     def feed(self, delta: str) -> None:
+        """Consume one streamed delta and write the now-stable prefix."""
         delta = self._sanitizer.feed(delta)
         if not delta:
             return
         if not self.enabled:
+            # Redirected and JSON output stays raw Markdown.
             self._write(delta)
             return
 
@@ -325,6 +69,7 @@ class MarkdownHighlighter:
         self._write(self._render_segments(segments))
 
     def finish(self) -> None:
+        """Flush held markers and reset state for the next stream."""
         self._sanitizer.finish()
         if self.enabled:
             segments: list[tuple[str | None, list[str]]] = []
@@ -339,6 +84,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> None:
+        """Advance the cursor until input is exhausted or more is needed."""
         while self._cursor < len(self._pending):
             if self._in_fence and self._at_line_start:
                 if not self._consume_code_line_start(final=final):
@@ -352,6 +98,7 @@ class MarkdownHighlighter:
                 remaining = self._cursor
                 self._consume_markdown(segments, final=final)
                 if self._cursor == remaining:
+                    # A held marker made no progress; wait for the next delta.
                     break
 
     def _consume_line_start(
@@ -360,6 +107,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> bool:
+        """Classify indentation and the block marker at the start of a line."""
         text = self._pending
         start = self._cursor
         body_start = start
@@ -533,6 +281,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> None:
+        """Consume inline Markdown inside an ordinary block."""
         text = self._pending
         while self._cursor < len(text):
             if not final and self._should_hold():
@@ -613,6 +362,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> bool:
+        """Try to parse ``[label](url)`` without waiting on a partial label."""
         text = self._pending
         start = self._cursor
         search_end = min(len(text), start + 513)
@@ -646,6 +396,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> bool:
+        """Enter bold/italic/strike/code mode when a valid opener is complete."""
         text = self._pending
         start = self._cursor
         char = text[start]
@@ -720,6 +471,7 @@ class MarkdownHighlighter:
         *,
         final: bool,
     ) -> bool:
+        """Leave the active inline mode when its closing marker is valid."""
         text = self._pending
         start = self._cursor
         char = text[start]
@@ -757,139 +509,14 @@ class MarkdownHighlighter:
         return False
 
     def _should_hold(self) -> bool:
+        """Hold a single trailing marker character that may start a pair."""
         text = self._pending
         if len(text) - self._cursor == 1:
             return text[self._cursor] in "*_~`"
         return False
 
-    def _consume_code_line_start(
-        self,
-        *,
-        final: bool,
-    ) -> bool:
-        text = self._pending
-        start = self._cursor
-        line_end = text.find("\n", start)
-        line = text[start:] if line_end < 0 else text[start:line_end]
-        # The opening side accepts any indentation (models nest fences inside
-        # list items), so the closing side must accept it too. Otherwise an
-        # indented fence never closes and every later heading, list, or table
-        # is rendered as code.
-        marker = re.match(rf"^[ \t]*({re.escape(self._fence_char)}+)(.*)$", line)
-        if marker:
-            marker_text = marker.group(1)
-            remainder = marker.group(2).strip()
-            if (
-                len(marker_text) >= self._fence_length
-                and not remainder
-                and (line_end >= 0 or final)
-            ):
-                consumed = len(text) if line_end < 0 else line_end + 1
-                # Hide the closing fence too, so no stray ``` follows the code.
-                self._advance(consumed - self._cursor)
-                self._in_fence = False
-                self._end_line()
-                return True
-            if line_end < 0 and not remainder and not final:
-                return False
-        elif line_end < 0 and not final and not line.strip(" \t"):
-            # Only indentation has arrived so far; the line may still become a
-            # closing fence, so wait for the next non-space byte instead of
-            # committing the indentation as code content.
-            return False
-
-        self._line_kind = "code"
-        self._at_line_start = False
-        self._reset_code_line()
-        return True
-
-    def _consume_code(
-        self,
-        segments: list[tuple[str | None, list[str]]],
-    ) -> None:
-        text = self._pending
-        start = self._cursor
-        char = text[start]
-        if text.startswith("\r\n", start):
-            self._flush_code_word(segments)
-            self._emit(segments, start + 2, None)
-            self._end_line()
-            return
-        if char == "\n":
-            self._flush_code_word(segments)
-            self._emit(segments, start + 1, None)
-            self._end_line()
-            return
-
-        if self._code_comment:
-            self._append(segments, char, self.palette["code_comment"])
-            self._advance(1)
-            self._code_last = char
-            return
-
-        if self._code_quote is not None:
-            self._append(segments, char, self.palette["code_string"])
-            self._advance(1)
-            if self._code_escape:
-                self._code_escape = False
-            elif char == "\\":
-                self._code_escape = True
-            elif char == self._code_quote:
-                self._code_quote = None
-            self._code_last = char
-            return
-
-        comment_start = (
-            char == "#" and (not self._code_last or self._code_last.isspace())
-        ) or text.startswith("//", start)
-        if comment_start:
-            self._flush_code_word(segments)
-            token = "#" if char == "#" else "//"
-            self._append(segments, token, self.palette["code_comment"])
-            self._advance(len(token))
-            self._code_comment = True
-            self._code_last = token[-1]
-            return
-
-        if char in "\"'`":
-            self._flush_code_word(segments)
-            self._append(segments, char, self.palette["code_string"])
-            self._advance(1)
-            self._code_quote = char
-            self._code_escape = False
-            self._code_last = char
-            return
-
-        if char.isalnum() or char in "_$:.-":
-            self._code_word.append(char)
-            self._advance(1)
-            self._code_last = char
-            return
-
-        self._flush_code_word(segments)
-        self._append(segments, char, None)
-        self._advance(1)
-        self._code_last = char
-
-    def _flush_code_word(
-        self,
-        segments: list[tuple[str | None, list[str]]],
-    ) -> None:
-        word = "".join(self._code_word)
-        self._code_word.clear()
-        if not word:
-            return
-        if _KEYWORD_RE.fullmatch(word):
-            style = self.palette["code_keyword"]
-        elif _NUMBER_RE.fullmatch(word):
-            style = self.palette["code_number"]
-        elif _VARIABLE_RE.fullmatch(word):
-            style = self.palette["code_variable"]
-        else:
-            style = self.palette["code_name"]
-        self._append(segments, word, style)
-
     def _inline_style(self) -> str | None:
+        """Return the style for ordinary text in the current block/mode."""
         if self._inline_mode == "bold":
             return self.palette["bold"]
         if self._inline_mode == "italic":
@@ -905,6 +532,7 @@ class MarkdownHighlighter:
         return None
 
     def _advance(self, count: int) -> None:
+        """Move the cursor and remember the last consumed character."""
         if count <= 0:
             return
         self._cursor += count
@@ -914,6 +542,7 @@ class MarkdownHighlighter:
         self,
         segments: list[tuple[str | None, list[str]]],
     ) -> None:
+        """Emit indentation that was held until the line kind was known."""
         indent = self._line_indent
         self._line_indent = 0
         if indent:
@@ -925,12 +554,14 @@ class MarkdownHighlighter:
         end: int,
         style: str | None,
     ) -> None:
+        """Emit pending text up to ``end`` and advance past it."""
         start = self._cursor
         if end > start:
             self._append(segments, self._pending[start:end], style)
             self._advance(end - start)
 
     def _end_line(self) -> None:
+        """Reset all per-line inline and code state."""
         self._at_line_start = True
         self._line_kind = "normal"
         self._heading_level = 0
@@ -938,14 +569,8 @@ class MarkdownHighlighter:
         self._line_indent = 0
         self._reset_code_line()
 
-    def _reset_code_line(self) -> None:
-        self._code_comment = False
-        self._code_quote = None
-        self._code_escape = False
-        self._code_last = ""
-        self._code_word.clear()
-
     def _reset_stream_state(self) -> None:
+        """Reset parsing state so the renderer can be reused."""
         self._pending = ""
         self._cursor = 0
         self._previous = ""
@@ -966,6 +591,7 @@ class MarkdownHighlighter:
         text: str,
         style: str | None,
     ) -> None:
+        """Append text, merging runs that share a style."""
         if not text:
             return
         if segments and segments[-1][0] == style:
@@ -977,12 +603,14 @@ class MarkdownHighlighter:
     def _render_segments(
         segments: list[tuple[str | None, list[str]]],
     ) -> str:
+        """Render styled runs into ANSI text."""
         return "".join(
             _styled("".join(chunks), style) if style is not None else "".join(chunks)
             for style, chunks in segments
         )
 
     def _write(self, text: str) -> None:
+        """Write and flush a rendered fragment."""
         if not text:
             return
         self.stream.write(text)

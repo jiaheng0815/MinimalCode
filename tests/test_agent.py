@@ -487,7 +487,9 @@ class AgentTests(unittest.TestCase):
                 save=False,
             )
             output = TtyBuffer()
-            with patch("minimalcode.highlight._supports_color", return_value=True):
+            with patch(
+                "minimalcode.highlight.color._supports_color", return_value=True
+            ):
                 agent = Agent(
                     settings=settings,
                     provider=MarkdownProvider(),
@@ -633,7 +635,7 @@ class AgentTests(unittest.TestCase):
 
             with (
                 patch.object(runtime, "dispatch", return_value=result),
-                patch("minimalcode.highlight._supports_color", return_value=True),
+                patch("minimalcode.highlight.color._supports_color", return_value=True),
             ):
                 completed = agent.run("run shell")
 

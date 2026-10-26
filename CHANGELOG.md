@@ -16,6 +16,8 @@
 
 ### 变更
 
+- 将 `tools.py`、`sandbox.py`、`provider.py`、`highlight.py` 拆分为同名包，按职责拆成 schema、文件/搜索/进程工具、策略/后端/执行器、Chat/Responses 协议、Markdown/代码着色/终端清理等模块；原导入路径保持不变，并补充模块与公共接口文档。
+- 拆分包后保留的 facade 兼容属性降级为临时 shim：访问时发出 `DeprecationWarning`，并计划在 0.7.0 移除。测试中的 patch 目标已迁移到实际实现模块（例如 `minimalcode.tools.search_tools.shutil.which`、`minimalcode.provider.transport.time.sleep`），迁移表见 [docs/compatibility.md](docs/compatibility.md)。
 - 沙箱执行层默认关闭（默认等价 `--no-sandbox`）：`sandbox.enabled` 与 `minimalcode/defaults.json` 的默认值改为 `false`，需要时用 `--sandbox` 开启。文件工具的工作区约束与敏感文件过滤不受影响，仍然始终生效。
 - 任意 `--sandbox-*` 调优参数会隐式开启执行层，避免 `--sandbox-timeout 30` 之类的参数成为静默无效项；显式的 `--no-sandbox` 优先。执行层关闭时 `subagent` 只受 `subagent.timeout_seconds` 约束。
 - `should_compact` 优先使用供应商返回的 prompt token 数，不再每轮序列化整个历史。
@@ -24,7 +26,7 @@
 
 ### 新增
 
-- 新增可配置、fail-closed 的沙箱执行层（`minimalcode/sandbox.py`）。所有 shell/subagent 命令、文件读写和搜索现在都经过 `SandboxRunner`：工作区限定的允许根（含符号链接逃逸检查）、敏感文件拦截、默认禁网（可选主机白名单）、超时/输出/资源上限、每条命令的临时目录用后必定清理，以及拒绝原因审计。后端可插拔：跨平台的 `local` 基线由策略加 POSIX rlimit 组成，`bwrap`、`firejail`、`sandbox-exec`、`docker` 均为可选且不是强依赖；显式选择但不可用的后端会拒绝执行而不是降级。新增配置：`sandbox.enabled`、`sandbox.backend`、`sandbox.allowed_roots`、`sandbox.network_policy`、`sandbox.allowed_hosts`、`sandbox.timeout_seconds`、`sandbox.max_output_chars`、`sandbox.allow_sensitive_files`、`sandbox.max_memory_mb`、`sandbox.max_processes`、`sandbox.docker_image`；新增 CLI 参数 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output`、`--sandbox-allow-sensitive`；新增 `minimalcode sandbox` 命令。
+- 新增可配置、fail-closed 的沙箱执行层（`minimalcode/sandbox/`）。所有 shell/subagent 命令、文件读写和搜索现在都经过 `SandboxRunner`：工作区限定的允许根（含符号链接逃逸检查）、敏感文件拦截、默认禁网（可选主机白名单）、超时/输出/资源上限、每条命令的临时目录用后必定清理，以及拒绝原因审计。后端可插拔：跨平台的 `local` 基线由策略加 POSIX rlimit 组成，`bwrap`、`firejail`、`sandbox-exec`、`docker` 均为可选且不是强依赖；显式选择但不可用的后端会拒绝执行而不是降级。新增配置：`sandbox.enabled`、`sandbox.backend`、`sandbox.allowed_roots`、`sandbox.network_policy`、`sandbox.allowed_hosts`、`sandbox.timeout_seconds`、`sandbox.max_output_chars`、`sandbox.allow_sensitive_files`、`sandbox.max_memory_mb`、`sandbox.max_processes`、`sandbox.docker_image`；新增 CLI 参数 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output`、`--sandbox-allow-sensitive`；新增 `minimalcode sandbox` 命令。
 - 版本号升级到 0.6.0。
 
 ### 修复
