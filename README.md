@@ -1,6 +1,6 @@
 # MinimalCode
 
-[![CI](https://github.com/jiaheng0815/MinimalCode/blob/main/.github/workflows/tests.yml/badge.svg)](https://github.com/jiaheng0815/MinimalCode/blob/main/.github/workflows/tests.yml)
+[![CI](https://github.com/jiaheng0815/MinimalCode/actions/workflows/tests.yml/badge.svg)](https://github.com/jiaheng0815/MinimalCode/actions/workflows/tests.yml)
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
