@@ -1,5 +1,7 @@
 # Architecture
 
+Applies to MinimalCode 0.7.0.
+
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
 ## Request flow
@@ -34,9 +36,75 @@ CLI
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling |
 
-Pre-split module-level names are still served by temporary, warning shims. Their
-replacement imports and patch targets are listed in
-[compatibility.md](compatibility.md); they are removed in 0.7.0.
+## Package layout
+
+0.7.0 split the four large modules into packages. Only the names listed in a
+package's `__all__` are public; the pre-split module-level aliases were removed.
+Private helpers are imported from the submodule that defines and uses them.
+
+### `tools/`
+
+| Module | Responsibility |
+|---|---|
+| `runtime.py` | `ToolRuntime`: shared settings, path resolver, dispatcher, activity text |
+| `schemas.py` | Provider-facing tool declarations and enablement rules |
+| `files.py` | `read`, `write`, atomic write, line-ending-preserving `edit` |
+| `search.py` | Bounded `rg`/Python search processes, smart-case, output parsing |
+| `search_tools.py` | `grep` and `find`, ignore globs, sandbox glob exclusions |
+| `process.py` | `shell` and `subagent` execution through the runner |
+| `remote.py` | Provider-backed `read_image`, `web_search`, `web_fetch` |
+| `validation.py` | Argument arity/type checks before a handler runs |
+
+`ToolRuntime` is composed from the file, search, process, and remote mixins, so
+every tool shares one sandbox, workspace, and configuration instance.
+
+### `sandbox/`
+
+| Module | Responsibility |
+|---|---|
+| `runner.py` | `SandboxRunner`: path resolution, policy checks, command execution |
+| `policy.py` | Immutable `SandboxPolicy`, settings validation, network denial |
+| `sensitive.py` | Credential-like path rules and search exclusion globs |
+| `network.py` | Command-string network detection and host allowlisting |
+| `backends.py` | `local`, `bwrap`, `firejail`, `sandbox-exec`, `docker`, selection |
+| `execution.py` | Bounded stdout/stderr capture, timeout tree kill, rlimits |
+| `audit.py` | Bounded denial/note trail surfaced in `/status` and `sandbox` |
+
+### `provider/`
+
+| Module | Responsibility |
+|---|---|
+| `client.py` | `OpenAICompatibleProvider`: configuration, HTTP client, dispatch |
+| `chat.py` | Chat Completions payload, SSE stream, non-stream parsing |
+| `responses.py` | Responses payload, event stream, non-stream parsing |
+| `transport.py` | Request construction, connection retries, HTTP status retries |
+| `common.py` | Usage/content/argument normalization shared by both protocols |
+| `types.py` | `ToolCall` and `ProviderReply` |
+| `factory.py` | `create_provider` and provider/model/effort resolution |
+
+### `highlight/`
+
+| Module | Responsibility |
+|---|---|
+| `markdown.py` | Incremental Markdown state machine over streamed deltas |
+| `code.py` | Fenced-code tokenizer and keyword/number/string styling |
+| `sanitize.py` | Terminal escape/control sequence removal across deltas |
+| `color.py` | ANSI capability detection and Windows console enabling |
+| `palette.py` | Dark/light palettes, `strip_ansi`, style wrapper |
+
+## Public surface and patch targets
+
+- Import public objects from the package facade (`minimalcode.tools`,
+  `minimalcode.sandbox`, `minimalcode.provider`, `minimalcode.highlight`).
+- Import helpers from the submodule that owns them, for example
+  `minimalcode.tools.search.run_python_grep` or
+  `minimalcode.sandbox.execution._posix_limits`.
+- `unittest.mock.patch` must target the module whose global the implementation
+  looks up at call time. For example, patch
+  `minimalcode.provider.transport.time.sleep`, not
+  `minimalcode.provider.time.sleep`.
+
+The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 
 ## Performance choices
 

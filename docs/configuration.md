@@ -1,5 +1,7 @@
 # Configuration reference
 
+Applies to MinimalCode 0.7.0.
+
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
 Built-in defaults are data, not Python literals: they live in
@@ -46,9 +48,9 @@ switching shells. The fallback reason is printed by `minimalcode shell`.
 | `max_file_bytes` | `5000000` | Maximum size accepted by `write` and `edit` |
 | `max_results` | `200` | Default `grep`/`find` result limit |
 
-The `shell` tool runs through the sandbox layer described below; it no longer
-unconditionally inherits every operating-system permission of the current
-process.
+The `shell` tool runs through `SandboxRunner`. With the execution layer disabled
+(the default) commands run with the current user's permissions; enabling the
+layer adds policy, timeout, output, and resource controls.
 
 `grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
 `dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
@@ -327,4 +329,11 @@ below the provider's request-body limit (DeepSeek caps base64 requests at
 JPEG, PNG, GIF, and WebP are accepted. Images are read through the same
 workspace check as `read`, so files outside the workspace require
 `tools.allow_outside_workspace: true`.
+
+## See also
+
+- [architecture.md](architecture.md): request flow, package layout, and which
+  module implements each setting.
+- [compatibility.md](compatibility.md): 0.6 → 0.7 import and patch-target
+  migration for code that embeds MinimalCode.
 

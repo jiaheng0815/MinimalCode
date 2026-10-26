@@ -2,7 +2,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.6.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`0.7.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -33,6 +33,16 @@ minimalcode init
 `init` 会在配置目录写入 `settings.json` 并创建 `sessions/`。首次正常运行如果发现配置缺失，也会自动生成，因此这一步是可选的。
 
 要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
+
+## 从 0.6 升级到 0.7
+
+0.7.0 把 `tools`、`sandbox`、`provider`、`highlight` 四个大模块拆成了包，并在发布前移除了拆包过程中临时保留的旧名字回退。CLI、配置和工具行为没有变化；只有直接导入内部名字或 patch 内部函数的代码需要迁移：
+
+- `minimalcode.tools`、`minimalcode.sandbox`、`minimalcode.provider`、`minimalcode.highlight` 现在只导出各自 `__all__` 中的公开名称，未知名字直接抛 `AttributeError`。
+- 私有 helper 改为从实现模块导入，例如 `minimalcode.tools.search.run_python_grep`、`minimalcode.sandbox.execution._posix_limits`、`minimalcode.highlight.palette._PALETTES`。
+- patch 目标要指向实际查找该名字的模块，例如 `minimalcode.tools.search_tools.shutil.which`、`minimalcode.provider.transport.time.sleep`、`minimalcode.highlight.color._supports_color`。
+
+完整对照表见 [docs/compatibility.md](docs/compatibility.md)。
 
 ## 快速开始
 
@@ -276,10 +286,15 @@ JSON 输出字段：
 ## 开发
 
 ```powershell
+python -m pip install -e ".[dev]"
 python -m unittest discover -s tests -v
 python -m compileall -q minimalcode tests main.py
+python -m ruff check minimalcode tests benchmarks main.py
+python -m ruff format --check minimalcode tests benchmarks main.py
 python benchmarks/deepseek_responses.py --runs 3
 ```
+
+`benchmarks/coding_suite.py --validate-only` 用于在无网络、无密钥的情况下校验基准任务定义。
 
 旧入口仍然可用：
 
@@ -291,38 +306,60 @@ python main.py -p "inspect this repository"
 
 ```text
 minimalcode/
-├── cli.py         # 参数解析、管理命令、交互循环
-├── agent.py       # 工具循环、用量统计、上下文压缩
-├── provider/      # OpenAI Chat / Responses 传输与 SSE 解析
-│   ├── client.py  #   共享客户端与协议分派
-│   ├── chat.py    #   Chat Completions 载荷与流
-│   ├── responses.py # Responses 载荷与事件流
-│   └── transport.py # HTTP 建立与重试
-├── tools/         # 工具 schema、工作区校验、搜索与文件操作
-│   ├── runtime.py #   共享状态与工具分派
-│   ├── files.py   #   read / write / edit
-│   ├── search.py  #   grep / find 与子进程搜索
-│   ├── process.py #   shell / subagent
-│   └── remote.py  #   vision / web 工具
-├── sandbox/       # 沙箱策略、后端与有界执行
-│   ├── policy.py  #   路径与网络策略
-│   ├── backends.py #  bwrap / firejail / docker 等后端
-│   ├── execution.py # 子进程捕获、超时与资源限制
-│   └── runner.py  #   统一入口
-├── shell.py       # shell 探测与子进程执行
-├── prompt.py      # 系统提示词与 AGENTS.md 发现
-├── session.py     # JSONL 会话存储与检索
-├── config.py      # 配置合并、校验、脱敏、原子写入
-├── web.py         # 供应商 web_search / web_fetch 客户端
-├── vision.py      # 供应商视觉客户端
-├── highlight/     # 流式 Markdown 渲染
-│   ├── markdown.py #  增量渲染状态机
-│   ├── code.py     #  围栏代码着色
-│   └── sanitize.py #  终端控制序列清理
-└── defaults.json  # 内置默认配置
+├── cli.py           # 参数解析、管理命令、交互循环
+├── agent.py         # 工具循环、用量统计、上下文压缩
+├── provider/        # OpenAI Chat / Responses 客户端
+│   ├── client.py    #   共享客户端与协议分派
+│   ├── chat.py      #   Chat Completions 载荷、流与解析
+│   ├── responses.py #   Responses 载荷、事件流与解析
+│   ├── transport.py #   HTTP 请求建立与连接重试
+│   ├── common.py    #   usage / 内容 / 参数归一化
+│   ├── types.py     #   ToolCall、ProviderReply
+│   └── factory.py   #   create_provider
+├── tools/           # 工作区工具
+│   ├── runtime.py       #   共享状态与工具分派
+│   ├── schemas.py       #   工具定义
+│   ├── files.py         #   read / write / edit
+│   ├── search.py        #   子进程搜索与输出解析
+│   ├── search_tools.py  #   grep / find
+│   ├── process.py       #   shell / subagent
+│   ├── remote.py        #   vision / web 工具
+│   └── validation.py    #   模型参数校验
+├── sandbox/         # 沙箱策略、后端与有界执行
+│   ├── runner.py    #   统一入口
+│   ├── policy.py    #   路径与网络策略
+│   ├── sensitive.py #   敏感文件规则
+│   ├── network.py   #   联网命令识别与主机白名单
+│   ├── backends.py  #   bwrap / firejail / sandbox-exec / docker
+│   ├── execution.py #   子进程捕获、超时与资源限制
+│   └── audit.py     #   拒绝与运行记录
+├── highlight/       # 流式 Markdown 渲染
+│   ├── markdown.py  #   增量渲染状态机
+│   ├── code.py      #   围栏代码着色
+│   ├── sanitize.py  #   终端控制序列清理
+│   ├── color.py     #   ANSI 能力探测
+│   └── palette.py   #   深色/浅色调色板
+├── shell.py         # shell 探测与子进程执行
+├── prompt.py        # 系统提示词与 AGENTS.md 发现
+├── session.py       # JSONL 会话存储与检索
+├── config.py        # 配置合并、校验、脱敏、原子写入
+├── web.py           # 供应商 web_search / web_fetch 客户端
+├── vision.py        # 供应商视觉客户端
+├── subagent.py      # 子进程命令构建与深度传递
+├── importer.py      # Pi 配置迁移
+├── errors.py        # 统一异常类型
+└── defaults.json    # 内置默认配置
 ```
 
+四个包的 `__all__` 是唯一公开接口。0.7.0 起不再为拆分前的模块级名字提供回退；私有 helper 从定义它的子模块导入，详见 [docs/compatibility.md](docs/compatibility.md)。
+
 请求链路：CLI → 配置与 shell 探测 → 会话加载/创建 → 供应商流式请求 → 工具调用与执行 → 结果追加到 JSONL → 下一轮模型请求 → 最终文本或 JSON。每次运行只有一个常驻主进程和一个复用的 HTTP 连接池，没有守护进程、嵌入式数据库或后台服务（`shell` 工具会按需启动子进程）。更多细节见 [docs/architecture.md](docs/architecture.md)。
+
+## 文档
+
+- [docs/architecture.md](docs/architecture.md)：请求链路、模块职责与性能取舍。
+- [docs/configuration.md](docs/configuration.md)：全部配置字段、默认值与安全边界。
+- [docs/compatibility.md](docs/compatibility.md)：0.6 → 0.7 的导入与 patch 迁移对照表。
 
 ## 后续工作
 
