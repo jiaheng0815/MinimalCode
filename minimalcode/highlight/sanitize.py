@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Cap on the held tail. A real escape sequence is a few bytes, so anything larger
+# means the stream opened a sequence that never terminated; dropping it keeps a
+# hostile or broken stream from growing the buffer for the rest of the reply.
 _CONTROL_PENDING_LIMIT = 64_000
 
 
@@ -23,10 +26,13 @@ def _string_sequence_length(data: str, start: int, sequence_start: int) -> int |
     """Return the length of an OSC/DCS-style string sequence."""
     index = start
     while index < len(data):
+        # OSC/DCS strings end with BEL (xterm) or ST (``ESC \``); both forms appear
+        # in the wild, so either terminates the sequence.
         if data[index] == "\x07":
             return index + 1 - sequence_start
         if data[index] == "\x1b":
             if index + 1 >= len(data):
+                # A trailing ESC may be the first half of ST; hold the sequence.
                 return None
             if data[index + 1] == "\\":
                 return index + 2 - sequence_start
@@ -56,7 +62,12 @@ class TerminalSanitizer:
         if marker == "]":
             return _string_sequence_length(data, start + 2, start)
         if marker in "PX^_":
+            # DCS (P), SOS (X), PM (^), and APC (_) all use the same
+            # terminator-terminated body as OSC.
             return _string_sequence_length(data, start + 2, start)
+        # Anything else is a two-byte escape (``ESC 7``, ``ESC c``). Two is returned
+        # rather than one so the parameter byte is consumed too; leaving it would
+        # print a stray character where the sequence used to be.
         return 2
 
     def feed(self, text: str) -> str:

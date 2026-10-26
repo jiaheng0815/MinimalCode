@@ -62,6 +62,9 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def strip_ansi(text: str) -> str:
     """Return text without SGR color sequences."""
+    # Only SGR (``ESC[...m``) is removed, because that is all this renderer writes;
+    # arbitrary control sequences from model or shell output are handled by
+    # ``terminal sanitization`` instead.
     return _ANSI_RE.sub("", text)
 
 

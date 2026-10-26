@@ -2,7 +2,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.7.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`0.8.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -43,6 +43,8 @@ minimalcode init
 - patch 目标要指向实际查找该名字的模块，例如 `minimalcode.tools.search_tools.shutil.which`、`minimalcode.provider.transport.time.sleep`、`minimalcode.highlight.color._supports_color`。
 
 完整对照表见 [docs/compatibility.md](docs/compatibility.md)。
+
+0.8.0 只补充文档与注释、补全供应商重试策略的测试，公开面与 0.7.0 一致，从 0.7 升级无需改代码。
 
 ## 快速开始
 

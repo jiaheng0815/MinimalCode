@@ -35,6 +35,9 @@ class OpenAICompatibleProvider(
         transport: httpx2.BaseTransport | None = None,
     ):
         protocol = str(config.get("protocol", "openai_chat"))
+        # Unknown names are rejected rather than defaulted to Chat: the dialects
+        # need different payload keys and parsers, so a fallback would send a
+        # request the server rejects or we misparse.
         if protocol not in {"openai_chat", "openai_responses"}:
             raise ProviderError(
                 f"provider {name!r} uses unsupported protocol {protocol!r}; "
@@ -45,12 +48,16 @@ class OpenAICompatibleProvider(
         self.model = model
         self.thinking = thinking
         self.protocol = protocol
+        # `_endpoint` appends the protocol path, so a trailing slash here would
+        # produce `//chat/completions` on servers that keep the path verbatim.
         self.base_url = str(config.get("base_url", "")).rstrip("/")
         if not self.base_url:
             raise ProviderError(f"provider {name!r} requires base_url")
         try:
             parsed_base = urlsplit(self.base_url)
             hostname = parsed_base.hostname
+            # Reading `.port` is deliberate: it raises on a malformed port here,
+            # at construction, instead of on every request that follows.
             _ = parsed_base.port
         except ValueError as exc:
             raise ProviderError(f"provider {name!r} has an invalid base_url") from exc
@@ -95,6 +102,8 @@ class OpenAICompatibleProvider(
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self.headers = headers
+        # The scalar timeout bounds a whole generation; capping the connect phase
+        # keeps an unreachable host from spending that entire budget on a SYN.
         timeout = httpx2.Timeout(
             self.timeout_seconds, connect=min(20.0, self.timeout_seconds)
         )

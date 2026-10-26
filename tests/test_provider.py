@@ -282,6 +282,44 @@ class ProviderTests(unittest.TestCase):
         # The retry backoff is bounded, so a stuck provider cannot hang the turn.
         self.assertLessEqual(max(call.args[0] for call in sleep.call_args_list), 8.0)
 
+    def test_status_retry_follows_an_exhausted_connection_budget(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 10:
+                raise httpx2.ConnectError("connection refused")
+            if attempts == 11:
+                return httpx2.Response(429, headers={"Retry-After": "1"})
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "late"}, "finish_reason": "stop"}
+                    ]
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with patch("minimalcode.provider.transport.time.sleep") as sleep:
+                reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        # The status retry budget is separate from the connection budget, so a
+        # run of connection failures still leaves the 429 retry available.
+        self.assertEqual(reply.content, "late")
+        self.assertEqual(attempts, 12)
+        self.assertEqual(sleep.call_count, 11)
+
     def test_http_error_reports_status_and_body(self) -> None:
         def handler(request: httpx2.Request) -> httpx2.Response:
             return httpx2.Response(400, json={"error": {"message": "bad request"}})
@@ -302,6 +340,156 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("bad request", str(context.exception))
         self.assertIn("bad request", context.exception.body or "")
+
+    def test_rate_limit_is_retried_once_after_retry_after(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx2.Response(429, headers={"Retry-After": "2"})
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with patch("minimalcode.provider.transport.time.sleep") as sleep:
+                reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "ok")
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(2.0)
+
+    def test_retry_after_is_bounded(self) -> None:
+        cases = {"0": 0.2, "-5": 0.2, "120": 5.0, "soon": 1.0}
+        for header, expected in cases.items():
+            with self.subTest(retry_after=header):
+                attempts = 0
+
+                def handler(
+                    request: httpx2.Request, retry_after: str = header
+                ) -> httpx2.Response:
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        return httpx2.Response(
+                            503, headers={"Retry-After": retry_after}
+                        )
+                    return httpx2.Response(
+                        200,
+                        json={
+                            "choices": [
+                                {"message": {"content": "ok"}, "finish_reason": "stop"}
+                            ]
+                        },
+                    )
+
+                provider = OpenAICompatibleProvider(
+                    name="test",
+                    config={"base_url": "https://provider.test/v1", "stream": False},
+                    model="model-a",
+                    thinking="high",
+                    transport=httpx2.MockTransport(handler),
+                )
+                try:
+                    with patch("minimalcode.provider.transport.time.sleep") as sleep:
+                        reply = provider.stream_chat(
+                            [{"role": "user", "content": "hello"}]
+                        )
+                finally:
+                    provider.close()
+
+                self.assertEqual(reply.content, "ok")
+                self.assertEqual(attempts, 2)
+                sleep.assert_called_once_with(expected)
+
+    def test_repeated_rate_limit_is_not_retried_again(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts > 3:
+                return httpx2.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {"content": "unbounded"},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                )
+            return httpx2.Response(
+                429,
+                headers={"Retry-After": "0"},
+                json={"error": {"message": "slow down"}},
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                patch("minimalcode.provider.transport.time.sleep") as sleep,
+                self.assertRaises(ProviderError) as context,
+            ):
+                provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(context.exception.status_code, 429)
+        self.assertIn("slow down", str(context.exception))
+        self.assertIn("slow down", context.exception.body or "")
+
+    def test_server_errors_are_not_retried(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx2.Response(500, json={"error": {"message": "boom"}})
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                patch("minimalcode.provider.transport.time.sleep") as sleep,
+                self.assertRaises(ProviderError) as context,
+            ):
+                provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(sleep.call_count, 0)
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertIn("boom", context.exception.body or "")
 
     def test_responses_input_skips_empty_messages(self) -> None:
         seen_request: dict[str, object] = {}

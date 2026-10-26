@@ -64,6 +64,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
         self._pending += delta
         segments: list[tuple[str | None, list[str]]] = []
         self._consume(segments, final=False)
+        # Keep only the unconsumed tail: a held marker (a half-received `**` or
+        # fence) must survive into the next delta, while the consumed prefix is
+        # dropped so the buffer does not grow with the whole reply.
         self._pending = self._pending[self._cursor :]
         self._cursor = 0
         self._write(self._render_segments(segments))
@@ -74,6 +77,8 @@ class MarkdownHighlighter(CodeHighlightMixin):
         if self.enabled:
             segments: list[tuple[str | None, list[str]]] = []
             self._consume(segments, final=True)
+            # `_consume_code` only emits a token when a boundary character arrives,
+            # so the identifier ending the final line is still buffered here.
             self._flush_code_word(segments)
             self._write(self._render_segments(segments))
         self._reset_stream_state()
@@ -157,6 +162,8 @@ class MarkdownHighlighter(CodeHighlightMixin):
                 # Consume the marker (and its separating space) instead of
                 # printing it, so `## Title` renders as styled heading text the
                 # same way `**bold**` drops its delimiters.
+                # Exactly one space is consumed: any further spaces are heading
+                # content and would otherwise vanish from the rendered line.
                 body_end = level_end + 1 if text[level_end] == " " else level_end
                 self._advance(body_end - self._cursor)
                 self._line_kind = "heading"
@@ -300,6 +307,8 @@ class MarkdownHighlighter(CodeHighlightMixin):
                 return
 
             if self._inline_mode is None and self._line_kind == "list" and char == "[":
+                # Task-list boxes are only rewritten inside list items, so a
+                # literal `[x]` in prose is printed as written.
                 if text.startswith(("[x]", "[X]"), start):
                     self._append(segments, "☑", style)
                     self._advance(3)
@@ -365,13 +374,19 @@ class MarkdownHighlighter(CodeHighlightMixin):
         """Try to parse ``[label](url)`` without waiting on a partial label."""
         text = self._pending
         start = self._cursor
+        # The label search is capped at 512 characters past the `[`. An unclosed
+        # bracket would otherwise scan (and hold) the rest of the reply, and a
+        # label that long is not a link anyway.
         search_end = min(len(text), start + 513)
         newline = text.find("\n", start + 1, search_end)
         if newline >= 0:
+            # Labels never span lines, so the newline is a hard stop.
             search_end = newline
         close = text.find("]", start + 1, search_end)
         if close < 0:
             if not final and newline < 0 and search_end == len(text):
+                # The `]` may still arrive; consuming the `[` now would print it
+                # unstyled and drop the link if the label completes next delta.
                 return True
             self._append(segments, "[", None)
             self._advance(1)
@@ -480,6 +495,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
             marker = "**" if text.startswith("**", start) else "__"
             if text.startswith(marker, start):
                 if start + len(marker) < len(text) or final:
+                    # A closer preceded by whitespace is not a closer: in
+                    # `**bold **` the delimiter belongs to the text, so it is
+                    # printed in bold instead of ending the mode.
                     if self._previous.isspace():
                         self._append(segments, marker, self.palette["bold"])
                     else:
@@ -511,6 +529,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
     def _should_hold(self) -> bool:
         """Hold a single trailing marker character that may start a pair."""
         text = self._pending
+        # A delimiter can be split across deltas (`*` then `*`). Only a lone
+        # trailing marker is ambiguous, because any character after it already
+        # decides whether it opens a run.
         if len(text) - self._cursor == 1:
             return text[self._cursor] in "*_~`"
         return False
@@ -562,6 +583,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
 
     def _end_line(self) -> None:
         """Reset all per-line inline and code state."""
+        # Inline state deliberately does not survive the newline: an unclosed `**`
+        # or an unterminated string must not bleed styling into the next line of
+        # a stream that will never send the closing delimiter.
         self._at_line_start = True
         self._line_kind = "normal"
         self._heading_level = 0
@@ -614,6 +638,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
         if not text:
             return
         self.stream.write(text)
+        # Flushed per fragment so streamed text appears immediately; `flush` is
+        # looked up defensively because capture buffers and test doubles may not
+        # provide it.
         flush = getattr(self.stream, "flush", None)
         if flush is not None:
             flush()

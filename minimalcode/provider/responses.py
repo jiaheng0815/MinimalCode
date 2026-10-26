@@ -193,6 +193,9 @@ class ResponsesProtocolMixin:
         content_parts: list[str] = []
         fallback_text: list[str] = []
         call_states: dict[str, dict[str, str]] = {}
+        # Events address an item either by `item_id` or by `output_index`,
+        # depending on the implementation; this alias map lets both spellings
+        # resolve to the same accumulated state.
         output_keys: dict[str, str] = {}
         final_response: dict[str, Any] = {}
         usage: dict[str, int] = {}
@@ -204,6 +207,17 @@ class ResponsesProtocolMixin:
                 {"id": "", "name": "", "arguments": "", "index": str(len(call_states))},
             )
 
+        def merge_arguments(state: dict[str, str], arguments: Any) -> None:
+            """Apply a whole arguments value on top of accumulated deltas."""
+            if isinstance(arguments, str):
+                # Whole-string events (`output_item.*`, `arguments.done`) carry the
+                # finished JSON string, so they replace streamed deltas; an empty
+                # string only stands in when nothing was streamed at all.
+                if arguments or not state["arguments"]:
+                    state["arguments"] = arguments
+            elif isinstance(arguments, dict):
+                state["arguments"] = tool_arguments(arguments)
+
         def update_call(item: dict[str, Any], key: str) -> None:
             """Merge a function-call item into its accumulated state."""
             state = state_for(key)
@@ -213,15 +227,13 @@ class ResponsesProtocolMixin:
                 state["id"] = str(item["id"])
             if item.get("name"):
                 state["name"] = str(item["name"])
-            arguments = item.get("arguments")
-            if isinstance(arguments, str):
-                if arguments or not state["arguments"]:
-                    state["arguments"] = arguments
-            elif isinstance(arguments, dict):
-                state["arguments"] = tool_arguments(arguments)
+            merge_arguments(state, item.get("arguments"))
 
         def add_fallback_text(text: str) -> None:
             """Remember completed text for servers that omit delta events."""
+            # Several implementations stream only `output_text.done` and then
+            # repeat the same text in the completed message item; dedupe so the
+            # fallback path cannot print the answer twice.
             if text and text not in fallback_text:
                 fallback_text.append(text)
 
@@ -299,11 +311,11 @@ class ResponsesProtocolMixin:
                         )
                         key = output_keys.get(raw_key, raw_key)
                         state = state_for(key)
+                        # Only the string form is accepted here, matching the
+                        # delta event above; object arguments arrive via items.
                         arguments = event.get("arguments")
-                        if isinstance(arguments, str) and (
-                            arguments or not state["arguments"]
-                        ):
-                            state["arguments"] = arguments
+                        if isinstance(arguments, str):
+                            merge_arguments(state, arguments)
                         continue
                     if event_type == "response.output_item.done":
                         item = event.get("item")
@@ -361,6 +373,9 @@ class ResponsesProtocolMixin:
         if final_response:
             finish_reason = self._response_finish(final_response, bool(tool_calls))
         else:
+            # Neither `response.completed` nor `response.incomplete` arrived, so
+            # the stream was cut short; reporting a clean stop here would let a
+            # truncated answer or half-received tool call through, as with Chat.
             finish_reason = "incomplete"
         return ProviderReply(
             content="".join(content_parts),

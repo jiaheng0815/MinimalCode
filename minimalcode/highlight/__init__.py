@@ -1,9 +1,17 @@
 """Streamed Markdown rendering and terminal color helpers.
 
-The renderer is split into palette, sanitizer, code-token, Markdown state, and
-terminal capability modules. ``__all__`` is the complete public surface; the
-private helpers that lived on the pre-0.7 single ``highlight`` module are
-imported from the submodule that defines them.
+The renderer turns assistant deltas into styled terminal output as they arrive,
+so text appears while the model is still producing it, and it strips terminal
+control sequences from untrusted text before that text reaches a real terminal.
+``__all__`` is the complete public surface: the renderer, the sanitizer and its
+one-shot wrapper, the palette constants, and the helpers that color an activity
+tag or remove SGR codes. Deciding what to print, drawing progress indicators, and
+reading theme settings belong to ``cli``/``agent``, and the parser covers the
+Markdown this project emits rather than all of CommonMark. Invariants: every byte
+of untrusted input passes through ``TerminalSanitizer`` first, and with color
+disabled the renderer writes the original Markdown unchanged so redirected and
+JSON output stay parseable; the private helpers that lived on the pre-0.7 single
+``highlight`` module are imported from the submodule that defines them.
 """
 
 from __future__ import annotations

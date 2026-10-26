@@ -100,6 +100,9 @@ class ChatProtocolMixin:
     ) -> ProviderReply:
         """Accumulate content, tool-call fragments, usage, and finish state."""
         content_parts: list[str] = []
+        # Calls arrive as fragments keyed by `index`: id and name are sent once,
+        # while the arguments JSON string is split across many chunks, so each
+        # entry accumulates instead of being overwritten.
         calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
         saw_terminal = False
@@ -157,6 +160,9 @@ class ChatProtocolMixin:
                         try:
                             index = int(raw_call.get("index", len(calls)))
                         except (TypeError, ValueError):
+                            # Some OpenAI-compatible servers omit `index`; the
+                            # number of calls seen so far is then the only
+                            # ordering signal available.
                             index = len(calls)
                         entry = calls.setdefault(
                             index,
@@ -180,6 +186,9 @@ class ChatProtocolMixin:
             raise ProviderError(f"provider stream interrupted: {exc}") from exc
 
         tool_calls: list[ToolCall] = []
+        # Sorting by stream index replays the calls in the order the model emitted
+        # them; dict insertion order can differ when a later chunk fills in an
+        # earlier index.
         for index in sorted(calls):
             entry = calls[index]
             if not entry["name"]:
@@ -199,6 +208,9 @@ class ChatProtocolMixin:
         elif finish_reason is None:
             finish_reason = "tool_calls" if tool_calls else "stop"
         if not content_parts and not tool_calls and not saw_terminal:
+            # `saw_terminal` is re-read here on purpose: a stream that terminated
+            # cleanly with no content is a legal empty answer, while one that died
+            # without a terminal event is a broken response.
             raise ProviderError("provider returned an empty stream")
         return ProviderReply(
             content="".join(content_parts),
@@ -266,6 +278,8 @@ class ChatProtocolMixin:
         """Request a non-streaming reply, accepting SSE if the server sends it."""
         response = self._open(payload)
         try:
+            # Some gateways ignore `stream: false` and answer with SSE anyway, so
+            # the content type, not the request flag, selects the parser.
             if is_event_stream(response):
                 return self._parse_chat_stream(response.iter_lines(), on_text=on_text)
             try:

@@ -7,7 +7,13 @@ import re
 _NUMBER_RE = re.compile(
     r"(?<![\w.])-?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?!\w)"
 )
+# Kebab-case names (CSS properties, HTML attributes) and the shell ``$VAR`` form
+# share a style because the tokenizer has no per-language grammar to tell them
+# apart; identifiers with a single dash would otherwise read as names.
 _VARIABLE_RE = re.compile(r"\$(?:\w+:)?\w+|\b[A-Za-z_]\w*-\w+\b")
+# One merged set for every language the agent prints. Detecting the language per
+# fence would add grammars and a dependency; a shared set only miscolors a word
+# that means something else in another language, which is cosmetic.
 _KEYWORDS = {
     "and",
     "as",
@@ -211,6 +217,9 @@ class CodeHighlightMixin:
 
         if char.isalnum() or char in "_$:.-":
             # Buffer identifiers so the whole token can be classified at once.
+            # The punctuation is part of the token as well: keeping `a.b`,
+            # `mod:Class`, and `x-2` together stops them being split into name and
+            # number fragments that get two different colors mid-identifier.
             self._code_word.append(char)
             self._advance(1)
             self._code_last = char
@@ -230,6 +239,9 @@ class CodeHighlightMixin:
         self._code_word.clear()
         if not word:
             return
+        # `fullmatch` rather than a substring test: the buffer already holds one
+        # complete token, so a partial match would style `1.2.3` or `a-2` as a
+        # number or variable and leave the rest of the token uncolored.
         if _KEYWORD_RE.fullmatch(word):
             style = self.palette["code_keyword"]
         elif _NUMBER_RE.fullmatch(word):
@@ -241,7 +253,7 @@ class CodeHighlightMixin:
         self._append(segments, word, style)
 
     def _reset_code_line(self) -> None:
-        """Reset per-line string/comment state while keeping the word buffer."""
+        """Reset per-line string, comment, and token state."""
         self._code_comment = False
         self._code_quote = None
         self._code_escape = False

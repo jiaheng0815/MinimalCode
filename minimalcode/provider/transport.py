@@ -21,6 +21,9 @@ _RETRYABLE_CONNECTION_ERRORS = (
 _CONNECTION_ATTEMPTS = 11  # the first try plus 10 retries
 _CONNECTION_BACKOFF_SECONDS = 0.5
 _CONNECTION_BACKOFF_CAP_SECONDS = 8.0
+# Backoff runs 0.5, 1, 2, 4, then 8 seconds per attempt, so all 11 attempts span
+# roughly a minute: long enough to ride out a provider hiccup, short enough that
+# a dead endpoint still fails inside one agent turn.
 
 
 def connection_backoff(attempt: int) -> float:
@@ -48,7 +51,9 @@ class TransportMixin:
         """
         stream = bool(payload.get("stream"))
         last_error: ProviderError | None = None
-        connection_attempt = 0
+        # Counts failures, not requests: the status retry below is charged outside
+        # this budget, so one call issues at most _CONNECTION_ATTEMPTS + 1 requests.
+        connection_failures = 0
         status_retried = False
         while True:
             try:
@@ -58,16 +63,16 @@ class TransportMixin:
                 response = self._client.send(request, stream=stream)
             except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
-                connection_attempt += 1
-                if connection_attempt >= _CONNECTION_ATTEMPTS or not isinstance(
+                connection_failures += 1
+                if connection_failures >= _CONNECTION_ATTEMPTS or not isinstance(
                     exc, _RETRYABLE_CONNECTION_ERRORS
                 ):
                     break
-                delay = connection_backoff(connection_attempt - 1)
+                delay = connection_backoff(connection_failures - 1)
                 if self.notify is not None:
                     self.notify(
                         "[retry] provider did not respond; attempt "
-                        f"{connection_attempt}/{_CONNECTION_ATTEMPTS - 1} "
+                        f"{connection_failures}/{_CONNECTION_ATTEMPTS - 1} "
                         f"in {delay:g}s ({exc})"
                     )
                 time.sleep(delay)
@@ -94,10 +99,17 @@ class TransportMixin:
                 )
             finally:
                 response.close()
+            # Rate limits and unavailable responses get one retry, after honouring
+            # Retry-After; the flag is never reset, so a repeated 429/503 is
+            # reported instead of looping. Other statuses are final, because the
+            # provider may already have started (and billed) a generation.
             if status_code not in {429, 503} or status_retried:
                 break
             status_retried = True
             try:
+                # Retry-After is seconds in practice. The floor keeps "0" from
+                # collapsing the single status retry into an immediate repeat;
+                # the ceiling stops a provider from parking the turn for minutes.
                 delay = min(max(float(retry_after), 0.2), 5.0)
             except ValueError:
                 delay = 1.0

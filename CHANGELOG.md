@@ -1,5 +1,21 @@
 # 更新日志
 
+## 0.8.0 - 2026-10-26
+
+### 变更
+
+- 为 `tools`、`sandbox`、`provider`、`highlight` 四个包补齐包级 docstring：每个包说明它解决什么问题、`__all__` 里的公开名字、与相邻包的分工边界，以及必须遵守的不变量。
+- `provider` 与 `highlight` 的实现补齐「为什么」注释：重试预算与退避、`Retry-After` 的上下界、流式工具调用分片累积、Responses 的 `item_id`/`output_index` 双寻址、增量渲染器为何要暂扣不完整标记、终端转义序列的识别与上限。
+- `provider.responses` 的 arguments 合并规则抽成具名 helper `merge_arguments`，`update_call` 与 `function_call_arguments.done` 共用同一份实现；行为不变。
+- `provider.transport` 的重试计数器改名为 `connection_failures`，并注明状态重试不计入连接预算。
+- 版本号升级到 0.8.0。
+
+### 测试
+
+- 新增供应商重试策略测试：429/503 只重试一次、`Retry-After` 的 0.2 秒下界与 5 秒上界、无法解析的 `Retry-After` 回退 1 秒、5xx 不重试，以及连接预算耗尽后状态重试仍然可用（单次调用最多 `_CONNECTION_ATTEMPTS + 1` 个请求）。
+
+本版本没有 CLI、配置或工具行为变化；`__all__` 公开面与 0.7.0 一致。
+
 ## 0.7.0 - 2026-10-26
 
 ### 破坏性变更

@@ -1,6 +1,7 @@
 # Compatibility and 0.7.0 migration
 
-Applies to MinimalCode 0.7.0.
+Applies to MinimalCode 0.8.0. The 0.6 → 0.7 migration below still describes the
+current public surface; 0.8.0 added no further breaking changes.
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.

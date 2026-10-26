@@ -63,12 +63,17 @@ def content_text(value: Any) -> str:
                 parts.append(item)
             elif isinstance(item, dict) and isinstance(item.get("text"), str):
                 parts.append(item["text"])
+        # No separator is inserted because this same helper flattens streaming
+        # deltas and finished messages; adding one would make the reassembled
+        # text differ from what the model actually produced.
         return "".join(parts)
     return ""
 
 
 def tool_arguments(value: Any) -> str:
     """Return tool arguments as the JSON string the message format requires."""
+    # The wire format wants a JSON *string*, and "" is what models emit for a
+    # no-argument call; leaving it empty would fail json.loads on the next turn.
     if isinstance(value, str):
         return value or "{}"
     if value is None:
