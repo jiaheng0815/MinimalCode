@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 
 from .config import Settings
 from .shell import ShellSpec
-
-import platform
 
 DEFAULT_SYSTEM_PROMPT = """\
 你是 MinimalCode，一个终端编码代理。
@@ -65,9 +64,7 @@ def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:
     base = (
         custom_prompt.strip()
         or DEFAULT_SYSTEM_PROMPT.format(
-            cwd=cwd,
-            shell=shell.label,
-            platform=platform.system()
+            cwd=cwd, shell=shell.label, platform=platform.system()
         ).strip()
     )
     remaining = max(0, max_chars - len(base))
