@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -9,6 +10,21 @@ import httpx2
 from . import __version__
 from .config import provider_api_key
 from .errors import ToolError
+
+_RETRYABLE_CONNECTION_ERRORS = (
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.RemoteProtocolError,
+)
+_CONNECTION_ATTEMPTS = 11
+_CONNECTION_BACKOFF_SECONDS = 0.5
+_CONNECTION_BACKOFF_CAP_SECONDS = 8.0
+
+
+def _connection_backoff(attempt: int) -> float:
+    """Return capped exponential backoff for a zero-based retry attempt."""
+    delay = _CONNECTION_BACKOFF_SECONDS * (2**attempt)
+    return min(delay, _CONNECTION_BACKOFF_CAP_SECONDS)
 
 
 class ProviderWebClient:
@@ -79,6 +95,7 @@ class ProviderWebClient:
             raise ToolError(f"provider {name!r} has invalid web result limits")
         if self.max_content_chars < 1:
             raise ToolError(f"provider {name!r} has invalid max_content_chars")
+        self._timeout_seconds = timeout
 
         api_key = provider_api_key(web) or provider_api_key(config)
         headers = {
@@ -93,7 +110,7 @@ class ProviderWebClient:
         if api_key and not any(key.lower() == "authorization" for key in headers):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx2.Client(
-            timeout=timeout,
+            timeout=httpx2.Timeout(timeout, connect=min(20.0, timeout)),
             headers=headers,
             transport=transport,
             follow_redirects=True,
@@ -110,26 +127,51 @@ class ProviderWebClient:
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled or self._client is None:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
-        response: httpx2.Response | None = None
-        try:
-            response = self._client.post(f"{self._endpoint}/{path}", json=payload)
-            if response.status_code >= 400:
-                detail = response.text[:2000]
-                raise ToolError(
-                    f"provider web request failed with HTTP "
-                    f"{response.status_code}: {detail}"
+        deadline = time.monotonic() + self._timeout_seconds
+        attempts = 0
+        last_error: httpx2.HTTPError | None = None
+        while attempts < _CONNECTION_ATTEMPTS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            attempts += 1
+            response: httpx2.Response | None = None
+            try:
+                timeout = httpx2.Timeout(remaining, connect=min(20.0, remaining))
+                response = self._client.post(
+                    f"{self._endpoint}/{path}", json=payload, timeout=timeout
                 )
-            data = response.json()
-        except (httpx2.HTTPError, httpx2.InvalidURL) as exc:
-            raise ToolError(f"provider web request failed: {exc}") from exc
-        except ValueError as exc:
-            raise ToolError("provider web request returned invalid JSON") from exc
-        finally:
-            if response is not None:
-                response.close()
-        if not isinstance(data, dict):
-            raise ToolError("provider web request returned an invalid response")
-        return data
+                if response.status_code >= 400:
+                    detail = response.text[:2000]
+                    raise ToolError(
+                        f"provider web request failed with HTTP "
+                        f"{response.status_code}: {detail}"
+                    )
+                data = response.json()
+            except _RETRYABLE_CONNECTION_ERRORS as exc:
+                last_error = exc
+                if attempts >= _CONNECTION_ATTEMPTS:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(_connection_backoff(attempts - 1), remaining)
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            except (httpx2.HTTPError, httpx2.InvalidURL) as exc:
+                raise ToolError(f"provider web request failed: {exc}") from exc
+            except ValueError as exc:
+                raise ToolError("provider web request returned invalid JSON") from exc
+            finally:
+                if response is not None:
+                    response.close()
+            if not isinstance(data, dict):
+                raise ToolError("provider web request returned an invalid response")
+            return data
+        raise ToolError(
+            f"provider web request failed after {attempts} attempts: {last_error}"
+        ) from last_error
 
     def search(
         self,

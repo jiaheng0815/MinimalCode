@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx2
 
@@ -80,6 +82,63 @@ class WebToolTests(unittest.TestCase):
             [request.url.path for request in requests],
             ["/v1/tools/search", "/v1/tools/fetch"],
         )
+
+    def test_search_retries_a_transient_tls_failure(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx2.ConnectError(
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation "
+                    "of protocol"
+                )
+            return httpx2.Response(
+                200,
+                json={
+                    "results": [{"title": "Recovered", "url": "https://example.com"}]
+                },
+            )
+
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with mock.patch.object(time, "sleep") as sleep:
+                result = client.search("minimalcode")
+        finally:
+            client.close()
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(result["results"][0]["title"], "Recovered")
+        sleep.assert_called_once()
+
+    def test_search_stops_after_the_connection_retry_budget(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            raise httpx2.ConnectError("connection reset")
+
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                mock.patch.object(time, "sleep"),
+                self.assertRaisesRegex(ToolError, "after 11 attempts"),
+            ):
+                client.search("minimalcode")
+        finally:
+            client.close()
+
+        self.assertEqual(attempts, 11)
 
     def test_disabled_provider_hides_and_blocks_tools(self) -> None:
         disabled = ProviderWebClient("custom", _web_config(enabled=False))

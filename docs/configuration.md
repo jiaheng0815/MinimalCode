@@ -272,6 +272,11 @@ checks. The built-in DeepSeek provider enables them with:
 `api_key` or `api_key_env` inside `web_tools` override the provider credential.
 When omitted, the provider API key is reused.
 
+Web requests that fail before receiving a response (`ConnectError`,
+`ConnectTimeout`, and `RemoteProtocolError`) are retried with capped
+exponential backoff. The configured `timeout_seconds` bounds the whole request,
+including retries.
+
 Search results are normalized before they reach the model: non-object entries are
 dropped, at most the requested count (capped by `max_count`) results are kept,
 and every string field is truncated to `max_content_chars` with a
