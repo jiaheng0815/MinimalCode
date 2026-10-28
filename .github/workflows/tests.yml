@@ -35,3 +35,5 @@ jobs:
       - run: python -m compileall -q minimalcode tests main.py
       - run: ruff check minimalcode tests benchmarks main.py
       - run: ruff format --check minimalcode tests benchmarks main.py
+      - run: python -m pip wheel . --no-deps -w dist
+      - run: python -c "import glob, zipfile; names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert 'minimalcode/defaults.json' in names, names"

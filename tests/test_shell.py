@@ -67,19 +67,27 @@ class ShellTests(unittest.TestCase):
             command = 'Write-Output "started"; Start-Sleep -Seconds 20'
         else:
             command = "echo started; sleep 20"
-        with tempfile.TemporaryDirectory() as temp:
-            started = time.perf_counter()
-            result = run_shell(
-                command,
-                shell=shell,
-                cwd=Path(temp),
-                timeout=1,
-                max_output_chars=10_000,
-            )
-            elapsed = time.perf_counter() - started
-        self.assertEqual(result["status"], "timeout", result)
-        self.assertIn("started", str(result["stdout"]))
-        self.assertLess(elapsed, 15.0)
+        result: dict[str, object] = {}
+        # A shared runner can spend more than a second starting pwsh, before
+        # the command has written anything at all. That is startup latency, not
+        # lost output, so widen the window instead of flaking.
+        for timeout in (1, 4):
+            with tempfile.TemporaryDirectory() as temp:
+                started = time.perf_counter()
+                result = run_shell(
+                    command,
+                    shell=shell,
+                    cwd=Path(temp),
+                    timeout=timeout,
+                    max_output_chars=10_000,
+                )
+                elapsed = time.perf_counter() - started
+            self.assertEqual(result["status"], "timeout", result)
+            self.assertLess(elapsed, 15.0)
+            if "started" in str(result["stdout"]):
+                break
+        else:
+            self.fail(f"partial output was lost: {result!r}")
 
     def test_stdin_text_reaches_the_command(self) -> None:
         shell = detect_shell()

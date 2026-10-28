@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`0.8.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`1.0.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -37,7 +37,13 @@ minimalcode init
 
 要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
-## 从 0.6 升级到 0.7
+## 升级指南
+
+### 从 0.8 升级到 1.0
+
+1.0.0 是首个稳定版本。从 1.0 起，CLI 参数、配置键、JSON 输出字段、会话格式，以及 `tools`、`sandbox`、`provider`、`highlight` 四个包的 `__all__` 公开面在 1.x 内保持兼容。0.8 → 1.0 没有删除公开名字或 CLI 参数，但修复项里有两处可观察行为变化：`--json` 的 `usage` 改为本次运行（累计值在 `session_usage`），`import-pi` 默认不再复制 API key。详见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 从 0.6 升级到 0.7
 
 0.7.0 把 `tools`、`sandbox`、`provider`、`highlight` 四个大模块拆成了包，并在发布前移除了拆包过程中临时保留的旧名字回退。CLI、配置和工具行为没有变化；只有直接导入内部名字或 patch 内部函数的代码需要迁移：
 
@@ -47,7 +53,7 @@ minimalcode init
 
 完整对照表见 [docs/compatibility.md](docs/compatibility.md)。
 
-0.8.0 只补充文档与注释、补全供应商重试策略的测试，公开面与 0.7.0 一致，从 0.7 升级无需改代码。
+0.7 → 0.8 只补充文档与注释、补全供应商重试策略的测试，公开面与 0.7.0 一致，升级无需改代码。
 
 ## 快速开始
 
@@ -369,7 +375,7 @@ minimalcode/
 
 - [docs/architecture.md](docs/architecture.md)：请求链路、模块职责与性能取舍。
 - [docs/configuration.md](docs/configuration.md)：全部配置字段、默认值与安全边界。
-- [docs/compatibility.md](docs/compatibility.md)：0.6 → 0.7 的导入与 patch 迁移对照表。
+- [docs/compatibility.md](docs/compatibility.md)：1.0 兼容承诺、公开面定义，以及 0.6 → 0.7 的导入与 patch 迁移对照表。
 
 ## 后续工作
 

@@ -1,11 +1,19 @@
-# Compatibility and 0.7.0 migration
+# Compatibility and migration
 
-Applies to MinimalCode 0.8.0 and later. The 0.6 → 0.7 migration below still
-describes the current public surface; later releases added no further breaking
+Applies to MinimalCode 1.0.0 and later. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8 and 1.0 added no further breaking
 import changes (`minimalcode.httpclient` is a new module, not a renamed one).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
+
+## 1.0 compatibility promise
+
+Within the 1.x series (from 1.0.0 onward), the public names in each package's
+`__all__`, CLI flags, configuration keys, JSON output fields, and session file
+format remain compatible. Removals and behavior changes are recorded in
+`CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
+any release; import them from the module that defines them, as listed below.
 
 ## What changed in 0.7.0
 

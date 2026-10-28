@@ -10,12 +10,24 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["coding-agent", "cli", "terminal", "openai", "deepseek"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 dependencies = [
   "httpx2>=2.0,<3",
 ]
 
 [project.optional-dependencies]
-dev = ["ruff==0.17.2"]
+dev = ["ruff==0.17.3"]
 
 [project.scripts]
 minimalcode = "minimalcode.cli:main"
@@ -23,6 +35,7 @@ minimalcode = "minimalcode.cli:main"
 [project.urls]
 Repository = "https://github.com/jiaheng0815/MinimalCode"
 Issues = "https://github.com/jiaheng0815/MinimalCode/issues"
+Changelog = "https://github.com/jiaheng0815/MinimalCode/blob/main/CHANGELOG.md"
 
 [tool.setuptools.dynamic]
 version = {attr = "minimalcode.__version__"}

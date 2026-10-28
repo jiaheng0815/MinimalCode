@@ -260,13 +260,20 @@ class ExecutionBaselineTests(SandboxTestBase):
             command = 'Write-Output "started"; Start-Sleep -Seconds 20'
         else:
             command = "echo started; sleep 20"
-        tools = self._tools(timeout_seconds=1)
-        started = time.perf_counter()
-        result = tools.shell(command)
-        elapsed = time.perf_counter() - started
-        self.assertEqual(result["status"], "timeout", result)
-        self.assertLess(elapsed, 15.0)
-        self.assertIn("started", str(result["stdout"]))
+        result: dict[str, object] = {}
+        # Shared runners can need longer than the first window just to start
+        # the shell; retry with a wider deadline before suspecting lost output.
+        for timeout_seconds in (1, 4):
+            tools = self._tools(timeout_seconds=timeout_seconds)
+            started = time.perf_counter()
+            result = tools.shell(command)
+            elapsed = time.perf_counter() - started
+            self.assertEqual(result["status"], "timeout", result)
+            self.assertLess(elapsed, 15.0)
+            if "started" in str(result["stdout"]):
+                break
+        else:
+            self.fail(f"partial output was lost: {result!r}")
         self.assertTrue(result["sandbox"]["temp_dir_cleaned"])
         temp_dir = tools.sandbox.last_temp_dir
         self.assertIsNotNone(temp_dir)

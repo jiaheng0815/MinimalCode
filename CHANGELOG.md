@@ -1,26 +1,39 @@
 # 更新日志
 
-## 未发布
+## 1.0.0 - 2026-10-28
+
+首个稳定版本。从 1.0.0 起，1.x 系列保持 CLI 参数、配置键、JSON 输出字段、
+会话格式，以及 `minimalcode.tools`、`minimalcode.sandbox`、
+`minimalcode.provider`、`minimalcode.highlight` 四个包的 `__all__` 公开面兼容；
+内部模块与私有 helper 仍可能移动，迁移方式见
+[docs/compatibility.md](docs/compatibility.md)。
+
+### 破坏性变更
+
+- `--json` 的 `usage` 从会话累计值改为本次运行的用量，累计值移到 `session_usage`，并新增 `usage_estimated`。按旧语义读取 `usage` 的脚本需要改用 `session_usage`。
+- `import-pi` 不再默认把 Pi 里的 API key 复制进 `settings.json`：默认写入指向环境变量的 `api_key_env`，需要复制时显式加 `--secrets`。
 
 ### 修复
 
 - 本机供应商被环境代理劫持：三个 HTTP 客户端都继承 `trust_env`，`base_url` 指向环回地址时请求会被 Clash 之类的系统代理接管，`python -m unittest discover -s tests` 在配置了代理的机器上直接返回 502。新增 `minimalcode/httpclient.py` 统一客户端构造：环回地址和显式注入的 transport 默认不读环境代理，可用 `trust_env` 覆盖。三份重复的 header 构造与连接重试合并到这里，`vision` 因此获得与 Web 工具相同的重试。
 - `--session <path>` 会把任意文件当成会话并追加 JSONL（`minimalcode --session README.md "hi"` 会污染 README）：现在只接受 `.jsonl` 文件；会话文件里记录的 workspace 只有在该文件位于 `sessions/` 目录下时才被信任，避免任意 JSONL 把工具根目录指到别处。
 - token 估算按 `len(text) // 4` 计算，中文内容约少算 4 倍，而它同时是压缩阈值和无 usage 时的唯一数据源。现在按字符宽度加权（CJK/emoji 约 1 token/字符），估算结果在 CLI 标注 `(estimated)`，`--json` 里是 `usage_estimated`。
-- `--json` 的 `usage` 是会话累计值，和 stderr 打印的本次用量对不上：现在 `usage` 为本次运行，累计值改由 `session_usage` 输出。
 - 网络策略把命令里所有 token 都当作可执行名，`rg curl`、`git log --grep=curl`、`grep -c curl file` 都会被判定为联网命令而拒绝。现在只检查命令位置（含管道、`sudo`、`VAR=1` 前缀和 `pwsh -Command` / `bash -c` 的内联命令），同时仍能识别这些形式中的真实网络命令。
 - 基准报告在只有 MinimalCode 运行时仍输出 `Pi 0/0` 对比表格，读起来像对比结果。现在只列出实际运行过的 agent，缺少 Pi 时明确写“未运行”，并按新格式重新生成了 2026-10-26 的结果文件。
 
 ### 变更
 
 - 删除 `minimalcode.shell._prefix_command` 兼容别名，与 0.7 起“不为内部名字保留兼容层”的约定一致。
-- `import-pi` 不再默认把 Pi 里的 API key 复制进 `settings.json`：默认写入指向环境变量的 `api_key_env`，需要复制时显式加 `--secrets`。
 - 清理本地 `build/` 与 `minimalcode.egg-info/` 残留。
+- 版本号升级到 1.0.0。公开 `__all__`、CLI 参数和配置键与 0.8.0 一致；行为变化见“破坏性变更”和上文的修复项。
+- 开发工具升级到 `ruff==0.17.3`，现有检查与格式化结果不变。
+- CI 增加 wheel 构建，并校验包内 `defaults.json` 确实进入 wheel，避免 1.0 的打包元数据或包数据回归。
 
 ### 测试
 
 - 新增 `tests/test_httpclient.py`：环回地址绕过环境代理、注入的 transport 不被代理映射遮蔽、退避上限。
 - 新增回归测试：非 `.jsonl` 会话文件被拒绝、会话记录的外部 workspace 不被信任、命令参数中的网络命令名不误报、CJK 与 ASCII 的估算差异、无 usage 时的估算标记、vision 连接重试、`--json` 的 usage 字段。
+- 修复共享 runner 上超时测试的偶发失败：pwsh 在当前 1 秒窗口内还没启动完时，部分输出断言会看到空 stdout；现在先用 1 秒、再用 4 秒窗口重试，启动延迟不再被误判为输出丢失。
 
 ## 0.8.0 - 2026-10-26
 
