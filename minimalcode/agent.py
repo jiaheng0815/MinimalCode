@@ -171,6 +171,7 @@ class AgentResult:
     text: str
     completed: bool
     usage: dict[str, int] = field(default_factory=dict)
+    run_usage: dict[str, int] = field(default_factory=dict)
     turns: int = 0
 
 
@@ -352,6 +353,7 @@ class Agent:
         if not user_text.strip():
             raise ValueError("user message is empty")
         self._repair_history()
+        usage_before = dict(self.total_usage)
         self.session.append_message({"role": "user", "content": user_text})
         final_text = ""
         final_completed = False
@@ -428,6 +430,10 @@ class Agent:
             text=final_text,
             completed=final_completed,
             usage=dict(self.total_usage),
+            run_usage={
+                key: value - usage_before.get(key, 0)
+                for key, value in self.total_usage.items()
+            },
             turns=turn,
         )
 

@@ -17,6 +17,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，可用 `SYSTEM.md` 替换默认系统提示词。
 - **协议**：OpenAI Chat Completions 与 OpenAI Responses，其他兼容供应商只需配置。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
+- **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。
 
 ## 安装
 
@@ -94,7 +95,7 @@ minimalcode [prompt ...] [options]
 | `--sandbox-timeout <sec>` | 单条命令的硬超时 |
 | `--sandbox-max-output <chars>` | 单条命令返回的 stdout/stderr 上限 |
 | `--sandbox-allow-sensitive` | 允许访问 `.env`、私钥等敏感文件 |
-| `--quiet` | 隐藏工具活动 |
+| `--quiet` | 隐藏工具活动和 token 用量摘要 |
 | `--no-highlight` | 关闭 Markdown 高亮 |
 | `--version` | 打印版本 |
 

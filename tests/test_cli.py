@@ -64,7 +64,11 @@ class StubAgent:
         if self._failures:
             self._failures -= 1
             raise OSError("simulated failure")
-        return SimpleNamespace(text="done\n", completed=True)
+        return SimpleNamespace(
+            text="done\n",
+            completed=True,
+            usage={"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+        )
 
     def status(self) -> dict:
         return {}
@@ -301,6 +305,100 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stub.prompts, ["first", "second"])
             self.assertIn("simulated failure", stderr.getvalue())
+
+    def test_one_shot_prints_token_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = FakeCliProvider()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = run(
+                    [
+                        "--no-session",
+                        "--home",
+                        str(home),
+                        "--cwd",
+                        str(workspace),
+                        "say completed",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("completed", stdout.getvalue())
+            self.assertIn("[usage]", stderr.getvalue())
+            self.assertIn("5 prompt", stderr.getvalue())
+            self.assertIn("1 completion", stderr.getvalue())
+            self.assertIn("6 total", stderr.getvalue())
+
+    def test_quiet_one_shot_hides_token_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = FakeCliProvider()
+            stderr = io.StringIO()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                code = run(
+                    [
+                        "--quiet",
+                        "--no-session",
+                        "--home",
+                        str(home),
+                        "--cwd",
+                        str(workspace),
+                        "say completed",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertNotIn("[usage]", stderr.getvalue())
+
+    def test_interactive_prints_token_usage_after_each_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=False,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["first", "second", "/exit"])
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr.getvalue().count("[usage]"), 2)
+            self.assertIn("9 total", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from .config import (
     write_settings,
 )
 from .errors import ConfigError, MinimalCodeError, ProviderError
-from .highlight import sanitize_terminal_text
+from .highlight import sanitize_terminal_text, style_activity_tag
 from .sandbox import NETWORK_POLICIES, SANDBOX_BACKENDS
 
 if TYPE_CHECKING:
@@ -109,7 +109,11 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Allow sandboxed tools to read and write credential-like files",
     )
-    parser.add_argument("--quiet", action="store_true", help="Hide tool activity")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Hide tool activity and the token usage summary",
+    )
     parser.add_argument(
         "--no-highlight",
         action="store_true",
@@ -370,6 +374,37 @@ def _ensure_newline(result: AgentResult) -> None:
         print()
 
 
+def _format_usage(usage: dict[str, int]) -> str:
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    completion = int(usage.get("completion_tokens", 0) or 0)
+    total = int(usage.get("total_tokens", 0) or 0) or prompt + completion
+    if not (prompt or completion or total):
+        return ""
+    parts = [
+        f"{prompt:,} prompt",
+        f"{completion:,} completion",
+        f"{total:,} total",
+    ]
+    cached = int(usage.get("cached_tokens", 0) or 0)
+    reasoning = int(usage.get("reasoning_tokens", 0) or 0)
+    if cached:
+        parts.append(f"{cached:,} cached")
+    if reasoning:
+        parts.append(f"{reasoning:,} reasoning")
+    return "[usage] " + " | ".join(parts)
+
+
+def _print_usage(result: AgentResult) -> None:
+    # The summary goes to stderr so piped stdout still contains only the answer.
+    usage = getattr(result, "run_usage", None) or getattr(result, "usage", None)
+    if not usage:
+        return
+    line = _format_usage(usage)
+    if line:
+        print(style_activity_tag(line, sys.stderr), file=sys.stderr)
+        sys.stderr.flush()
+
+
 def _handle_effort(agent: Agent, text: str) -> None:
     parts = text.split()
     if len(parts) > 2:
@@ -408,6 +443,8 @@ def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     else:
         _ensure_newline(result)
+        if not args.quiet:
+            _print_usage(result)
     return 0 if result.completed else 1
 
 
@@ -505,6 +542,8 @@ def _interactive(
         try:
             result = agent.run(text)
             _ensure_newline(result)
+            if not args.quiet:
+                _print_usage(result)
         except KeyboardInterrupt:
             print("\ncancelled", file=sys.stderr)
         except (MinimalCodeError, OSError) as exc:

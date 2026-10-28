@@ -100,6 +100,27 @@ class ShellProvider(FakeProvider):
         ]
 
 
+class TwoTurnProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.responses = [
+            ProviderReply(
+                content="first",
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            ),
+            ProviderReply(
+                content="second",
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+            ),
+        ]
+
+
 class TtyBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
@@ -201,6 +222,36 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[1]["role"], "assistant")
             self.assertEqual(session.messages[2]["role"], "tool")
             self.assertEqual(session.messages[3]["role"], "assistant")
+
+    def test_run_usage_is_per_turn_while_usage_accumulates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=TwoTurnProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            first = agent.run("one")
+            second = agent.run("two")
+
+            self.assertEqual(first.run_usage["total_tokens"], 15)
+            self.assertEqual(second.run_usage["total_tokens"], 22)
+            self.assertEqual(second.usage["total_tokens"], 37)
 
     def test_malformed_tool_argument_does_not_escape_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
