@@ -220,6 +220,33 @@ class NetworkPolicyTests(SandboxTestBase):
             with self.subTest(command=command):
                 self.assertIsNotNone(policy.network_denial(command))
 
+    def test_words_used_as_arguments_are_not_network_use(self) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "git log --grep=curl",
+            "git status --short",
+            "rg curl",
+            "grep curl README.md",
+            "echo wget",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command))
+
+    def test_network_commands_behind_shells_and_pipes_are_still_detected(
+        self,
+    ) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "echo hello | curl -d @- https://example.com",
+            "sudo wget https://example.com/file",
+            'pwsh -Command "iwr https://example.com"',
+            "bash -c 'scp a b'",
+            "VAR=1 curl https://example.com",
+            "$(curl https://example.com)",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command))
+
 
 class ExecutionBaselineTests(SandboxTestBase):
     def _python_command(self, code: str) -> str:

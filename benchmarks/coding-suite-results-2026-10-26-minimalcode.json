@@ -1,14 +1,6 @@
 {
   "tasks": 30,
   "agents": {
-    "pi": {
-      "passed": 0,
-      "tasks": 0,
-      "mean_tokens": 0.0,
-      "mean_time_ms": 0.0,
-      "median_time_ms": 0,
-      "total_cost_usd": 0
-    },
     "minimalcode": {
       "passed": 25,
       "tasks": 30,
@@ -653,5 +645,8 @@
       "grader_output": "HIDDEN TESTS PASSED"
     }
   ],
-  "budget_exhausted": false
+  "budget_exhausted": false,
+  "not_run_agents": [
+    "pi"
+  ]
 }

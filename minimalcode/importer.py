@@ -77,7 +77,7 @@ def import_pi_settings(
     *,
     destination_home: str | Path,
     pi_home: str | Path | None = None,
-    include_secrets: bool = True,
+    include_secrets: bool = False,
     overwrite: bool = False,
 ) -> ImportResult:
     try:

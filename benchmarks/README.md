@@ -12,6 +12,10 @@ python benchmarks/deepseek_responses.py --runs 3
 The script alternates agent order, stops on the first failure, and never retries
 automatically. It deletes temporary configs and workspaces when complete.
 
+A report only compares agents that actually produced runs. When Pi is not
+installed the suite can still be run with `--agent minimalcode`, and the result
+file then says so instead of printing a `Pi 0/0` column.
+
 Current high-thinking result:
 [results-2026-10-24-deepseek-responses-high.md](results-2026-10-24-deepseek-responses-high.md).
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import httpx2
 
@@ -133,6 +135,27 @@ class VisionClientTests(unittest.TestCase):
             client.close()
         self.assertTrue(text.endswith("<description truncated>"))
         self.assertLessEqual(len(text), 100 + len("\n<description truncated>"))
+
+    def test_describe_retries_a_transient_connection_failure(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx2.ConnectError("connection reset")
+            return httpx2.Response(
+                200, json={"choices": [{"message": {"content": "recovered"}}]}
+            )
+
+        client = _describe_client(handler)
+        try:
+            with mock.patch.object(time, "sleep"):
+                text = client.describe("image/png", PNG_BYTES)
+        finally:
+            client.close()
+        self.assertEqual(attempts, 2)
+        self.assertEqual(text, "recovered")
 
     def test_invalid_vision_settings_are_rejected(self) -> None:
         cases = (

@@ -171,6 +171,58 @@ class SessionTests(unittest.TestCase):
                         )
                     )
 
+    def test_non_session_file_is_rejected_before_it_is_appended_to(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            notes = root / "notes.txt"
+            notes.write_text("keep me\n", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                store.resolve(str(notes), workspace)
+            with self.assertRaises(ValueError):
+                store.load(notes, default_workspace=workspace)
+
+            self.assertEqual(notes.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_recorded_workspace_outside_the_store_is_not_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            elsewhere = root / "elsewhere"
+            elsewhere.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            lines = session.path.read_text(encoding="utf-8").splitlines(keepends=True)
+            meta = json.loads(lines[0])
+            meta["workspace"] = str(elsewhere)
+            relocated = root / "relocated.jsonl"
+            relocated.write_text(
+                json.dumps(meta) + "\n" + "".join(lines[1:]), encoding="utf-8"
+            )
+
+            loaded = store.load(relocated, default_workspace=workspace)
+
+            self.assertEqual(loaded.cwd, workspace.resolve())
+            self.assertNotEqual(loaded.cwd, elsewhere.resolve())
+
+    def test_recorded_workspace_inside_the_store_is_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+
+            loaded = store.load(session.path, default_workspace=root)
+
+            self.assertEqual(loaded.cwd, workspace.resolve())
+
     def test_usage_write_failure_does_not_abort_the_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

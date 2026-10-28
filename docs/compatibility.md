@@ -1,7 +1,8 @@
 # Compatibility and 0.7.0 migration
 
-Applies to MinimalCode 0.8.0. The 0.6 → 0.7 migration below still describes the
-current public surface; 0.8.0 added no further breaking changes.
+Applies to MinimalCode 0.8.0 and later. The 0.6 → 0.7 migration below still
+describes the current public surface; later releases added no further breaking
+import changes (`minimalcode.httpclient` is a new module, not a renamed one).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
@@ -54,7 +55,7 @@ CLI flags, configuration keys, session files, and tool behavior are unchanged.
 | `minimalcode.sandbox._number` | `minimalcode.sandbox.policy._number` |
 | `minimalcode.sandbox._string_tuple` | `minimalcode.sandbox.policy._string_tuple` |
 | `minimalcode.provider.time` | `minimalcode.provider.transport.time` |
-| `minimalcode.provider._connection_backoff` | `minimalcode.provider.transport.connection_backoff` |
+| `minimalcode.provider._connection_backoff` | `minimalcode.httpclient.connection_backoff` |
 | `minimalcode.provider._content_text` | `minimalcode.provider.common.content_text` |
 | `minimalcode.provider._decode_json_body` | `minimalcode.provider.common.decode_json_body` |
 | `minimalcode.provider._is_event_stream` | `minimalcode.provider.common.is_event_stream` |

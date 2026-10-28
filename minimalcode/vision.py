@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import base64
 import math
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx2
 
-from . import __version__
 from .config import provider_api_key
 from .errors import ToolError
+from .httpclient import build_client, build_headers, post_json
 
 # The provider judges formats by content, not by file name, so the tool does the
 # same and labels the data URL with the detected type.
@@ -112,23 +113,14 @@ class ProviderVisionClient:
             )
 
         api_key = provider_api_key(vision) or provider_api_key(config)
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": f"MinimalCode/{__version__}",
-        }
-        custom_headers = vision.get("headers")
-        if isinstance(custom_headers, dict):
-            headers.update(
-                {str(key): str(value) for key, value in custom_headers.items()}
-            )
-        if api_key and not any(key.lower() == "authorization" for key in headers):
-            headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx2.Client(
+        self._client = build_client(
+            base_url=base_url,
+            headers=build_headers(api_key, vision.get("headers")),
             timeout=timeout,
-            headers=headers,
             transport=transport,
-            follow_redirects=True,
+            trust_env=vision.get("trust_env", config.get("trust_env")),
         )
+        self._timeout_seconds = timeout
         self._endpoint = (
             base_url
             if base_url.endswith("/chat/completions")
@@ -175,23 +167,14 @@ class ProviderVisionClient:
                 }
             ],
         }
-        response: httpx2.Response | None = None
-        try:
-            response = self._client.post(self._endpoint, json=payload)
-            if response.status_code >= 400:
-                detail = response.text[:2000]
-                raise ToolError(
-                    f"provider vision request failed with HTTP "
-                    f"{response.status_code}: {detail}"
-                )
-            body = response.json()
-        except (httpx2.HTTPError, httpx2.InvalidURL) as exc:
-            raise ToolError(f"provider vision request failed: {exc}") from exc
-        except ValueError as exc:
-            raise ToolError("provider vision request returned invalid JSON") from exc
-        finally:
-            if response is not None:
-                response.close()
+        body = post_json(
+            self._client,
+            self._endpoint,
+            payload,
+            label="vision",
+            timeout=self._timeout_seconds,
+            deadline=time.monotonic() + self._timeout_seconds,
+        )
 
         text = self._parse_text(body)
         if not text.strip():

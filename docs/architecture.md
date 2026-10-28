@@ -23,6 +23,7 @@ CLI
 | Module | Responsibility |
 |---|---|
 | `config.py` | Settings merge, validation, environment expansion, atomic config writes |
+| `httpclient.py` | Client construction, proxy policy for loopback targets, bounded connection retries |
 | `sandbox/` | Sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
@@ -109,6 +110,9 @@ The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 ## Performance choices
 
 - One reusable `httpx2.Client` maintains the connection pool.
+- All three HTTP clients are built by `httpclient.build_client`, so proxy rules and retry policy cannot drift between the protocol, web, and vision paths.
+- Loopback endpoints ignore environment proxies; an injected transport is never shadowed by proxy mounts.
+- Token estimates weight CJK and emoji characters at roughly one token each instead of `len / 4`, and estimated usage is marked as such.
 - Tool schemas are static; the system prompt is built once per agent rather than once per turn.
 - `rg` is used when available; a timeout-bounded Python fallback keeps commands working without it.
 - Shell and search output is captured through bounded head/tail buffers, so a noisy command cannot exhaust memory or disk.

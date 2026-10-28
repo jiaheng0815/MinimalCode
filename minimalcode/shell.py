@@ -181,10 +181,6 @@ def prefix_command(shell: ShellSpec, command: str) -> list[str]:
     return [shell.executable, "-c", command]
 
 
-# Kept for callers that imported the private name before the sandbox layer.
-_prefix_command = prefix_command
-
-
 def run_shell(
     command: str,
     *,

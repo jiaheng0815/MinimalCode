@@ -12,12 +12,12 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
 - **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
-- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。
+- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。
 - **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`。
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，可用 `SYSTEM.md` 替换默认系统提示词。
 - **协议**：OpenAI Chat Completions 与 OpenAI Responses，其他兼容供应商只需配置。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
-- **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。
+- **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
 
 ## 安装
 
@@ -79,7 +79,7 @@ minimalcode [prompt ...] [options]
 | `-p`, `--print` | 非交互模式；缺少提示词时报错 |
 | `--json` | 输出 JSON 并隐含 `--print`，同时隐藏工具活动 |
 | `-c`, `--continue` | 继续当前目录最近一次会话 |
-| `--session <id>` | 指定会话：完整 ID、前缀或 JSONL 路径 |
+| `--session <id>` | 指定会话：完整 ID、前缀或 `.jsonl` 路径 |
 | `--no-session` | 本次运行不读写会话 |
 | `--provider <name>` | 覆盖配置中的供应商 |
 | `-m`, `--model <id>` | 覆盖模型 |
@@ -115,15 +115,17 @@ minimalcode [prompt ...] [options]
 | `minimalcode sandbox` | 打印当前沙箱策略与各后端可用性 |
 | `minimalcode import-pi` | 从 Pi 配置迁移供应商、模型和上下文窗口 |
 
-`import-pi` 默认把 Pi 中已有的 API key 复制到权限受限的配置中，但不会在终端打印密钥。加 `--no-secrets` 则跳过密钥，改用环境变量；`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
+`import-pi` 默认**不**复制 API key，而是写入指向环境变量的 `api_key_env`；确实要把密钥复制进权限受限的配置时加 `--secrets`（密钥不会在终端打印）。`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
 
 退出码：`0` 任务完成，`1` 未在轮次上限内完成，`2` 配置或运行错误，`130` 被 Ctrl+C 中断。
 
 JSON 输出字段：
 
 ```json
-{"text":"...","completed":true,"turns":3,"usage":{...},"session":"...jsonl"}
+{"text":"...","completed":true,"turns":3,"usage":{},"session_usage":{},"usage_estimated":false,"session":"...jsonl"}
 ```
+
+`usage` 是本次运行新增的用量，`session_usage` 是整个会话的累计值（`-c` 继续会话时两者不同）；`usage_estimated` 为 `true` 表示至少有一轮没有供应商返回的 usage，数字来自本地估算。
 
 ## 交互命令
 
@@ -237,6 +239,7 @@ JSON 输出字段：
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
 - `include_usage` 仅在服务端接受 `stream_options` 时开启；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。
 - 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可。
+- 代理：供应商、`web_tools`、`vision` 默认沿用环境变量与系统代理设置。`base_url` 指向环回地址（`127.0.0.1`、`::1`、`localhost`）时自动忽略代理，否则本机运行的 Ollama、vLLM 或测试服务器会被 Clash 之类的代理劫走；需要强制时可在对应配置块里写 `"trust_env": true|false`。显式传入自建 transport 时默认不读环境代理，避免代理映射覆盖注入的连接。
 
 沙箱执行层默认关闭（默认 `--no-sandbox`），需要时用 `--sandbox` 或把 `enabled` 设为 `true` 开启；开启后默认只允许工作区、默认禁网：
 
@@ -284,6 +287,7 @@ JSON 输出字段：
 - 执行层关闭时 `local` 的网络 `deny` 不生效；开启后 `deny` 基于命令字符串识别，无法阻止任意程序自行发起网络连接；`allowlist` 同样依赖命令中的主机可被识别。真正的禁网依赖支持网络命名空间的后端。
 - 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
 - `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
+- 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...` 仍会被拒绝。它不是网络防火墙。
 - `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
@@ -299,7 +303,7 @@ python -m ruff format --check minimalcode tests benchmarks main.py
 python benchmarks/deepseek_responses.py --runs 3
 ```
 
-`benchmarks/coding_suite.py --validate-only` 用于在无网络、无密钥的情况下校验基准任务定义。
+`benchmarks/coding_suite.py --validate-only` 用于在无网络、无密钥的情况下校验基准任务定义。结果报告只列出实际运行过的 agent：只跑了 MinimalCode 时不会输出与 Pi 的对比列。
 
 旧入口仍然可用：
 
@@ -345,6 +349,7 @@ minimalcode/
 │   ├── color.py     #   ANSI 能力探测
 │   └── palette.py   #   深色/浅色调色板
 ├── shell.py         # shell 探测与子进程执行
+├── httpclient.py    # HTTP 客户端构造、代理策略与连接重试
 ├── prompt.py        # 系统提示词与 AGENTS.md 发现
 ├── session.py       # JSONL 会话存储与检索
 ├── config.py        # 配置合并、校验、脱敏、原子写入

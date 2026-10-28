@@ -7,29 +7,15 @@ from typing import Any
 
 import httpx2
 
+from .. import httpclient
 from ..errors import ProviderError
 
-# A request that never produced a response is safe to repeat: the provider did
-# not start a billable generation, so a dropped keep-alive or a proxy reset is
-# worth retrying. Failures after the body started streaming are not retried,
-# because the answer may already have been shown or billed.
-_RETRYABLE_CONNECTION_ERRORS = (
-    httpx2.ConnectError,
-    httpx2.ConnectTimeout,
-    httpx2.RemoteProtocolError,
-)
-_CONNECTION_ATTEMPTS = 11  # the first try plus 10 retries
-_CONNECTION_BACKOFF_SECONDS = 0.5
-_CONNECTION_BACKOFF_CAP_SECONDS = 8.0
+# The policy itself lives in ``minimalcode.httpclient`` so the web and vision
+# clients cannot drift from the protocol client. ``time`` stays imported here
+# because backoff sleeps are patched at this module by the retry tests.
 # Backoff runs 0.5, 1, 2, 4, then 8 seconds per attempt, so all 11 attempts span
 # roughly a minute: long enough to ride out a provider hiccup, short enough that
 # a dead endpoint still fails inside one agent turn.
-
-
-def connection_backoff(attempt: int) -> float:
-    """Return capped exponential backoff for a zero-based retry attempt."""
-    delay = _CONNECTION_BACKOFF_SECONDS * (2**attempt)
-    return min(delay, _CONNECTION_BACKOFF_CAP_SECONDS)
 
 
 class TransportMixin:
@@ -52,7 +38,7 @@ class TransportMixin:
         stream = bool(payload.get("stream"))
         last_error: ProviderError | None = None
         # Counts failures, not requests: the status retry below is charged outside
-        # this budget, so one call issues at most _CONNECTION_ATTEMPTS + 1 requests.
+        # this budget, so one call issues at most httpclient.CONNECTION_ATTEMPTS + 1 requests.
         connection_failures = 0
         status_retried = False
         while True:
@@ -64,15 +50,16 @@ class TransportMixin:
             except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
                 connection_failures += 1
-                if connection_failures >= _CONNECTION_ATTEMPTS or not isinstance(
-                    exc, _RETRYABLE_CONNECTION_ERRORS
+                if (
+                    connection_failures >= httpclient.CONNECTION_ATTEMPTS
+                    or not isinstance(exc, httpclient.RETRYABLE_CONNECTION_ERRORS)
                 ):
                     break
-                delay = connection_backoff(connection_failures - 1)
+                delay = httpclient.connection_backoff(connection_failures - 1)
                 if self.notify is not None:
                     self.notify(
                         "[retry] provider did not respond; attempt "
-                        f"{connection_failures}/{_CONNECTION_ATTEMPTS - 1} "
+                        f"{connection_failures}/{httpclient.CONNECTION_ATTEMPTS - 1} "
                         f"in {delay:g}s ({exc})"
                     )
                 time.sleep(delay)

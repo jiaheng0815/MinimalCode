@@ -291,20 +291,43 @@ def _render_results(
     *,
     selected_tasks: list[CodingTask],
 ) -> tuple[str, dict[str, Any]]:
-    agents = ("pi", "minimalcode")
+    # Only agents that actually produced runs may appear in a comparison: a table
+    # showing Pi 0/0 next to MinimalCode 25/30 reads as a result, not as "not run".
+    ordered_agents = ("pi", "minimalcode")
+    agents = [
+        agent for agent in ordered_agents if any(r["agent"] == agent for r in results)
+    ]
+    skipped = [agent for agent in ordered_agents if agent not in agents]
+    compared = len(agents) > 1
+    if compared:
+        title = "# MinimalCode vs Pi: 30-task coding suite"
+    elif agents:
+        title = f"# 30-task coding suite: {', '.join(agents)}"
+    else:
+        title = "# 30-task coding suite: no completed runs"
     lines = [
-        "# MinimalCode vs Pi: 30-task coding suite",
+        title,
         "",
         (
             f"DeepSeek `{MODEL}`, Responses API, thinking `high`, "
-            f"maximum output 2048 tokens. MinimalCode max turns: {MAX_TURNS}; "
-            "Pi used its native loop with a 90-second process timeout. "
+            f"maximum output 2048 tokens. MinimalCode max turns: {MAX_TURNS}. "
             "Each selected task was run once per agent; no automatic retries."
         ),
-        "",
-        "| Agent | Passed | Mean tokens | Mean time | Median time | Total cost |",
-        "|---|---:|---:|---:|---:|---:|",
     ]
+    if compared:
+        lines.append("Pi used its native loop with a 90-second process timeout.")
+    if skipped:
+        lines.append(
+            f"Not run: {', '.join(skipped)}. No comparison against those agents "
+            "is possible from this run."
+        )
+    lines.extend(
+        [
+            "",
+            "| Agent | Passed | Mean tokens | Mean time | Median time | Total cost |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
     json_summary: dict[str, Any] = {"tasks": len(selected_tasks), "agents": {}}
     for agent in agents:
         runs = [result for result in results if result["agent"] == agent]
@@ -329,12 +352,15 @@ def _render_results(
 
     task_ids = sorted({result["task"] for result in results})
     by_agent_task = {(result["agent"], result["task"]): result for result in results}
-    common_tasks = [
-        task_id
-        for task_id in task_ids
-        if by_agent_task.get(("pi", task_id), {}).get("passed")
-        and by_agent_task.get(("minimalcode", task_id), {}).get("passed")
-    ]
+    json_summary["not_run_agents"] = skipped
+    common_tasks = []
+    if compared:
+        common_tasks = [
+            task_id
+            for task_id in task_ids
+            if by_agent_task.get(("pi", task_id), {}).get("passed")
+            and by_agent_task.get(("minimalcode", task_id), {}).get("passed")
+        ]
     if common_tasks:
         lines.extend(
             [
@@ -361,8 +387,8 @@ def _render_results(
             "",
             "## Category pass rate",
             "",
-            "| Category | Pi | MinimalCode |",
-            "|---|---:|---:|",
+            "| Category | " + " | ".join(agents) + " |",
+            "|---|" + "---:|" * len(agents),
         ]
     )
     for category in categories:
@@ -377,15 +403,15 @@ def _render_results(
             cells.append(
                 f"{sum(bool(r.get('passed')) for r in relevant)}/{len(relevant)}"
             )
-        lines.append(f"| {category} | {cells[0]} | {cells[1]} |")
+        lines.append(f"| {category} | " + " | ".join(cells) + " |")
 
     lines.extend(
         [
             "",
             "## Task results",
             "",
-            "| # | Task | Category | Pi | MinimalCode |",
-            "|---:|---|---|---|---|",
+            "| # | Task | Category | " + " | ".join(agents) + " |",
+            "|---:|---|---|" + "---|" * len(agents),
         ]
     )
     by_key = {(result["task"], result["agent"]): result for result in results}
@@ -402,7 +428,7 @@ def _render_results(
             else:
                 cells.append("FAIL")
         lines.append(
-            f"| {index} | `{task.id}` | {task.category} | {cells[0]} | {cells[1]} |"
+            f"| {index} | `{task.id}` | {task.category} | " + " | ".join(cells) + " |"
         )
 
     failures = [result for result in results if not result.get("passed")]

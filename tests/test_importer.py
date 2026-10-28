@@ -71,6 +71,20 @@ class ImporterTests(unittest.TestCase):
             self.assertNotIn("api_key", provider)
             self.assertEqual(provider["api_key_env"], "MINIMALCODE_LOCAL_API_KEY")
 
+    def test_secrets_are_not_copied_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            destination = root / ".MinimalCode"
+            _write_pi_config(pi_home)
+
+            import_pi_settings(destination_home=destination, pi_home=pi_home)
+
+            settings = load_settings(destination, require_file=True)
+            _, provider = settings.provider_config()
+            self.assertNotIn("api_key", provider)
+            self.assertIn("api_key_env", provider)
+
     def test_invalid_base_url_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

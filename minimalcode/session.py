@@ -44,6 +44,10 @@ class Session:
     def append_event(self, event: dict[str, Any]) -> None:
         if self.path is None:
             return
+        if self.path.suffix.lower() != ".jsonl":
+            # ``--session <path>`` once accepted any existing file, so a typo
+            # appended JSONL to README.md. A session is only ever a .jsonl file.
+            raise ValueError(f"session file must end in .jsonl: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self.path.parent.chmod(0o700)
@@ -211,12 +215,28 @@ class SessionStore:
                 return session_id
         return path.stem
 
+    def _within_root(self, path: Path) -> bool:
+        """Return True when ``path`` is inside the store's sessions directory."""
+        try:
+            Path(path).resolve(strict=False).relative_to(
+                self.root.resolve(strict=False)
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return True
+
     def load(self, path: Path, *, default_workspace: Path | None = None) -> Session:
         messages: list[dict[str, Any]] = []
         session_id = path.stem
+        if path.suffix.lower() != ".jsonl":
+            raise ValueError(f"not a session file (expected .jsonl): {path}")
         # Never default to the sessions directory: a metadata-less file loaded
         # through --session would otherwise run every tool there.
         workspace = default_workspace or Path.cwd()
+        # The recorded workspace is tool-restriction input, so it is trusted
+        # only for files the store itself wrote. An arbitrary JSONL handed to
+        # --session must not be able to point every tool at C:\ or /.
+        trust_recorded_workspace = self._within_root(path)
         try:
             with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
                 for line in handle:
@@ -231,7 +251,11 @@ class SessionStore:
                         if isinstance(recorded_id, str) and recorded_id:
                             session_id = recorded_id
                         recorded_workspace = event.get("workspace")
-                        if isinstance(recorded_workspace, str) and recorded_workspace:
+                        if (
+                            trust_recorded_workspace
+                            and isinstance(recorded_workspace, str)
+                            and recorded_workspace
+                        ):
                             workspace = Path(recorded_workspace).expanduser()
                     elif event.get("type") == "message":
                         message = event.get("message")

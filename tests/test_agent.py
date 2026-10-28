@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minimalcode.agent import Agent
+from minimalcode.agent import Agent, estimate_text_tokens, estimate_tokens
 from minimalcode.config import load_settings
 from minimalcode.highlight import strip_ansi
 from minimalcode.prompt import build_system_prompt
@@ -252,6 +252,55 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(first.run_usage["total_tokens"], 15)
             self.assertEqual(second.run_usage["total_tokens"], 22)
             self.assertEqual(second.usage["total_tokens"], 37)
+            self.assertFalse(first.usage_estimated)
+            self.assertFalse(second.usage_estimated)
+
+    def test_missing_usage_is_estimated_and_flagged(self) -> None:
+        class NoUsageProvider(FakeProvider):
+            def __init__(self) -> None:
+                self.name = "fake"
+                self.model = "fake-model"
+                self.thinking = "high"
+                self.context_window = 100_000
+                self.responses = [
+                    ProviderReply(
+                        content="一个中文的回答",
+                        tool_calls=[],
+                        finish_reason="stop",
+                        usage={},
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace, provider="fake", model="fake-model", save=False
+            )
+            agent = Agent(
+                settings=settings,
+                provider=NoUsageProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            result = agent.run("answer")
+
+            self.assertTrue(result.completed)
+            self.assertTrue(result.usage_estimated)
+            self.assertGreater(result.run_usage["completion_tokens"], 0)
+            self.assertEqual(
+                result.run_usage["total_tokens"],
+                result.run_usage["prompt_tokens"]
+                + result.run_usage["completion_tokens"],
+            )
+            self.assertTrue(agent.status()["usage_estimated"])
 
     def test_malformed_tool_argument_does_not_escape_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -743,6 +792,23 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("line-200\n", rendered)
             self.assertIn("lines omitted", rendered)
             self.assertLess(len(rendered), len(stdout))
+
+
+class TokenEstimateTests(unittest.TestCase):
+    def test_cjk_text_counts_more_tokens_than_ascii_of_equal_length(self) -> None:
+        cjk = "中" * 400
+        ascii_text = "a" * 400
+        self.assertGreater(
+            estimate_text_tokens(cjk), estimate_text_tokens(ascii_text) * 3
+        )
+        self.assertGreater(
+            estimate_tokens([{"role": "user", "content": cjk}]),
+            estimate_tokens([{"role": "user", "content": ascii_text}]) * 3,
+        )
+
+    def test_estimate_is_never_zero(self) -> None:
+        self.assertEqual(estimate_tokens([]), 1)
+        self.assertEqual(estimate_text_tokens(""), 0)
 
 
 if __name__ == "__main__":

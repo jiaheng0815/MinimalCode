@@ -110,6 +110,11 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["completed"])
             self.assertIsNone(payload["session"])
             self.assertTrue(provider.closed)
+            self.assertEqual(payload["usage"]["prompt_tokens"], 5)
+            self.assertEqual(payload["usage"]["completion_tokens"], 1)
+            self.assertEqual(payload["usage"]["total_tokens"], 6)
+            self.assertEqual(payload["session_usage"], payload["usage"])
+            self.assertFalse(payload["usage_estimated"])
 
     def test_resumed_session_uses_requested_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -154,6 +159,38 @@ class CliTests(unittest.TestCase):
                 if message["role"] == "system"
             )
             self.assertIn(str(requested.resolve()), system_message)
+
+    def test_session_path_must_be_a_jsonl_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            notes = root / "notes.txt"
+            notes.write_text("important\n", encoding="utf-8")
+            provider = FakeCliProvider()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(ValueError),
+            ):
+                run(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--cwd",
+                        str(workspace),
+                        "--session",
+                        str(notes),
+                        "say completed",
+                    ]
+                )
+            self.assertEqual(notes.read_text(encoding="utf-8"), "important\n")
 
     def test_max_effort_is_accepted_and_forwarded(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

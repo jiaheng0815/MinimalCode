@@ -9,9 +9,9 @@ from urllib.parse import urlsplit
 
 import httpx2
 
-from .. import __version__
 from ..config import provider_api_key
 from ..errors import ProviderError
+from ..httpclient import build_client, build_headers
 from .chat import ChatProtocolMixin
 from .responses import ResponsesProtocolMixin
 from .transport import TransportMixin
@@ -90,28 +90,14 @@ class OpenAICompatibleProvider(
                 f"provider {name!r} requires API key in environment variable {key_env}"
             )
 
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": f"MinimalCode/{__version__}",
-        }
-        custom_headers = config.get("headers")
-        if isinstance(custom_headers, dict):
-            headers.update(
-                {str(key): str(value) for key, value in custom_headers.items()}
-            )
-        if api_key and not any(key.lower() == "authorization" for key in headers):
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = build_headers(api_key, config.get("headers"))
         self.headers = headers
-        # The scalar timeout bounds a whole generation; capping the connect phase
-        # keeps an unreachable host from spending that entire budget on a SYN.
-        timeout = httpx2.Timeout(
-            self.timeout_seconds, connect=min(20.0, self.timeout_seconds)
-        )
-        self._client = httpx2.Client(
-            timeout=timeout,
+        self._client = build_client(
+            base_url=self.base_url,
             headers=headers,
+            timeout=self.timeout_seconds,
             transport=transport,
-            follow_redirects=True,
+            trust_env=config.get("trust_env"),
         )
 
     def close(self) -> None:

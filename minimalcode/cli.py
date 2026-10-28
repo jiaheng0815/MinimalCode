@@ -233,13 +233,28 @@ def _management_command(argv: Sequence[str]) -> int | None:
         parser = argparse.ArgumentParser(prog="minimalcode import-pi")
         parser.add_argument("--home", help="MinimalCode config directory")
         parser.add_argument("--pi-home", help="Pi agent config directory")
-        parser.add_argument("--no-secrets", action="store_true")
+        # Copying credentials is opt-in: a migration command should not write a
+        # second plaintext copy of an API key unless it is asked to.
+        secrets = parser.add_mutually_exclusive_group()
+        secrets.add_argument(
+            "--secrets",
+            dest="copy_secrets",
+            action="store_true",
+            help="Copy API keys from Pi into settings.json",
+        )
+        secrets.add_argument(
+            "--no-secrets",
+            dest="copy_secrets",
+            action="store_false",
+            help="Skip API keys and reference environment variables (default)",
+        )
+        parser.set_defaults(copy_secrets=False)
         parser.add_argument("--overwrite", action="store_true")
         args = parser.parse_args(argv[1:])
         result = import_pi_settings(
             destination_home=args.home or home_dir(),
             pi_home=args.pi_home,
-            include_secrets=not args.no_secrets,
+            include_secrets=args.copy_secrets,
             overwrite=args.overwrite,
         )
         print(
@@ -374,7 +389,7 @@ def _ensure_newline(result: AgentResult) -> None:
         print()
 
 
-def _format_usage(usage: dict[str, int]) -> str:
+def _format_usage(usage: dict[str, int], *, estimated: bool = False) -> str:
     prompt = int(usage.get("prompt_tokens", 0) or 0)
     completion = int(usage.get("completion_tokens", 0) or 0)
     total = int(usage.get("total_tokens", 0) or 0) or prompt + completion
@@ -391,7 +406,11 @@ def _format_usage(usage: dict[str, int]) -> str:
         parts.append(f"{cached:,} cached")
     if reasoning:
         parts.append(f"{reasoning:,} reasoning")
-    return "[usage] " + " | ".join(parts)
+    line = "[usage] " + " | ".join(parts)
+    if estimated:
+        # Say so instead of presenting a character-count guess as billed usage.
+        line += " (estimated)"
+    return line
 
 
 def _print_usage(result: AgentResult) -> None:
@@ -399,7 +418,9 @@ def _print_usage(result: AgentResult) -> None:
     usage = getattr(result, "run_usage", None) or getattr(result, "usage", None)
     if not usage:
         return
-    line = _format_usage(usage)
+    line = _format_usage(
+        usage, estimated=bool(getattr(result, "usage_estimated", False))
+    )
     if line:
         print(style_activity_tag(line, sys.stderr), file=sys.stderr)
         sys.stderr.flush()
@@ -437,7 +458,11 @@ def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
             "text": result.text,
             "completed": result.completed,
             "turns": result.turns,
-            "usage": result.usage,
+            # ``usage`` is this run; ``session_usage`` is the whole session, so a
+            # resumed run cannot silently report the cumulative total as its own.
+            "usage": result.run_usage,
+            "session_usage": result.usage,
+            "usage_estimated": result.usage_estimated,
             "session": str(agent.session.path) if agent.session.path else None,
         }
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))

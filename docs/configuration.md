@@ -22,6 +22,10 @@ Built-in defaults are data, not Python literals: they live in
 
 Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspace key. The JSONL file records messages, usage, and compaction boundaries.
 
+`--session <path>` only accepts files ending in `.jsonl`; any other file is rejected before a message is appended instead of having JSONL written into it. A workspace recorded in a session's `meta` event is used only when the file lives under the sessions directory, so an arbitrary JSONL cannot point every tool outside the workspace.
+
+Usage written to the session may be estimated. When a provider omits the usage object, the agent derives token counts from character width (CJK and emoji count as about one token per character, other text as four characters per token) and marks the summary `(estimated)`; `--json` exposes the same fact as `usage_estimated`.
+
 ## Shell
 
 | Key | Default | Meaning |
@@ -231,6 +235,7 @@ output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 | `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
+| `trust_env` | no | Apply environment/system proxies; loopback `base_url` values default to `false` |
 
 Provider entries are validated when settings load: `protocol`, `base_url`,
 numeric limits, booleans, and object fields are checked before the first request.
@@ -246,6 +251,14 @@ response.`) are retried 10 times with an exponential backoff from 0.5 s up to
 never printed twice or billed twice; HTTP 429/503 keeps its single `Retry-After`
 retry. Retry notices go to the tool activity stream, so `--quiet` and `--json`
 stay silent.
+
+Proxies: environment and system proxy settings apply to remote `base_url`
+values. A loopback `base_url` (`127.0.0.1`, `::1`, `localhost`) ignores them
+unconditionally, because routing a local provider through a proxy always fails —
+a stopped Clash/corporate proxy answers 502 and a running one has no route back
+to the caller's loopback interface. Set `trust_env` explicitly (per provider,
+`web_tools`, or `vision`) when a target needs the opposite behaviour. The web
+and vision clients share the same rules and the same retry budget.
 
 For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}` (`none` disables thinking); reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`. For `openai_chat`, it sends `reasoning_effort`; `none` instead sends `{"thinking":{"type":"disabled"}}`.
 

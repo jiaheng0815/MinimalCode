@@ -19,13 +19,43 @@ from .shell import ShellSpec
 from .tools import ToolError, ToolRuntime, available_tool_schemas, tool_result_text
 
 
-def _json_size(messages: list[dict[str, Any]]) -> int:
-    text = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
-    return len(text)
+def _is_wide_character(char: str) -> bool:
+    """Return True for scripts whose characters cost roughly one token each."""
+    code = ord(char)
+    return (
+        0x1100 <= code <= 0x115F  # Hangul Jamo
+        or 0x2E80 <= code <= 0x9FFF  # CJK radicals through CJK unified ideographs
+        or 0xA000 <= code <= 0xA4CF  # Yi
+        or 0xAC00 <= code <= 0xD7A3  # Hangul syllables
+        or 0xF900 <= code <= 0xFAFF  # CJK compatibility ideographs
+        or 0xFE30 <= code <= 0xFE6F  # CJK compatibility forms
+        or 0xFF00 <= code <= 0xFF60  # Fullwidth forms
+        or 0xFFE0 <= code <= 0xFFE6
+        or 0x1F300 <= code <= 0x1FAFF  # Emoji
+        or 0x20000 <= code <= 0x3FFFD
+    )
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Estimate tokens for one string, weighted by character width.
+
+    ``len(text) // 4`` is a decent ASCII rule and a fourfold undercount for CJK:
+    a Chinese character carries roughly one token, not a quarter of one. Because
+    this estimate is the compaction trigger and the fallback when a provider
+    omits usage, undercounting silently lets the history outgrow the window.
+    """
+    if not text:
+        return 0
+    wide = 0
+    for char in text:
+        if _is_wide_character(char):
+            wide += 1
+    narrow = len(text) - wide
+    return wide + (narrow + 3) // 4
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
-    return max(1, _json_size(messages) // 4)
+    return max(1, estimate_text_tokens(json.dumps(messages, ensure_ascii=False)))
 
 
 def _tool_output_preview(result: dict[str, Any]) -> str:
@@ -173,6 +203,9 @@ class AgentResult:
     usage: dict[str, int] = field(default_factory=dict)
     run_usage: dict[str, int] = field(default_factory=dict)
     turns: int = 0
+    # True when at least one turn in this run had no provider-reported usage and
+    # the numbers came from ``estimate_tokens`` instead.
+    usage_estimated: bool = False
 
 
 def _compaction_boundary(messages: list[dict[str, Any]], target: int) -> int | None:
@@ -249,6 +282,7 @@ class Agent:
             else None
         )
         self.last_prompt_tokens = 0
+        self.estimated_turns = 0
         self._system_prompt: str | None = None
         self._plain_sanitizer = TerminalSanitizer()
         self.total_usage = {
@@ -292,19 +326,42 @@ class Agent:
         return [*self._system_messages(), *self.session.messages]
 
     def _accumulate_usage(
-        self, usage: dict[str, int], messages: list[dict[str, Any]]
+        self,
+        usage: dict[str, int],
+        messages: list[dict[str, Any]],
+        reply_text: str = "",
     ) -> None:
-        if usage:
-            normalized = usage
-        else:
+        """Record one turn's usage, estimating only what the provider omitted.
+
+        A missing usage object is not the same as a turn that cost nothing: Chat
+        servers that ignore ``stream_options`` report nothing at all, and
+        printing ``0 completion`` for a real answer is a lie. Estimates are
+        flagged so the CLI can mark them instead of presenting them as reported.
+        """
+        estimated = not usage
+        if estimated:
+            prompt = estimate_tokens(messages)
+            completion = estimate_text_tokens(reply_text)
             normalized = {
-                "prompt_tokens": estimate_tokens(messages),
-                "completion_tokens": 0,
-                "total_tokens": estimate_tokens(messages),
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
             }
+        else:
+            normalized = dict(usage)
+            if reply_text and not int(normalized.get("completion_tokens", 0) or 0):
+                prompt = int(normalized.get("prompt_tokens", 0) or 0)
+                completion = estimate_text_tokens(reply_text)
+                normalized["completion_tokens"] = completion
+                normalized["total_tokens"] = max(
+                    int(normalized.get("total_tokens", 0) or 0), prompt + completion
+                )
+                estimated = True
         for key in self.total_usage:
             self.total_usage[key] += int(normalized.get(key, 0))
         self.last_prompt_tokens = int(normalized.get("prompt_tokens", 0))
+        if estimated:
+            self.estimated_turns += 1
         self.session.append_usage(normalized)
 
     def _write_delta(self, text: str) -> None:
@@ -354,6 +411,7 @@ class Agent:
             raise ValueError("user message is empty")
         self._repair_history()
         usage_before = dict(self.total_usage)
+        estimated_before = self.estimated_turns
         self.session.append_message({"role": "user", "content": user_text})
         final_text = ""
         final_completed = False
@@ -372,7 +430,7 @@ class Agent:
                 )
             finally:
                 self._finish_delta()
-            self._accumulate_usage(reply.usage, messages)
+            self._accumulate_usage(reply.usage, messages, reply.content)
             assistant = reply.as_message()
             self.session.append_message(assistant)
             final_text = reply.content
@@ -435,6 +493,7 @@ class Agent:
                 for key, value in self.total_usage.items()
             },
             turns=turn,
+            usage_estimated=self.estimated_turns > estimated_before,
         )
 
     def _report_incomplete(
@@ -580,5 +639,6 @@ class Agent:
             "last_prompt_tokens": self.last_prompt_tokens,
             "context_window": self.provider.context_window,
             "usage": dict(self.total_usage),
+            "usage_estimated": self.estimated_turns > 0,
             "sandbox": summary() if callable(summary) else {"enabled": False},
         }
