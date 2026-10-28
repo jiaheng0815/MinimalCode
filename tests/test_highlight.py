@@ -212,7 +212,9 @@ class HighlightTests(unittest.TestCase):
         highlighter.finish()
         elapsed = time.perf_counter() - started
         self.assertEqual(strip_ansi(stream.getvalue()), sample)
-        self.assertLess(elapsed, 3.0)
+        # A quadratic feed of this size takes minutes, so the bound only has to
+        # clear a slow shared runner: the Intel macOS image needed 3.9s here.
+        self.assertLess(elapsed, 15.0)
 
     def test_no_color_disables_tty_styles(self) -> None:
         with patch.dict(os.environ, {"NO_COLOR": ""}):
