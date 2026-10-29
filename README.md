@@ -62,6 +62,8 @@ minimalcode init
 
 ## 快速开始
 
+推荐 API：[<img src="https://www.deepseek.com/favicon.ico" width="16" height="16" alt="DeepSeek 图标"> DeepSeek 开放平台](https://platform.deepseek.com)
+
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"
 minimalcode
