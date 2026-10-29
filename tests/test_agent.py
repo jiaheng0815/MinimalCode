@@ -10,11 +10,11 @@ from unittest.mock import patch
 from minimalcode.agent import Agent, estimate_text_tokens, estimate_tokens
 from minimalcode.config import load_settings
 from minimalcode.highlight import strip_ansi
-from minimalcode.prompt import build_system_prompt
-from minimalcode.provider import ProviderReply, ToolCall
+from minimalcode.prompt import SUMMARY_START, build_system_prompt
+from minimalcode.provider import ProviderError, ProviderReply, ToolCall
 from minimalcode.session import SessionStore
 from minimalcode.shell import detect_shell
-from minimalcode.tools import ToolRuntime
+from minimalcode.tools import ToolError, ToolRuntime
 
 
 class FakeProvider:
@@ -143,6 +143,27 @@ class TwoTurnProvider(FakeProvider):
 class TtyBuffer(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+class RecordingProvider(FakeProvider):
+    """Return a plain stop reply and keep every request it received."""
+
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.requests: list[list[dict]] = []
+
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
+        self.requests.append([dict(message) for message in messages])
+        if on_text:
+            on_text("ok")
+        return ProviderReply(
+            content="ok",
+            tool_calls=[],
+            finish_reason="stop",
+            usage={"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        )
 
 
 class BadArgumentsProvider(ShellProvider):
@@ -592,6 +613,136 @@ class AgentTests(unittest.TestCase):
                 self.assertFalse(agent.should_compact())
             estimate.assert_called_once()
 
+    def test_write_summary_creates_the_workspace_agents_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            session.append_message({"role": "user", "content": "add a test"})
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            target = agent.write_summary()
+
+            self.assertEqual(target, (workspace / "AGENTS.md").resolve())
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("summary", text)
+            self.assertNotIn("add a test", text)
+
+    def test_write_summary_replaces_a_previous_block_and_keeps_prose(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            session.append_message({"role": "user", "content": "add a test"})
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            existing = "# Notes\n\nkeep me\n"
+            (workspace / "AGENTS.md").write_text(existing, encoding="utf-8")
+
+            target = agent.write_summary()
+            with patch.object(
+                agent.provider, "complete_text", return_value="second summary"
+            ):
+                agent.write_summary()
+
+            text = target.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith(existing))
+            self.assertEqual(text.count("second summary"), 1)
+            # The block written by the first call must be gone, not duplicated.
+            self.assertNotIn(f"{SUMMARY_START}\nsummary\n", text)
+
+    def test_write_summary_refuses_an_empty_provider_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            with (
+                patch.object(agent.provider, "complete_text", return_value="  "),
+                self.assertRaises(ProviderError),
+            ):
+                agent.write_summary()
+
+            self.assertFalse((workspace / "AGENTS.md").exists())
+
+    def test_write_summary_refuses_an_unreadable_agents_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            target = workspace / "AGENTS.md"
+            target.write_bytes(b"# Notes\n\xff\xfe broken\n")
+
+            with self.assertRaises(ToolError):
+                agent.write_summary()
+
+            self.assertEqual(target.read_bytes(), b"# Notes\n\xff\xfe broken\n")
+
     def test_streamed_markdown_is_highlighted_on_a_tty(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -686,7 +837,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(output.getvalue(), "done")
 
-    def test_system_prompt_is_built_once_per_agent(self) -> None:
+    def test_instructions_are_re_read_at_the_start_of_each_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace = root / "workspace"
@@ -705,16 +856,88 @@ class AgentTests(unittest.TestCase):
             ) as build:
                 agent = Agent(
                     settings=settings,
-                    provider=FakeProvider(),
+                    provider=TwoTurnProvider(),
                     session=session,
                     tool_runtime=ToolRuntime(settings, workspace, shell),
                     shell=shell,
                     quiet=True,
                     stream_output=False,
                 )
-                agent.run("write result.txt")
+                agent.run("first")
+                agent.run("second")
 
-            self.assertEqual(build.call_count, 1)
+            self.assertEqual(build.call_count, 2)
+
+    def test_each_run_starts_with_the_current_agents_and_claude_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            (workspace / "AGENTS.md").write_text("ALPHA-RULE\n", encoding="utf-8")
+            provider = RecordingProvider()
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            agent.run("first")
+            (workspace / "AGENTS.md").write_text("GAMMA-RULE\n", encoding="utf-8")
+            (workspace / "CLAUDE.md").write_text("BETA-RULE\n", encoding="utf-8")
+            agent.run("second")
+
+            first_system = provider.requests[0][0]
+            second_system = provider.requests[1][0]
+            self.assertEqual(first_system["role"], "system")
+            self.assertIn("ALPHA-RULE", first_system["content"])
+            self.assertNotIn("BETA-RULE", first_system["content"])
+            self.assertEqual(second_system["role"], "system")
+            self.assertIn("GAMMA-RULE", second_system["content"])
+            self.assertIn("BETA-RULE", second_system["content"])
+            self.assertNotIn("ALPHA-RULE", second_system["content"])
+
+    def test_runs_without_instruction_files_still_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            provider = RecordingProvider()
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            result = agent.run("hello")
+
+            self.assertTrue(result.completed)
+            system = provider.requests[0][0]["content"]
+            self.assertIn("MinimalCode", system)
+            self.assertNotIn("Repository instructions", system)
 
     def test_empty_completion_is_reported_as_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

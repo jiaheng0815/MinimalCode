@@ -6,6 +6,9 @@ from pathlib import Path
 from .config import Settings
 from .shell import ShellSpec
 
+SUMMARY_START = "<!-- minimalcode:summary:start -->"
+SUMMARY_END = "<!-- minimalcode:summary:end -->"
+
 DEFAULT_SYSTEM_PROMPT = """\
 你是 MinimalCode，一个终端编码代理。
 直接动手，但编辑前先查看相关文件。优先使用仓库工具（搜索、读取、编辑）；仅当 shell 更直接或更省成本时使用 shell。只做必要的最小正确修改，并运行与改动直接相关的验证；绝不声称执行过未实际运行的检查。
@@ -54,6 +57,45 @@ def _agent_files(cwd: Path) -> list[Path]:
             except OSError:
                 continue
     return paths
+
+
+def _line_ending(text: str) -> str:
+    if "\r\n" in text:
+        return "\r\n"
+    if "\r" in text and "\n" not in text:
+        return "\r"
+    return "\n"
+
+
+def _summary_block(summary: str, newline: str) -> str:
+    """Wrap model output in the markers, in the file's line-ending style."""
+    # A summary can echo the markers when AGENTS.md itself was part of the
+    # transcript; dropping those lines keeps a rerun from nesting blocks.
+    lines = [
+        line
+        for line in summary.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        if line.strip() not in {SUMMARY_START, SUMMARY_END}
+    ]
+    body = "\n".join(lines).strip("\n")
+    return f"{SUMMARY_START}\n{body}\n{SUMMARY_END}".replace("\n", newline)
+
+
+def merge_agents_summary(existing: str | None, summary: str) -> str:
+    """Return ``AGENTS.md`` text carrying ``summary`` in one managed block.
+
+    Existing prose is preserved verbatim: only the marked block is rewritten,
+    and a file without the block gets one appended.
+    """
+    if not existing or not existing.strip():
+        return _summary_block(summary, "\n") + "\n"
+    newline = _line_ending(existing)
+    block = _summary_block(summary, newline)
+    start = existing.find(SUMMARY_START)
+    end = existing.find(SUMMARY_END, start + len(SUMMARY_START)) if start != -1 else -1
+    if start != -1 and end != -1:
+        return existing[:start] + block + existing[end + len(SUMMARY_END) :]
+    separator = "" if existing.endswith(("\n", "\r")) else newline
+    return existing + separator + newline + block + newline
 
 
 def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:

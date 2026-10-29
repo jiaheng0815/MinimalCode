@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TextIO
 
 from .config import Settings
@@ -13,7 +14,7 @@ from .highlight import (
     sanitize_terminal_text,
     style_activity_tag,
 )
-from .prompt import build_system_prompt
+from .prompt import build_system_prompt, merge_agents_summary
 from .provider import OpenAICompatibleProvider, ProviderError
 from .session import Session
 from .shell import ShellSpec
@@ -209,6 +210,17 @@ class AgentResult:
     usage_estimated: bool = False
 
 
+SUMMARY_PROMPT = """\
+Summarize this coding-agent session as durable repository notes for the next \
+session. Record what was asked, the files created or modified, the decisions \
+taken and why, the commands and tests that were actually run with their \
+outcomes, and any remaining work, blockers, or known limitations. Write short \
+Markdown sections with terse bullets. Omit greetings, narration, and reasoning \
+that did not change the result. Never claim a check ran unless the transcript \
+shows it ran, and do not wrap the answer in a code fence.
+"""
+
+
 def _compaction_boundary(messages: list[dict[str, Any]], target: int) -> int | None:
     """Return an index that keeps ``messages[index:]`` replayable.
 
@@ -322,11 +334,20 @@ class Agent:
                 dropped_messages=0,
             )
 
+    def refresh_instructions(self) -> None:
+        """Drop the cached system prompt so the next build re-reads instructions.
+
+        ``AGENTS.md`` / ``CLAUDE.md`` are read at the start of every run rather
+        than once per process: ``/summary`` and external editors rewrite them
+        between turns, and a stale copy would silently keep old rules.
+        """
+        self._system_prompt = None
+
     def _system_messages(self) -> list[dict[str, Any]]:
         if self._system_prompt is None:
             # Building the prompt reads SYSTEM.md plus every AGENTS.md/CLAUDE.md
-            # on the path; the tool loop calls this once per turn, so the result
-            # is cached for the lifetime of the agent.
+            # on the path; missing files are skipped. The tool loop calls this
+            # several times per run, so the result is cached until the next run.
             self._system_prompt = build_system_prompt(
                 self.settings,
                 self.session.cwd,
@@ -432,6 +453,9 @@ class Agent:
     def run(self, user_text: str) -> AgentResult:
         if not user_text.strip():
             raise ValueError("user message is empty")
+        # Read AGENTS.md / CLAUDE.md again for this run: instructions may have
+        # changed on disk since the previous turn (including via /summary).
+        self.refresh_instructions()
         self._repair_history()
         usage_before = dict(self.total_usage)
         estimated_before = self.estimated_turns
@@ -619,6 +643,42 @@ class Agent:
 
     def compact(self) -> bool:
         return self._compact(force=True)
+
+    def summarize(self) -> str:
+        """Ask the provider to condense the whole session into durable notes."""
+        summary = self.provider.complete_text(
+            [
+                {"role": "system", "content": SUMMARY_PROMPT},
+                {"role": "user", "content": self._transcript(self._messages())},
+            ]
+        ).strip()
+        if not summary:
+            raise ProviderError("the provider returned an empty summary")
+        return summary
+
+    def write_summary(self) -> Path:
+        """Write the session summary into the workspace ``AGENTS.md``.
+
+        The path goes through the sandbox resolver like any tool path, so a
+        symlinked or sensitive ``AGENTS.md`` is refused instead of overwritten.
+        """
+        target = self.tools.sandbox.resolve_path(
+            "AGENTS.md",
+            cwd=self.session.cwd,
+            operation="write",
+            allow_outside=self.tools.allow_outside,
+        )
+        existing: str | None = None
+        if target.is_file():
+            try:
+                existing = target.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise ToolError(f"{target} is not valid UTF-8 text") from exc
+            except OSError as exc:
+                raise ToolError(f"cannot read {target}: {exc}") from exc
+        merged = merge_agents_summary(existing, self.summarize())
+        self.tools.write(str(target), merged)
+        return target
 
     def _transcript(self, messages: list[dict[str, Any]]) -> str:
         lines: list[str] = []

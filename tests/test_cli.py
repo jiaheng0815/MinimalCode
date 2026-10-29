@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from minimalcode.cli import _interactive, run
 from minimalcode.config import EFFORT_LEVELS, ensure_config, load_settings
-from minimalcode.provider import ProviderReply
+from minimalcode.provider import ProviderError, ProviderReply
 from minimalcode.session import SessionStore
 
 
@@ -75,6 +75,11 @@ class StubAgent:
 
     def compact(self) -> bool:
         return False
+
+    def write_summary(self) -> Path:
+        target = self.session.cwd / "AGENTS.md"
+        target.write_text("summary\n", encoding="utf-8")
+        return target
 
 
 class CliTests(unittest.TestCase):
@@ -406,6 +411,78 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             self.assertNotIn("[usage]", stderr.getvalue())
+
+    def test_interactive_summary_command_writes_agents_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["/help", "/summary", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, [])
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertIn("/summary", stdout.getvalue())
+            self.assertIn("summary written to", stdout.getvalue())
+            self.assertEqual(
+                (workspace / "AGENTS.md").read_text(encoding="utf-8"), "summary\n"
+            )
+
+    def test_interactive_summary_failure_keeps_the_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["/summary", "after failure", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.object(
+                    stub,
+                    "write_summary",
+                    side_effect=ProviderError("provider is down"),
+                ),
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, ["after failure"])
+            self.assertIn("summary failed: provider is down", stderr.getvalue())
 
     def test_interactive_prints_token_usage_after_each_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1,7 +1,7 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.0.0 and later. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8 and 1.0 added no further breaking
+Applies to MinimalCode 1.1.0 and later. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, and 1.1 added no further breaking
 import changes (`minimalcode.httpclient` is a new module, not a renamed one).
 
 The public API of a package is the set of names in its `__all__`. Everything
@@ -14,6 +14,13 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.1.0 changed
+
+No public name, CLI flag, configuration key, JSON field, session format, or tool
+schema changed. Two behavior additions: repository instructions are re-read at the
+start of every run instead of being cached per process, and the interactive
+`/summary` command writes a marked summary block into the workspace `AGENTS.md`.
 
 ## What changed in 0.7.0
 

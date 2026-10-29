@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.0.0.
+Applies to MinimalCode 1.1.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -207,6 +207,8 @@ and records the reason in the sandbox notes.
 | `max_instruction_chars` | `60000` | Combined budget for `SYSTEM.md`, global `AGENTS.md`, and project instruction files |
 
 Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading.
+
+Instruction files are re-read at the start of every run: global `AGENTS.md`, then `AGENTS.md` / `CLAUDE.md` from the workspace and its parents, with missing files skipped. Within one run the system prompt is built once, so a file a tool rewrites mid-turn takes effect on the next run. `/summary` uses this to persist a session summary into the workspace `AGENTS.md` between its summary markers.
 
 ## Output
 

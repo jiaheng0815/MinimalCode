@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from minimalcode.config import load_settings
-from minimalcode.prompt import build_system_prompt
+from minimalcode.prompt import (
+    SUMMARY_END,
+    SUMMARY_START,
+    build_system_prompt,
+    merge_agents_summary,
+)
 from minimalcode.shell import detect_shell
 
 
@@ -44,6 +49,41 @@ class PromptTests(unittest.TestCase):
             self.assertIn("global rule", prompt)
             self.assertIn("project rule", prompt)
             self.assertIn(str(child), prompt)
+
+    def test_missing_agents_file_is_created_with_the_summary_block(self) -> None:
+        merged = merge_agents_summary(None, "# Task\n\n- wrote result.txt\n")
+        self.assertTrue(merged.startswith(SUMMARY_START))
+        self.assertTrue(merged.endswith(SUMMARY_END + "\n"))
+        self.assertIn("- wrote result.txt", merged)
+
+    def test_existing_agents_file_gets_the_block_appended(self) -> None:
+        existing = "# Notes\n\nkeep me\n"
+        merged = merge_agents_summary(existing, "new summary")
+        self.assertTrue(merged.startswith(existing))
+        self.assertIn(f"{SUMMARY_START}\nnew summary\n{SUMMARY_END}", merged)
+
+    def test_existing_block_is_replaced_in_place(self) -> None:
+        existing = f"before\n{SUMMARY_START}\nold summary\n{SUMMARY_END}\nafter\n"
+        merged = merge_agents_summary(existing, "new summary")
+        self.assertEqual(
+            merged,
+            f"before\n{SUMMARY_START}\nnew summary\n{SUMMARY_END}\nafter\n",
+        )
+
+    def test_crlf_file_keeps_its_line_endings(self) -> None:
+        existing = "# Notes\r\n\r\nkeep me\r\n"
+        merged = merge_agents_summary(existing, "line one\nline two")
+        self.assertIn(
+            f"{SUMMARY_START}\r\nline one\r\nline two\r\n{SUMMARY_END}", merged
+        )
+        self.assertNotIn("\n", merged.replace("\r\n", ""))
+
+    def test_echoed_markers_do_not_nest_a_second_block(self) -> None:
+        summary = f"intro\n{SUMMARY_START}\nbody\n{SUMMARY_END}\nend"
+        merged = merge_agents_summary(None, summary)
+        self.assertEqual(merged.count(SUMMARY_START), 1)
+        self.assertEqual(merged.count(SUMMARY_END), 1)
+        self.assertIn("body", merged)
 
 
 if __name__ == "__main__":

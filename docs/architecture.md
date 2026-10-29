@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.0.0.
+Applies to MinimalCode 1.1.0.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -10,6 +10,7 @@ MinimalCode keeps one process and one HTTP connection pool per run. There is no 
 CLI
   -> Settings + shell detection
   -> session load/create
+  -> repository instructions re-read (AGENTS.md / CLAUDE.md)
   -> provider stream request
   -> assistant message or tool calls
   -> focused tool execution
@@ -26,14 +27,14 @@ CLI
 | `httpclient.py` | Client construction, proxy policy for loopback targets, bounded connection retries |
 | `sandbox/` | Sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
-| `prompt.py` | Concise default prompt and `AGENTS.md` discovery |
+| `prompt.py` | Concise default prompt, `AGENTS.md` discovery, marked summary block merge |
 | `provider/` | OpenAI Chat/Responses payloads, HTTP retries, and SSE parsing |
 | `web.py` | Configurable provider web search and fetch client |
 | `vision.py` | Configurable provider vision client for inline image understanding |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
-| `agent.py` | Tool loop, usage accounting, compaction, interrupted-turn repair |
+| `agent.py` | Tool loop, usage accounting, compaction, session summary, interrupted-turn repair |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling |
 

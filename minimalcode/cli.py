@@ -548,6 +548,17 @@ def _interactive(
                 continue
             print("compacted" if changed else "nothing to compact")
             continue
+        if command == "/summary":
+            try:
+                summary_path = agent.write_summary()
+            except (MinimalCodeError, OSError) as exc:
+                print(
+                    f"summary failed: {sanitize_terminal_text(str(exc))}",
+                    file=sys.stderr,
+                )
+                continue
+            print(f"summary written to {sanitize_terminal_text(str(summary_path))}")
+            continue
         if command == "/session":
             print(
                 sanitize_terminal_text(
@@ -559,7 +570,7 @@ def _interactive(
             _handle_effort(agent, text)
             continue
         if command == "/help":
-            print("/new  /clear  /compact  /session  /status  /effort  /exit")
+            print("/new  /clear  /compact  /summary  /session  /status  /effort  /exit")
             continue
         if text.startswith("/"):
             print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)

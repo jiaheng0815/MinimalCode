@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.0.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`1.1.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -14,7 +14,8 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
 - **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。
 - **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`。
-- **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，可用 `SYSTEM.md` 替换默认系统提示词。
+- **会话总结**：`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
+- **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
 - **协议**：OpenAI Chat Completions 与 OpenAI Responses，其他兼容供应商只需配置。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
@@ -38,6 +39,10 @@ minimalcode init
 要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.0 升级到 1.1
+
+1.1.0 没有删除任何公开名字、CLI 参数、配置键或 JSON 字段，升级不需要改代码。可观察的变化只有两处：系统提示会在每次运行开始时重新读取 `AGENTS.md` / `CLAUDE.md`（此前在进程启动时缓存一次），以及新增的交互命令 `/summary`（只在交互模式下可用，`-p` 一次性运行不受影响）。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 0.8 升级到 1.0
 
@@ -139,6 +144,7 @@ JSON 输出字段：
 |---|---|
 | `/new`、`/clear` | 新建会话 |
 | `/compact` | 立即压缩历史 |
+| `/summary` | 让模型总结全部上下文并写入工作区 `AGENTS.md`；文件不存在则创建，已存在则只更新 `<!-- minimalcode:summary:start/end -->` 之间的块，其余内容原样保留 |
 | `/session` | 显示会话文件路径 |
 | `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
 | `/status` | 显示模型、推理强度、shell、上下文和 token 统计（JSON） |
@@ -294,7 +300,7 @@ JSON 输出字段：
 - 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
 - `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
 - 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...` 仍会被拒绝。它不是网络防火墙。
-- `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。
+- `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词，并在每次运行开始前重新读取（文件不存在则跳过）。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。`/summary` 写入 `AGENTS.md` 的路径同样经过这层校验。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
 
