@@ -23,12 +23,14 @@ from . import color
 from .markdown import MarkdownHighlighter
 from .palette import ACTIVITY_TAG, RESET, strip_ansi
 from .sanitize import TerminalSanitizer, sanitize_terminal_text
+from .thinking import ThinkingRenderer
 
 __all__ = [
     "ACTIVITY_TAG",
     "RESET",
     "MarkdownHighlighter",
     "TerminalSanitizer",
+    "ThinkingRenderer",
     "sanitize_terminal_text",
     "strip_ansi",
     "style_activity_tag",

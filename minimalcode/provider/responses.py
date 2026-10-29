@@ -188,9 +188,11 @@ class ResponsesProtocolMixin:
         payload: dict[str, Any],
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Consume Responses SSE events and assemble the final reply."""
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         fallback_text: list[str] = []
         call_states: dict[str, dict[str, str]] = {}
         # Events address an item either by `item_id` or by `output_index`,
@@ -246,7 +248,9 @@ class ResponsesProtocolMixin:
                     raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = decode_json_body(body)
                 if parsed:
-                    return self._parse_responses_payload(data, on_text=on_text)
+                    return self._parse_responses_payload(
+                        data, on_text=on_text, on_thinking=on_thinking
+                    )
                 text = body.decode("utf-8", errors="replace")
                 if "data:" not in text:
                     raise ProviderError("provider returned an invalid response")
@@ -281,6 +285,18 @@ class ResponsesProtocolMixin:
                         continue
                     if event_type == "response.output_text.done":
                         add_fallback_text(content_text(event.get("text")))
+                        continue
+                    if event_type in {
+                        "response.reasoning_summary_text.delta",
+                        "response.reasoning_text.delta",
+                    }:
+                        # Reasoning summaries arrive as their own items; they are
+                        # display-only and never part of the assistant content.
+                        text = content_text(event.get("delta"))
+                        if text:
+                            reasoning_parts.append(text)
+                            if on_thinking is not None:
+                                on_thinking(text)
                         continue
                     if event_type == "response.output_item.added":
                         item = event.get("item")
@@ -328,6 +344,15 @@ class ResponsesProtocolMixin:
                             update_call(item, key)
                         elif item.get("type") == "message":
                             add_fallback_text(content_text(item.get("content")))
+                        elif item.get("type") == "reasoning" and not reasoning_parts:
+                            # Servers that stream no reasoning delta still repeat
+                            # the finished summary here; emit it exactly once.
+                            text = content_text(item.get("summary")) or content_text(
+                                item.get("content")
+                            )
+                            if text and on_thinking is not None:
+                                reasoning_parts.append(text)
+                                on_thinking(text)
                         continue
                     if event_type in {"response.completed", "response.incomplete"}:
                         completed = event.get("response")
@@ -389,6 +414,7 @@ class ResponsesProtocolMixin:
         data: Any,
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Parse one non-streaming Responses payload."""
         if not isinstance(data, dict):
@@ -408,6 +434,15 @@ class ResponsesProtocolMixin:
             content = data["output_text"]
         if content and on_text is not None:
             on_text(content)
+        if on_thinking is not None and isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") != "reasoning":
+                    continue
+                reasoning = content_text(item.get("summary")) or content_text(
+                    item.get("content")
+                )
+                if reasoning:
+                    on_thinking(reasoning)
         return ProviderReply(
             content=content,
             tool_calls=calls,
@@ -420,6 +455,7 @@ class ResponsesProtocolMixin:
         payload: dict[str, Any],
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Request a non-streaming Responses reply."""
         response = self._open(payload)
@@ -432,4 +468,6 @@ class ResponsesProtocolMixin:
                 raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
-        return self._parse_responses_payload(data, on_text=on_text)
+        return self._parse_responses_payload(
+            data, on_text=on_text, on_thinking=on_thinking
+        )

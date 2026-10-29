@@ -585,7 +585,7 @@ class _FakeProvider:
     context_window = 1000
     config: ClassVar[dict] = {}
 
-    def stream_chat(self, messages, *, tools=None, on_text=None):
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
         raise AssertionError("not used")
 
     def complete_text(self, messages):

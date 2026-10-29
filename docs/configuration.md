@@ -218,6 +218,11 @@ Compaction is lossy in the active context but the original JSONL history remains
 Highlighting only applies when stdout is a terminal. `--json`, redirected
 output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 
+Reasoning deltas reported by the provider (`reasoning_content`, `reasoning`, or
+a Responses reasoning summary) are printed in the `h6` heading style before the
+answer, and only when highlighting is active. They are display-only: they never
+enter the assistant message, the session file, or `--json` output.
+
 ## Provider fields
 
 | Key | Required | Meaning |

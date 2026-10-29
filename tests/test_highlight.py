@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from minimalcode.highlight import (
     MarkdownHighlighter,
+    ThinkingRenderer,
     sanitize_terminal_text,
     strip_ansi,
 )
@@ -76,6 +77,20 @@ class HighlightTests(unittest.TestCase):
             "This is incomplete bold",
         )
         self.assertIn("\x1b[1;", stream.getvalue())
+
+    def test_thinking_is_rendered_in_the_h6_style(self) -> None:
+        stream = io.StringIO()
+        renderer = ThinkingRenderer(stream, theme="dark", color=True)
+        renderer.feed("plan \x1b[31mone")
+        renderer.finish()
+        self.assertEqual(stream.getvalue(), "\x1b[2;38;5;245mplan one\x1b[0m\n")
+
+    def test_thinking_writes_nothing_without_ansi_support(self) -> None:
+        stream = io.StringIO()
+        renderer = ThinkingRenderer(stream, color=False)
+        renderer.feed("hidden")
+        renderer.finish()
+        self.assertEqual(stream.getvalue(), "")
 
     def test_plain_text_metacharacters_are_preserved(self) -> None:
         samples = (

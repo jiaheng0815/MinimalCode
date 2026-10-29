@@ -70,6 +70,7 @@ class ChatProtocolMixin:
         payload: dict[str, Any],
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Request a streaming reply, tolerating JSON when SSE is misconfigured."""
         response = self._open(payload)
@@ -81,14 +82,18 @@ class ChatProtocolMixin:
                     raise ProviderError(f"provider stream interrupted: {exc}") from exc
                 parsed, data = decode_json_body(body)
                 if parsed:
-                    return self._parse_chat_payload(data, on_text=on_text)
+                    return self._parse_chat_payload(
+                        data, on_text=on_text, on_thinking=on_thinking
+                    )
                 text = body.decode("utf-8", errors="replace")
                 if "data:" not in text:
                     raise ProviderError("provider returned an invalid response")
                 lines: Iterable[str] = text.splitlines()
             else:
                 lines = response.iter_lines()
-            return self._parse_chat_stream(lines, on_text=on_text)
+            return self._parse_chat_stream(
+                lines, on_text=on_text, on_thinking=on_thinking
+            )
         finally:
             response.close()
 
@@ -97,6 +102,7 @@ class ChatProtocolMixin:
         lines: Iterable[str],
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Accumulate content, tool-call fragments, usage, and finish state."""
         content_parts: list[str] = []
@@ -151,6 +157,16 @@ class ChatProtocolMixin:
                     content_parts.append(text)
                     if on_text is not None:
                         on_text(text)
+
+                if on_thinking is not None:
+                    # DeepSeek/Qwen stream `reasoning_content`; OpenRouter uses
+                    # `reasoning`. Neither belongs in `content`: reasoning is
+                    # display-only and must never enter the assistant message.
+                    reasoning = content_text(
+                        delta.get("reasoning_content")
+                    ) or content_text(delta.get("reasoning"))
+                    if reasoning:
+                        on_thinking(reasoning)
 
                 raw_calls = delta.get("tool_calls")
                 if isinstance(raw_calls, list):
@@ -224,6 +240,7 @@ class ChatProtocolMixin:
         data: Any,
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Parse one non-streaming Chat Completions response body."""
         if not isinstance(data, dict):
@@ -242,6 +259,12 @@ class ChatProtocolMixin:
         content = content_text(message.get("content"))
         if content and on_text is not None:
             on_text(content)
+        if on_thinking is not None:
+            reasoning = content_text(message.get("reasoning_content")) or content_text(
+                message.get("reasoning")
+            )
+            if reasoning:
+                on_thinking(reasoning)
         calls: list[ToolCall] = []
         raw_calls = message.get("tool_calls")
         if isinstance(raw_calls, list):
@@ -274,6 +297,7 @@ class ChatProtocolMixin:
         payload: dict[str, Any],
         *,
         on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Request a non-streaming reply, accepting SSE if the server sends it."""
         response = self._open(payload)
@@ -281,7 +305,9 @@ class ChatProtocolMixin:
             # Some gateways ignore `stream: false` and answer with SSE anyway, so
             # the content type, not the request flag, selects the parser.
             if is_event_stream(response):
-                return self._parse_chat_stream(response.iter_lines(), on_text=on_text)
+                return self._parse_chat_stream(
+                    response.iter_lines(), on_text=on_text, on_thinking=on_thinking
+                )
             try:
                 data = response.json()
             except ValueError as exc:
@@ -290,4 +316,4 @@ class ChatProtocolMixin:
                 raise ProviderError(f"provider response read failed: {exc}") from exc
         finally:
             response.close()
-        return self._parse_chat_payload(data, on_text=on_text)
+        return self._parse_chat_payload(data, on_text=on_text, on_thinking=on_thinking)

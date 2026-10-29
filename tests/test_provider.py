@@ -974,6 +974,176 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(seen[0]["reasoning_effort"], "max")
         self.assertEqual(seen[1]["reasoning"], {"effort": "max"})
 
+    def test_chat_reasoning_is_streamed_separately_from_content(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            events = [
+                {"choices": [{"delta": {"reasoning_content": "weigh "}}]},
+                {"choices": [{"delta": {"reasoning": "options"}}]},
+                {"choices": [{"delta": {"content": "answer"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ]
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+            body += "data: [DONE]\n\n"
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body.encode("utf-8"),
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        deltas: list[str] = []
+        thinking: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}],
+                on_text=deltas.append,
+                on_thinking=thinking.append,
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(thinking, ["weigh ", "options"])
+        self.assertEqual(deltas, ["answer"])
+        self.assertEqual(reply.content, "answer")
+
+    def test_chat_reasoning_is_reported_for_a_whole_response(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "answer",
+                                "reasoning_content": "deliberation",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        thinking: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}],
+                on_thinking=thinking.append,
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(thinking, ["deliberation"])
+        self.assertEqual(reply.content, "answer")
+
+    def test_responses_reasoning_summary_is_streamed_once(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": "checking "},
+                {"type": "response.reasoning_summary_text.delta", "delta": "context"},
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "text": "checking context",
+                },
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "checking context"}
+                        ],
+                    },
+                },
+                {"type": "response.output_text.delta", "delta": "answer"},
+                {"type": "response.completed", "response": {"status": "completed"}},
+            ]
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body.encode("utf-8"),
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": True,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        deltas: list[str] = []
+        thinking: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}],
+                on_text=deltas.append,
+                on_thinking=thinking.append,
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(thinking, ["checking ", "context"])
+        self.assertEqual(deltas, ["answer"])
+        self.assertEqual(reply.content, "answer")
+
+    def test_responses_reasoning_item_is_reported_without_deltas(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": "weighing"}],
+                        },
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "answer"}],
+                        },
+                    ],
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        thinking: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}],
+                on_thinking=thinking.append,
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(thinking, ["weighing"])
+        self.assertEqual(reply.content, "answer")
+
     def test_read_errors_are_not_retried(self) -> None:
         attempts = 0
 

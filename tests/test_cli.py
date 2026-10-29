@@ -27,7 +27,7 @@ class FakeCliProvider:
         self.config: dict = {}
         self.messages: list[dict] = []
 
-    def stream_chat(self, messages, *, tools=None, on_text=None):
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
         self.messages = messages
         if on_text:
             on_text("completed")

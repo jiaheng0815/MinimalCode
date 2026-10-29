@@ -9,6 +9,7 @@ from .config import Settings
 from .highlight import (
     MarkdownHighlighter,
     TerminalSanitizer,
+    ThinkingRenderer,
     sanitize_terminal_text,
     style_activity_tag,
 )
@@ -281,6 +282,17 @@ class Agent:
             if stream_output and highlight_enabled
             else None
         )
+        # Reasoning is shown in the six-level heading style, so it follows the
+        # same switch as highlighting: no ANSI means no reasoning block, and
+        # redirected stdout keeps carrying the answer alone.
+        self._thinking_renderer = (
+            ThinkingRenderer(
+                self.output,
+                theme=str(settings.get("output.theme", "dark")),
+            )
+            if stream_output and highlight_enabled
+            else None
+        )
         self.last_prompt_tokens = 0
         self.estimated_turns = 0
         self._system_prompt: str | None = None
@@ -365,6 +377,10 @@ class Agent:
         self.session.append_usage(normalized)
 
     def _write_delta(self, text: str) -> None:
+        if self._thinking_renderer is not None:
+            # Close the reasoning block first, so the answer never continues on
+            # the styled line the reasoning was written to.
+            self._thinking_renderer.finish()
         if self.stream_output:
             if self._highlighter is not None:
                 self._highlighter.feed(text)
@@ -374,7 +390,14 @@ class Agent:
                     self.output.write(safe)
                     self.output.flush()
 
+    def _write_thinking(self, text: str) -> None:
+        """Render one reasoning delta in the six-level heading style."""
+        if self._thinking_renderer is not None:
+            self._thinking_renderer.feed(text)
+
     def _finish_delta(self) -> None:
+        if self._thinking_renderer is not None:
+            self._thinking_renderer.finish()
         if self._highlighter is not None:
             self._highlighter.finish()
         else:
@@ -427,6 +450,7 @@ class Agent:
                     messages,
                     tools=self.tool_schemas,
                     on_text=self._write_delta,
+                    on_thinking=self._write_thinking,
                 )
             finally:
                 self._finish_delta()

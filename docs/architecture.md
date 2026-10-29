@@ -88,6 +88,7 @@ every tool shares one sandbox, workspace, and configuration instance.
 | Module | Responsibility |
 |---|---|
 | `markdown.py` | Incremental Markdown state machine over streamed deltas |
+| `thinking.py` | Six-level heading styling for streamed reasoning text |
 | `code.py` | Fenced-code tokenizer and keyword/number/string styling |
 | `sanitize.py` | Terminal escape/control sequence removal across deltas |
 | `color.py` | ANSI capability detection and Windows console enabling |

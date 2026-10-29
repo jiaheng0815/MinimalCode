@@ -1,5 +1,15 @@
 # 更新日志
 
+## 未发布
+
+### 变更
+
+- 供应商返回的思考内容现在会显示：Chat 的 `reasoning_content`/`reasoning` 增量与 Responses 的 reasoning summary 事件/条目都会实时输出，样式取自 Markdown 六级标题（调色板 `h6`）。思考内容仅用于显示，不进入 assistant 消息、会话文件或 `--json`；无 ANSI 支持时（重定向输出、`--json`、`NO_COLOR`、`--no-highlight`）不输出。
+
+### 测试
+
+- 新增回归测试：Chat 流式与非流式的思考内容解析、Responses reasoning summary 增量与 reasoning 条目回退、同一段思考不重复输出、agent 的 h6 样式渲染及无 ANSI 时不输出。
+
 ## 1.0.0 - 2026-10-28
 
 首个稳定版本。从 1.0.0 起，1.x 系列保持 CLI 参数、配置键、JSON 输出字段、

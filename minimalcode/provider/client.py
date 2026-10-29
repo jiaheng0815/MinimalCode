@@ -127,17 +127,26 @@ class OpenAICompatibleProvider(
         *,
         tools: list[dict[str, Any]] | None = None,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         """Send one conversation turn using the configured wire protocol."""
         if self.protocol == "openai_responses":
             payload = self._responses_payload(messages, tools)
             if self.stream_enabled:
-                return self._responses_stream_request(payload, on_text=on_text)
-            return self._responses_regular_request(payload, on_text=on_text)
+                return self._responses_stream_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+            return self._responses_regular_request(
+                payload, on_text=on_text, on_thinking=on_thinking
+            )
         payload = self._chat_payload(messages, tools)
         if self.stream_enabled:
-            return self._chat_stream_request(payload, on_text=on_text)
-        return self._chat_regular_request(payload, on_text=on_text)
+            return self._chat_stream_request(
+                payload, on_text=on_text, on_thinking=on_thinking
+            )
+        return self._chat_regular_request(
+            payload, on_text=on_text, on_thinking=on_thinking
+        )
 
     def complete_text(self, messages: list[dict[str, Any]]) -> str:
         """Request a plain text completion, rejecting abnormal finish reasons."""

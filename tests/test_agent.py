@@ -43,7 +43,7 @@ class FakeProvider:
             ),
         ]
 
-    def stream_chat(self, messages, *, tools=None, on_text=None):
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
         reply = self.responses.pop(0)
         if reply.content and on_text:
             on_text(reply.content)
@@ -61,12 +61,31 @@ class MarkdownProvider(FakeProvider):
         self.model = "fake-model"
         self.context_window = 100_000
 
-    def stream_chat(self, messages, *, tools=None, on_text=None):
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
         if on_text:
             on_text(self.text[:8])
             on_text(self.text[8:])
         return ProviderReply(
             content=self.text,
+            tool_calls=[],
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+
+class ThinkingProvider(MarkdownProvider):
+    def __init__(self) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
+        if on_thinking:
+            on_thinking("checking files")
+        if on_text:
+            on_text("done")
+        return ProviderReply(
+            content="done",
             tool_calls=[],
             finish_reason="stop",
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -605,6 +624,67 @@ class AgentTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn("\x1b[", rendered)
             self.assertEqual(strip_ansi(rendered), "Result\n\ndone\n")
+
+    def test_reasoning_is_rendered_in_the_h6_heading_style(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            output = TtyBuffer()
+            with patch(
+                "minimalcode.highlight.color._supports_color", return_value=True
+            ):
+                agent = Agent(
+                    settings=settings,
+                    provider=ThinkingProvider(),
+                    session=session,
+                    tool_runtime=ToolRuntime(settings, workspace, shell),
+                    shell=shell,
+                    output=output,
+                    error_output=io.StringIO(),
+                    quiet=True,
+                )
+                agent.run("look around")
+
+            rendered = output.getvalue()
+            self.assertIn("\x1b[2;38;5;245mchecking files\x1b[0m", rendered)
+            self.assertEqual(strip_ansi(rendered), "checking files\ndone")
+
+    def test_reasoning_is_not_written_without_ansi_support(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            output = io.StringIO()
+            agent = Agent(
+                settings=settings,
+                provider=ThinkingProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                output=output,
+                error_output=io.StringIO(),
+                quiet=True,
+            )
+            agent.run("look around")
+
+            self.assertEqual(output.getvalue(), "done")
 
     def test_system_prompt_is_built_once_per_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
