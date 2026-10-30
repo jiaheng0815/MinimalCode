@@ -252,6 +252,7 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
     if not _has_env_placeholder(protocol) and protocol not in {
         "openai_chat",
         "openai_responses",
+        "anthropic_messages",
     }:
         raise ConfigError(
             f"{path}: provider {name!r} uses unsupported protocol {protocol!r}"
@@ -288,15 +289,14 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         ):
             raise ConfigError(f"{path}: provider {name!r} {key} must be a boolean")
 
-    if "context_window" in provider and not _has_env_placeholder(
-        provider["context_window"]
-    ):
-        _validate_integer(
-            provider["context_window"],
-            path,
-            f"providers.{name}.context_window",
-            minimum=1,
-        )
+    for key in ("context_window", "max_tokens"):
+        if key in provider and not _has_env_placeholder(provider[key]):
+            _validate_integer(
+                provider[key],
+                path,
+                f"providers.{name}.{key}",
+                minimum=1,
+            )
     if "timeout_seconds" in provider and not _has_env_placeholder(
         provider["timeout_seconds"]
     ):

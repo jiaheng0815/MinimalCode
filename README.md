@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.1.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`1.2.0`。运行时依赖只有 `httpx2`，Python 3.11+。
 
 ## 特性
 
@@ -16,7 +16,8 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`。
 - **会话总结**：`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
-- **协议**：OpenAI Chat Completions 与 OpenAI Responses，其他兼容供应商只需配置。
+- **协议**：OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，其他兼容供应商只需配置。
+- **多供应商切换**：内置 36 个供应商预设（33 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
 
@@ -39,6 +40,10 @@ minimalcode init
 要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.1 升级到 1.2
+
+1.2.0 没有删除任何公开名字、CLI 参数、配置键或 JSON 字段，升级不需要改代码。新增的是：`anthropic_messages` 协议、`--anthropic-env`（与 `--provider` 互斥）、交互命令 `/model [供应商/模型]`，以及 `defaults.json` 里的 33 家托管供应商加 `ollama`、`lmstudio`、`vllm` 三个本地预设。预设走常规的默认值合并，已有 `settings.json` 里同名的供应商保留自己设置的键；因此对未改动配置的用户，唯一可见的差异是 `config show`、`minimalcode sessions` 和 `/model` 列表里多出了 `deepseek-anthropic` 与这些供应商。`/model` 只切换当前会话，不写回配置。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.0 升级到 1.1
 
@@ -95,6 +100,7 @@ minimalcode [prompt ...] [options]
 | `--session <id>` | 指定会话：完整 ID、前缀或 `.jsonl` 路径 |
 | `--no-session` | 本次运行不读写会话 |
 | `--provider <name>` | 覆盖配置中的供应商 |
+| `--anthropic-env` | 用 Claude Code 风格的 `ANTHROPIC_*` / `CLAUDE_CODE_*` 环境变量直接启动 Anthropic Messages 协议，不修改配置文件；不能与 `--provider` 同用 |
 | `-m`, `--model <id>` | 覆盖模型 |
 | `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
 | `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
@@ -149,6 +155,7 @@ JSON 输出字段：
 | `/summary` | 让模型总结全部上下文并写入工作区 `AGENTS.md`；文件不存在则创建，已存在则只更新 `<!-- minimalcode:summary:start/end -->` 之间的块，其余内容原样保留 |
 | `/session` | 显示会话文件路径 |
 | `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
+| `/model [供应商/模型]` | 查看当前模型和内置供应商；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
 | `/status` | 显示模型、推理强度、shell、上下文和 token 统计（JSON） |
 | `/help` | 显示命令 |
 | `/exit`、`/quit` | 退出 |
@@ -248,12 +255,121 @@ JSON 输出字段：
 }
 ```
 
-- `protocol` 取 `openai_chat` 或 `openai_responses`。
+- `protocol` 取 `openai_chat`、`openai_responses` 或 `anthropic_messages`。
 - 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
-- `include_usage` 仅在服务端接受 `stream_options` 时开启；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。
+- `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。
+- `max_tokens` 仅 Anthropic Messages 使用，默认 `8192`。官方 Anthropic API 要求该字段；`thinking` 的 `budget_tokens` 会按 `thinking` 等级映射，并保证小于 `max_tokens`。
 - 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可。
 - 代理：供应商、`web_tools`、`vision` 默认沿用环境变量与系统代理设置。`base_url` 指向环回地址（`127.0.0.1`、`::1`、`localhost`）时自动忽略代理，否则本机运行的 Ollama、vLLM 或测试服务器会被 Clash 之类的代理劫走；需要强制时可在对应配置块里写 `"trust_env": true|false`。显式传入自建 transport 时默认不读环境代理，避免代理映射覆盖注入的连接。
+
+### 内置供应商预设
+
+`defaults.json` 已经为常用供应商准备好端点、协议和密钥环境变量。它们不会猜模型 ID：交互中用 `/model 供应商/模型` 时显式给出模型，例如：
+
+```text
+/model deepseek/deepseek-flash
+/model openai/<model-id>
+/model anthropic/<model-id>
+/model moonshot/<model-id>
+```
+
+| 供应商 | API key 环境变量 | 端点 |
+|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1`（Responses） |
+| `deepseek-anthropic` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic`（Anthropic Messages） |
+| `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1`（Responses） |
+| `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1`（Anthropic Messages） |
+| `google` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| `groq` | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
+| `mistral` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
+| `xai` | `XAI_API_KEY` | `https://api.x.ai/v1` |
+| `moonshot` | `MOONSHOT_API_KEY` | `https://api.moonshot.cn/v1` |
+| `zhipu` | `ZHIPUAI_API_KEY` | `https://open.bigmodel.cn/api/paas/v4` |
+| `dashscope` | `DASHSCOPE_API_KEY` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `siliconflow` | `SILICONFLOW_API_KEY` | `https://api.siliconflow.cn/v1` |
+| `together` | `TOGETHER_API_KEY` | `https://api.together.ai/v1` |
+| `fireworks` | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `https://api.perplexity.ai` |
+| `cerebras` | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` |
+| `sambanova` | `SAMBANOVA_API_KEY` | `https://api.sambanova.ai/v1` |
+| `nebius` | `NEBIUS_API_KEY` | `https://api.studio.nebius.com/v1` |
+| `deepinfra` | `DEEPINFRA_TOKEN` | `https://api.deepinfra.com/v1/openai` |
+| `novita` | `NOVITA_API_KEY` | `https://api.novita.ai/openai/v1` |
+| `cohere` | `COHERE_API_KEY` | `https://api.cohere.ai/compatibility/v1` |
+| `github` | `GITHUB_TOKEN` | `https://models.github.ai/inference` |
+| `volcengine` | `ARK_API_KEY` | `https://ark.cn-beijing.volces.com/api/v3` |
+| `minimax` | `MINIMAX_API_KEY` | `https://api.minimax.io/v1` |
+| `hunyuan` | `HUNYUAN_API_KEY` | `https://api.hunyuan.cloud.tencent.com/v1` |
+| `qianfan` | `QIANFAN_API_KEY` | `https://qianfan.baidubce.com/v2` |
+| `modelscope` | `MODELSCOPE_API_KEY` | `https://api-inference.modelscope.cn/v1` |
+| `baichuan` | `BAICHUAN_API_KEY` | `https://api.baichuan-ai.com/v1` |
+| `yi` | `YI_API_KEY` | `https://api.lingyiwanwu.com/v1` |
+| `stepfun` | `STEP_API_KEY` | `https://api.stepfun.com/v1` |
+| `spark` | `SPARK_API_PASSWORD` | `https://spark-api-open.xf-yun.com/v1` |
+| `ppio` | `PPIO_API_KEY` | `https://api.ppio.com/openai/v1` |
+| `ollama` | 无需密钥 | `http://localhost:11434/v1` |
+| `lmstudio` | 无需密钥 | `http://localhost:1234/v1` |
+| `vllm` | 无需密钥 | `http://localhost:8000/v1` |
+
+预设只固定端点和密钥变量名，`context_window` 保持一个保守值（本地三家为 `32768`，其余按各家公开的主推窗口填写），换到更大或更小的模型时按需在 `settings.json` 里调整。区域或套餐端点不同时（例如 MiniMax 国内站 `https://api.minimax.cn/v1`、StepFun 国际站 `https://api.stepfun.ai/v1`、火山方舟 `step_plan` 端点），覆盖 `base_url` 即可；Cohere 的兼容端点不接受 `stream_options`，所以预设里 `include_usage` 为 `false`。
+
+`/model` 切换的是当前会话，不会修改 `settings.json`；要改默认值仍用 `minimalcode config set-provider` / `set-model`。切换后子代理也会继承新的供应商和模型。新供应商如果没有配置 `web_tools` / `vision`，对应的 `web_search`、`web_fetch`、`read_image` 工具会从工具列表中移除，切回带这些配置的供应商后恢复。
+
+Anthropic Messages 模式可以直接接入 DeepSeek 的 Anthropic 兼容端点，内置预设 `deepseek-anthropic`：
+
+```json
+"deepseek-anthropic": {
+  "protocol": "anthropic_messages",
+  "base_url": "https://api.deepseek.com/anthropic",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "model": "deepseek-flash",
+  "context_window": 1000000,
+  "timeout_seconds": 120,
+  "stream": true,
+  "send_reasoning_effort": true,
+  "max_tokens": 8192,
+  "headers": {},
+  "extra_body": {}
+}
+```
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-key"
+minimalcode --provider deepseek-anthropic "运行测试并总结"
+```
+
+端点从 `base_url` 推导：`https://api.deepseek.com/anthropic` 会请求 `/anthropic/v1/messages`；`base_url` 已以 `/v1` 结尾时只补 `/messages`，已经是完整 `/messages` 地址时原样使用。鉴权发送 `x-api-key`，并附带 `anthropic-version: 2023-06-01`（自定义 `headers` 中的同名字段优先）。工具定义会转换为 Anthropic 的 `name` / `description` / `input_schema`，连续的工具结果会合并到同一条 user 消息，且 `tool_result` 块放在文本之前。思考模式下通过工具调用继续对话时，assistant 的 thinking 块（含 signature）会保存在会话中并原样回传，以保证 Anthropic 的多轮工具调用可以继续。
+
+### 从 Claude Code 环境变量启动
+
+如果本机已经按 [DeepSeek 的 Claude Code 接入文档](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/claude_code)配好了环境变量，可以跳过配置文件直接用：
+
+```powershell
+$env:ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
+$env:ANTHROPIC_AUTH_TOKEN="<你的 DeepSeek API Key>"
+$env:ANTHROPIC_MODEL="deepseek-flash[1m]"
+$env:CLAUDE_CODE_EFFORT_LEVEL="max"
+$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW="786432"
+
+minimalcode --anthropic-env
+```
+
+`--anthropic-env` 只在本进程内合成一个名为 `anthropic-env` 的供应商，不读写 `settings.json`，因此普通启动（不带该参数）仍然使用文件配置；它也不能与 `--provider` 同时使用。
+
+| 环境变量 | 作用 |
+|---|---|
+| `ANTHROPIC_BASE_URL` | 端点根，默认 `https://api.deepseek.com/anthropic` |
+| `ANTHROPIC_AUTH_TOKEN` | Bearer 凭据，作为 `Authorization: Bearer` 发送；与 `ANTHROPIC_API_KEY` 同时存在时优先 |
+| `ANTHROPIC_API_KEY` | 作为 `x-api-key` 发送（两者至少需要一个） |
+| `ANTHROPIC_MODEL` | 模型名；缺省时回退到 `ANTHROPIC_DEFAULT_SONNET_MODEL`，再缺省则报错。`--model` 优先级最高 |
+| `CLAUDE_CODE_EFFORT_LEVEL` | 推理强度，取值同 `--thinking`；`--thinking` 优先 |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 自动压缩阈值（token），换算成 `context.compact_at`，只在本次运行生效 |
+| `ANTHROPIC_CONTEXT_WINDOW` | 覆盖上下文窗口（MinimalCode 扩展项） |
+| `ANTHROPIC_MAX_TOKENS` | 覆盖输出上限，默认 `8192`（MinimalCode 扩展项） |
+
+模型名里的 `[1m]` / `[200k]` 这类 Claude Code 后缀只用于选择上下文窗口，发送请求前会被去掉（`deepseek-flash[1m]` → `deepseek-flash`，窗口 1000000）；不带后缀时默认按 Anthropic 标准的 200000。`--anthropic-env` 不读取配置文件里的 `web_tools` / `vision`，因此这次运行没有 `web_search`、`web_fetch` 和 `read_image` 工具；需要这些工具时仍用 `--provider deepseek-anthropic`。
 
 沙箱执行层默认关闭（默认 `--no-sandbox`），需要时用 `--sandbox` 或把 `enabled` 设为 `true` 开启；开启后默认只允许工作区、默认禁网：
 
@@ -331,10 +447,11 @@ python main.py -p "inspect this repository"
 minimalcode/
 ├── cli.py           # 参数解析、管理命令、交互循环
 ├── agent.py         # 工具循环、用量统计、上下文压缩
-├── provider/        # OpenAI Chat / Responses 客户端
+├── provider/        # OpenAI Chat / Responses 与 Anthropic Messages 客户端
 │   ├── client.py    #   共享客户端与协议分派
 │   ├── chat.py      #   Chat Completions 载荷、流与解析
 │   ├── responses.py #   Responses 载荷、事件流与解析
+│   ├── anthropic.py #   Anthropic Messages 载荷、流与解析
 │   ├── transport.py #   HTTP 请求建立与连接重试
 │   ├── common.py    #   usage / 内容 / 参数归一化
 │   ├── types.py     #   ToolCall、ProviderReply
@@ -387,7 +504,7 @@ minimalcode/
 
 ## 后续工作
 
-- 原生 Anthropic、Gemini 协议适配。
+- 原生 Gemini 协议适配。
 - RPC/SDK 集成。
 - 扩展、Skills 和主题系统。
 - 更细粒度的工具权限。

@@ -1,5 +1,36 @@
 # 更新日志
 
+## 1.2.0 - 2026-10-30
+
+### 新增
+
+- 新增交互命令 `/model [供应商/模型]`：无参数时显示当前模型、内置供应商、各自的默认模型与密钥状态；给出 `供应商/模型`（如 `deepseek/deepseek-flash`）时切换当前会话的供应商和模型，不写回 `settings.json`。切换会重建供应商客户端、Web/视觉客户端和工具运行时，保留会话历史，子代理随之继承新的 `--provider` / `--model`；缺少对应 `XXX_API_KEY` 时保持原供应商并报出环境变量名。
+- 内置供应商预设新增 `openai`（`OPENAI_API_KEY`）、`anthropic`（`ANTHROPIC_API_KEY`）、`google`（`GEMINI_API_KEY`）、`openrouter`（`OPENROUTER_API_KEY`）、`groq`（`GROQ_API_KEY`）、`mistral`（`MISTRAL_API_KEY`）、`xai`（`XAI_API_KEY`）、`moonshot`（`MOONSHOT_API_KEY`）、`zhipu`（`ZHIPUAI_API_KEY`）、`dashscope`（`DASHSCOPE_API_KEY`）、`siliconflow`（`SILICONFLOW_API_KEY`）、`together`（`TOGETHER_API_KEY`）、`fireworks`（`FIREWORKS_API_KEY`）、`perplexity`（`PERPLEXITY_API_KEY`）、`cerebras`（`CEREBRAS_API_KEY`）、`sambanova`（`SAMBANOVA_API_KEY`）、`nebius`（`NEBIUS_API_KEY`）、`deepinfra`（`DEEPINFRA_TOKEN`）、`novita`（`NOVITA_API_KEY`）、`cohere`（`COHERE_API_KEY`）、`github`（`GITHUB_TOKEN`）、`volcengine`（`ARK_API_KEY`）、`minimax`（`MINIMAX_API_KEY`）、`hunyuan`（`HUNYUAN_API_KEY`）、`qianfan`（`QIANFAN_API_KEY`）、`modelscope`（`MODELSCOPE_API_KEY`）、`baichuan`（`BAICHUAN_API_KEY`）、`yi`（`YI_API_KEY`）、`stepfun`（`STEP_API_KEY`）、`spark`（`SPARK_API_PASSWORD`）、`ppio`（`PPIO_API_KEY`），以及本地 `ollama`、`lmstudio`、`vllm`（无需密钥）。预设只绑定端点和密钥变量，不猜模型 ID；本地三家的 `context_window` 取保守的 `32768`。
+- 新增 `--anthropic-env`：直接读取 Claude Code 风格的 `ANTHROPIC_*` / `CLAUDE_CODE_*` 环境变量启动 Anthropic Messages 协议，不读写 `settings.json`，普通启动仍走文件配置。支持 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`（`Authorization: Bearer`）、`ANTHROPIC_API_KEY`（`x-api-key`）、`ANTHROPIC_MODEL`（回退 `ANTHROPIC_DEFAULT_SONNET_MODEL`）、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW`，以及扩展项 `ANTHROPIC_CONTEXT_WINDOW`、`ANTHROPIC_MAX_TOKENS`。模型名里的 `[1m]` / `[200k]` 后缀用于选择上下文窗口并在发送前去掉；该参数与 `--provider` 互斥。
+- 新增 `anthropic_messages` 供应商协议，可直接接入 Anthropic Messages API 及其兼容实现。请求会拆分 system 文本、把历史消息转换为 content blocks、把 OpenAI 风格的工具定义转换为 `name` / `description` / `input_schema`，并把连续的工具结果合并为一条 user 消息且保证 `tool_result` 位于文本之前。
+- 新增内置 `deepseek-anthropic` 预设，指向 `https://api.deepseek.com/anthropic`，复用 `DEEPSEEK_API_KEY`。
+- 新增 Anthropic 流式解析：`message_start`、content block 的 text/thinking/tool_use 增量、`message_delta` 的 stop reason 与累计 usage、`message_stop`、错误事件，以及未收到 `message_stop` 时标记为 `incomplete`。
+- Anthropic 思考模式下，工具调用轮的 thinking 块（含 signature）会保存在 assistant 消息的 `provider_content` 中并在下一轮原样回传；已完成的回答不保留思考块。Chat 请求会剥离该字段，避免切换协议后把 Anthropic 私有字段发给 OpenAI 兼容服务。
+- 供应商配置新增 `max_tokens`（Anthropic 默认 `8192`）。`send_reasoning_effort: true` 时按思考等级发送 `thinking`，`none` 发送 `{"type":"disabled"}`。
+
+### 变更
+
+- 版本号升级到 1.2.0。本次发布没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段或会话格式；公开面的变化全部是新增。
+- `/new` 改为复用当前活动的供应商与模型，而不是启动时的那一份。切换模型后新建会话不会退回旧模型，同时清零上一会话的累计用量。
+
+### 文档
+
+- README 增加“内置供应商预设”表、`/model` 用法和 1.1 → 1.2 升级说明；`docs/configuration.md` 记录预设、密钥变量和区域端点覆盖方式；`docs/compatibility.md` 增加 1.2.0 的兼容性说明。
+
+### 测试
+
+- 新增 `/model` 回归测试：切换后活动供应商、模型和工具运行时同步更新，旧客户端关闭，会话历史保留；密钥缺失时保持原供应商并报出 `OPENAI_API_KEY`；非法选择器（未知供应商、无默认模型的供应商、空模型）不会改动当前运行时；`/new` 使用切换后的模型。
+- 新增内置供应商预设测试：逐个断言 `api_key_env` 指向对应厂商的环境变量，本地三家不要求密钥且指向环回地址；并按真实配置构造客户端，断言 36 个预设的 `_endpoint()` 都拼出完整的 `/chat/completions`、`/responses` 或 `/messages` 地址。
+- 新增 Anthropic 协议回归测试：非流式载荷、header 与用量归一化，工具定义转换，工具结果合并及 `is_error`，流式 text/thinking/tool_use 分片，thinking signature 回传，SSE 错误，缺少 `message_stop`，端点推导，`provider_content` 不完整时回退到 `tool_calls`，`thinking: none`，以及 Chat 对 `provider_content` 的剥离。
+- 新增 Anthropic 端到端测试：本地 HTTP 服务以 SSE 返回 thinking + `tool_use`，验证真实文件写入、第二轮请求里 thinking 块（含 signature）按原样回传、`tool_result` 位于 user 消息首位，以及 CLI 的 JSON 输出。
+- 配置测试覆盖 `anthropic_messages` 协议与非法 `max_tokens`。
+- 新增 `--anthropic-env` 回归测试：环境变量合成供应商、Bearer 与 `x-api-key` 两种凭据、`[1m]` 后缀与窗口换算、`CLAUDE_CODE_*` 覆盖、非法数值报错、`--provider` 互斥，以及 CLI 运行时 `settings.json` 逐字节不变。
+
 ## 1.1.0 - 2026-10-29
 
 ### 新增

@@ -36,10 +36,92 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(created.get("sandbox.allow_sensitive_files"))
             _, provider = created.provider_config()
             self.assertEqual(provider["protocol"], "openai_responses")
+            anthropic_name, anthropic = created.provider_config("deepseek-anthropic")
+            self.assertEqual(anthropic_name, "deepseek-anthropic")
+            self.assertEqual(anthropic["protocol"], "anthropic_messages")
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8"))["max_turns"],
                 1000,
             )
+
+    def test_builtin_providers_use_vendor_key_variables(self) -> None:
+        expected = {
+            "deepseek": "DEEPSEEK_API_KEY",
+            "deepseek-anthropic": "DEEPSEEK_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "google": "GEMINI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "mistral": "MISTRAL_API_KEY",
+            "xai": "XAI_API_KEY",
+            "moonshot": "MOONSHOT_API_KEY",
+            "zhipu": "ZHIPUAI_API_KEY",
+            "dashscope": "DASHSCOPE_API_KEY",
+            "siliconflow": "SILICONFLOW_API_KEY",
+            "together": "TOGETHER_API_KEY",
+            "fireworks": "FIREWORKS_API_KEY",
+            "perplexity": "PERPLEXITY_API_KEY",
+            "cerebras": "CEREBRAS_API_KEY",
+            "sambanova": "SAMBANOVA_API_KEY",
+            "nebius": "NEBIUS_API_KEY",
+            "deepinfra": "DEEPINFRA_TOKEN",
+            "novita": "NOVITA_API_KEY",
+            "cohere": "COHERE_API_KEY",
+            "github": "GITHUB_TOKEN",
+            "volcengine": "ARK_API_KEY",
+            "minimax": "MINIMAX_API_KEY",
+            "hunyuan": "HUNYUAN_API_KEY",
+            "qianfan": "QIANFAN_API_KEY",
+            "modelscope": "MODELSCOPE_API_KEY",
+            "baichuan": "BAICHUAN_API_KEY",
+            "yi": "YI_API_KEY",
+            "stepfun": "STEP_API_KEY",
+            "spark": "SPARK_API_PASSWORD",
+            "ppio": "PPIO_API_KEY",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            settings = load_settings(Path(temp) / ".MinimalCode")
+            for name, env_name in expected.items():
+                with self.subTest(name=name):
+                    resolved_name, provider = settings.provider_config(name)
+                    self.assertEqual(resolved_name, name)
+                    self.assertEqual(provider["api_key_env"], env_name)
+            for name in ("ollama", "lmstudio", "vllm"):
+                with self.subTest(name=name):
+                    _, provider = settings.provider_config(name)
+                    self.assertFalse(provider["require_api_key"])
+                    self.assertNotIn("api_key_env", provider)
+                    self.assertTrue(provider["base_url"].startswith("http://localhost"))
+
+    def test_builtin_presets_build_a_complete_endpoint(self) -> None:
+        from minimalcode.provider import OpenAICompatibleProvider
+
+        with tempfile.TemporaryDirectory() as temp:
+            settings = load_settings(Path(temp) / ".MinimalCode")
+            for name in settings.data["providers"]:
+                with self.subTest(name=name):
+                    _, provider_config = settings.provider_config(name)
+                    env_name = provider_config.get("api_key_env")
+                    patch_env = {env_name: "test-key"} if env_name else {}
+                    with patch.dict(os.environ, patch_env, clear=False):
+                        provider = OpenAICompatibleProvider(
+                            name=name,
+                            config=provider_config,
+                            model="test-model",
+                            thinking="high",
+                        )
+                        try:
+                            endpoint = provider._endpoint()
+                        finally:
+                            provider.close()
+                    self.assertTrue(endpoint.startswith(("https://", "http://")))
+                    self.assertTrue(
+                        endpoint.endswith(
+                            ("/chat/completions", "/responses", "/messages")
+                        ),
+                        endpoint,
+                    )
 
     def test_home_environment_override(self) -> None:
         with (
@@ -125,6 +207,7 @@ class ConfigTests(unittest.TestCase):
             ("protocol", "native"),
             ("base_url", "not a url"),
             ("context_window", 0),
+            ("max_tokens", 0),
             ("timeout_seconds", 0),
             ("stream", "yes"),
             ("headers", "not-an-object"),

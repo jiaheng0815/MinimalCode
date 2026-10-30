@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -44,20 +45,37 @@ class FakeCliProvider:
         self.closed = True
 
 
+class FakeClosingClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class StubAgent:
     """Minimal stand-in for the interactive loop's agent contract."""
 
     def __init__(self, cwd: Path, *, failures: int = 0) -> None:
         self.shell = SimpleNamespace(label="stub-shell")
         self.session = SimpleNamespace(cwd=cwd, path=None)
-        self.provider = SimpleNamespace(
-            name="fake", model="fake-model", thinking="high"
-        )
+        self.provider = FakeCliProvider()
         self.tools = SimpleNamespace(
-            web_client=None, vision_client=None, thinking="high"
+            web_client=None,
+            vision_client=None,
+            thinking="high",
+            subagent_enabled=True,
         )
         self.prompts: list[str] = []
         self._failures = failures
+
+    def switch_runtime(self, provider, tools) -> None:
+        self.provider = provider
+        self.tools = tools
+
+    def new_session(self, session, tools) -> None:
+        self.session = session
+        self.tools = tools
 
     def run(self, text: str) -> SimpleNamespace:
         self.prompts.append(text)
@@ -317,6 +335,190 @@ class CliTests(unittest.TestCase):
             self.assertIn("effort: max", stdout.getvalue())
             self.assertIn("unknown effort: turbo", stderr.getvalue())
 
+    def test_interactive_model_command_switches_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            old_provider = stub.provider
+            old_web = FakeClosingClient()
+            old_vision = FakeClosingClient()
+            stub.tools.web_client = old_web
+            stub.tools.vision_client = old_vision
+            args = argparse.Namespace(
+                no_session=False,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(
+                ["/model", "/model openai/gpt-test", "/new", "/model", "/exit"]
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}),
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "fake-model")
+
+            self.assertEqual(code, 0)
+            self.assertTrue(old_provider.closed)
+            self.assertTrue(old_web.closed)
+            self.assertTrue(old_vision.closed)
+            self.assertEqual(stub.provider.name, "openai")
+            self.assertEqual(stub.provider.model, "gpt-test")
+            self.assertEqual(stub.provider.thinking, "high")
+            self.assertEqual(stub.tools.provider_name, "openai")
+            self.assertEqual(stub.tools.model, "gpt-test")
+            self.assertEqual(stub.tools.thinking, "high")
+            output = stdout.getvalue()
+            self.assertIn("model: fake/fake-model", output)
+            self.assertIn("OPENAI_API_KEY (set)", output)
+            self.assertIn("no key required", output)
+            self.assertIn("model: openai/gpt-test", output)
+            self.assertEqual(stderr.getvalue(), "")
+
+            rows = store.list()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["provider"], "openai")
+            self.assertEqual(rows[0]["model"], "gpt-test")
+            persisted = load_settings(home, require_file=True)
+            self.assertEqual(persisted.get("provider"), "deepseek")
+            self.assertEqual(persisted.get("model"), "deepseek-flash")
+
+            stub.provider.close()
+            for client in (stub.tools.web_client, stub.tools.vision_client):
+                if client is not None:
+                    client.close()
+
+    def test_interactive_model_command_uses_provider_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["/model deepseek-anthropic", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "fake-model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.provider.name, "deepseek-anthropic")
+            self.assertEqual(stub.provider.model, "deepseek-flash")
+            self.assertIn("model: deepseek-anthropic/deepseek-flash", stdout.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+
+            stub.provider.close()
+            for client in (stub.tools.web_client, stub.tools.vision_client):
+                if client is not None:
+                    client.close()
+
+    def test_interactive_model_command_keeps_provider_when_key_is_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            old_provider = stub.provider
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["/model", "/model openai/gpt-test", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "fake-model")
+
+            self.assertEqual(code, 0)
+            self.assertIs(stub.provider, old_provider)
+            self.assertFalse(old_provider.closed)
+            self.assertIn("OPENAI_API_KEY (missing)", stdout.getvalue())
+            self.assertIn("model switch failed", stderr.getvalue())
+            self.assertIn("OPENAI_API_KEY", stderr.getvalue())
+
+    def test_interactive_model_command_rejects_bad_selectors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(
+                [
+                    "/model deepseek",
+                    "/model missing/model",
+                    "/model deepseek/",
+                    "/exit",
+                ]
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "fake-model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.provider.name, "fake")
+            self.assertNotIn("model: ", stdout.getvalue())
+            errors = stderr.getvalue()
+            self.assertIn("has no default model", errors)
+            self.assertIn("unknown provider: missing", errors)
+            self.assertIn("usage: /model [provider/model]", errors)
+
     def test_interactive_loop_survives_a_failed_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -443,6 +645,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stub.prompts, [])
             self.assertEqual(stderr.getvalue(), "")
             self.assertIn("/summary", stdout.getvalue())
+            self.assertIn("/model", stdout.getvalue())
             self.assertIn("summary written to", stdout.getvalue())
             self.assertEqual(
                 (workspace / "AGENTS.md").read_text(encoding="utf-8"), "summary\n"

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "minimalcode"
 dynamic = ["version"]
-description = "A configurable coding agent with provider web tools and Responses/Chat support"
+description = "A configurable coding agent with provider web tools and Responses/Chat/Anthropic support"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-keywords = ["coding-agent", "cli", "terminal", "openai", "deepseek"]
+keywords = ["coding-agent", "cli", "terminal", "openai", "anthropic", "deepseek", "openai-compatible", "multi-provider"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Console",

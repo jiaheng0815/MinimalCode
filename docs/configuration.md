@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.1.0.
+Applies to MinimalCode 1.2.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -220,25 +220,29 @@ Instruction files are re-read at the start of every run: global `AGENTS.md`, the
 Highlighting only applies when stdout is a terminal. `--json`, redirected
 output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 
-Reasoning deltas reported by the provider (`reasoning_content`, `reasoning`, or
-a Responses reasoning summary) are printed in the `h6` heading style before the
-answer, and only when highlighting is active. They are display-only: they never
-enter the assistant message, the session file, or `--json` output.
+Reasoning deltas reported by the provider (`reasoning_content`, `reasoning`, a
+Responses reasoning summary, or Anthropic thinking) are printed in the `h6`
+heading style before the answer, and only when highlighting is active. They are
+display-only and never enter `--json` output. Anthropic is the one exception to
+the session rule: while a tool call is open, its thinking blocks carry signatures
+that must be replayed, so they are stored with that assistant message and sent
+back on the next turn. Finished answers do not retain them.
 
 ## Provider fields
 
 | Key | Required | Meaning |
 |---|---|---|
-| `protocol` | yes | `"openai_chat"` or `"openai_responses"` |
-| `base_url` | yes | Base URL up to `/v1`, or the complete chat endpoint |
+| `protocol` | yes | `"openai_chat"`, `"openai_responses"`, or `"anthropic_messages"` |
+| `base_url` | yes | Base URL up to `/v1`, or the complete protocol endpoint |
 | `model` | no | Provider-specific default model; overrides the top-level model for this provider |
-| `api_key_env` | no | Environment variable containing the bearer token |
-| `api_key` | no | Inline bearer token; prefer an environment variable |
+| `api_key_env` | no | Environment variable containing the API key |
+| `api_key` | no | Inline API key; prefer an environment variable |
 | `require_api_key` | no | Defaults to true when `api_key_env` is set |
 | `context_window` | no | Model context size, default `128000` |
+| `max_tokens` | no | Anthropic output cap, default `8192`; required by the official API |
 | `timeout_seconds` | no | HTTP read timeout, default `120` |
 | `stream` | no | SSE streaming, default `true` |
-| `include_usage` | no | Send `stream_options`, default `true` |
+| `include_usage` | no | Send `stream_options`, default `true` (Chat only) |
 | `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
@@ -249,7 +253,7 @@ numeric limits, booleans, and object fields are checked before the first request
 Values containing `${VAR}` placeholders are expanded later, so they are checked
 again when that provider becomes active.
 
-Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`.
+Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
 
 Requests that fail before a response is received (`ConnectError`, `ConnectTimeout`,
 and `RemoteProtocolError` such as `Server disconnected without sending a
@@ -268,6 +272,118 @@ to the caller's loopback interface. Set `trust_env` explicitly (per provider,
 and vision clients share the same rules and the same retry budget.
 
 For `openai_responses`, `include_usage` is not needed because usage is returned in the terminal response event. `send_reasoning_effort` sends `{"reasoning":{"effort": ...}}` (`none` disables thinking); reserved request fields are `model`, `input`, `stream`, `tools`, and `tool_choice`. For `openai_chat`, it sends `reasoning_effort`; `none` instead sends `{"thinking":{"type":"disabled"}}`.
+
+For `anthropic_messages`, requests go to `base_url` plus `/v1/messages` unless
+`base_url` already ends in `/v1` (then only `/messages` is appended) or already
+names `/messages`. This makes both `https://api.deepseek.com/anthropic` and
+`https://api.anthropic.com/v1` work. Authentication uses `x-api-key` and the
+`anthropic-version: 2023-06-01` header; a custom `headers` entry with either
+name overrides the generated one. Chat-style tool declarations are converted to
+Anthropic's `name`/`description`/`input_schema` shape, and consecutive tool
+results are merged into one user turn with every `tool_result` block ahead of
+text. With `send_reasoning_effort: true`, `thinking` becomes
+`{"type":"enabled","budget_tokens":N}` (`none` becomes
+`{"type":"disabled"}`); the budget is capped below `max_tokens`. Thinking blocks
+for an open tool call are replayed with their signatures until that tool turn
+completes.
+
+The built-in `deepseek-anthropic` provider points at DeepSeek's Anthropic
+compatible endpoint and reuses `DEEPSEEK_API_KEY`:
+
+```json
+"deepseek-anthropic": {
+  "protocol": "anthropic_messages",
+  "base_url": "https://api.deepseek.com/anthropic",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "model": "deepseek-flash",
+  "context_window": 1000000,
+  "timeout_seconds": 120,
+  "stream": true,
+  "send_reasoning_effort": true,
+  "max_tokens": 8192,
+  "headers": {},
+  "extra_body": {}
+}
+```
+
+Select it per run with `minimalcode --provider deepseek-anthropic ...`. Image
+blocks in stored history are converted to Anthropic `image` sources (base64 data
+URLs become `type: "base64"`), though `read_image` itself still uses the
+provider's `vision` endpoint.
+
+## Built-in provider presets
+
+`defaults.json` ships endpoint and credential presets for the providers below. A preset never guesses a model ID: pass it explicitly, for example `/model deepseek/deepseek-flash` in the interactive loop or `--provider` / `--model` on the command line. Existing `settings.json` files receive the presets through the normal defaults merge; a provider the user already defined wins for the keys it sets.
+
+| Provider | `api_key_env` | Protocol |
+|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `openai_responses` |
+| `deepseek-anthropic` | `DEEPSEEK_API_KEY` | `anthropic_messages` |
+| `openai` | `OPENAI_API_KEY` | `openai_responses` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `anthropic_messages` |
+| `google` | `GEMINI_API_KEY` | `openai_chat` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openai_chat` |
+| `groq` | `GROQ_API_KEY` | `openai_chat` |
+| `mistral` | `MISTRAL_API_KEY` | `openai_chat` |
+| `xai` | `XAI_API_KEY` | `openai_chat` |
+| `moonshot` | `MOONSHOT_API_KEY` | `openai_chat` |
+| `zhipu` | `ZHIPUAI_API_KEY` | `openai_chat` |
+| `dashscope` | `DASHSCOPE_API_KEY` | `openai_chat` |
+| `siliconflow` | `SILICONFLOW_API_KEY` | `openai_chat` |
+| `together` | `TOGETHER_API_KEY` | `openai_chat` |
+| `fireworks` | `FIREWORKS_API_KEY` | `openai_chat` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `openai_chat` |
+| `cerebras` | `CEREBRAS_API_KEY` | `openai_chat` |
+| `sambanova` | `SAMBANOVA_API_KEY` | `openai_chat` |
+| `nebius` | `NEBIUS_API_KEY` | `openai_chat` |
+| `deepinfra` | `DEEPINFRA_TOKEN` | `openai_chat` |
+| `novita` | `NOVITA_API_KEY` | `openai_chat` |
+| `cohere` | `COHERE_API_KEY` | `openai_chat` |
+| `github` | `GITHUB_TOKEN` | `openai_chat` |
+| `volcengine` | `ARK_API_KEY` | `openai_chat` |
+| `minimax` | `MINIMAX_API_KEY` | `openai_chat` |
+| `hunyuan` | `HUNYUAN_API_KEY` | `openai_chat` |
+| `qianfan` | `QIANFAN_API_KEY` | `openai_chat` |
+| `modelscope` | `MODELSCOPE_API_KEY` | `openai_chat` |
+| `baichuan` | `BAICHUAN_API_KEY` | `openai_chat` |
+| `yi` | `YI_API_KEY` | `openai_chat` |
+| `stepfun` | `STEP_API_KEY` | `openai_chat` |
+| `spark` | `SPARK_API_PASSWORD` | `openai_chat` |
+| `ppio` | `PPIO_API_KEY` | `openai_chat` |
+| `ollama` | none (`require_api_key: false`) | `openai_chat` |
+| `lmstudio` | none (`require_api_key: false`) | `openai_chat` |
+| `vllm` | none (`require_api_key: false`) | `openai_chat` |
+
+Presets pin the endpoint and the credential variable only. `context_window` is a conservative `32768` for the three local servers and the vendor's headline window for the rest; override it in `settings.json` when a different model needs more or less. Regional or plan-specific endpoints (MiniMax's `https://api.minimax.cn/v1`, StepFun's `https://api.stepfun.ai/v1`, Volcengine's `step_plan` endpoint) are a `base_url` override away. Cohere's compatibility API rejects `stream_options`, so its preset sets `include_usage: false`. Providers that need a signature or a query string per request (Azure OpenAI's `api-version`, Bedrock, Vertex) are not presets: configure them manually with `headers` and a full endpoint `base_url`.
+
+`/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Use `/model` without arguments to list the active model, every configured provider, its default model (when one is configured), and whether its key is present.
+
+## Claude Code environment
+
+`minimalcode --anthropic-env` builds the same kind of provider entry from the
+environment instead of the settings file, following the variable names Claude
+Code uses. This is the intended entry point for a machine already configured
+against DeepSeek's Anthropic-compatible endpoint; nothing is written to
+`settings.json`, so an ordinary run keeps using the file configuration.
+
+| Variable | Meaning |
+|---|---|
+| `ANTHROPIC_BASE_URL` | Endpoint root, default `https://api.deepseek.com/anthropic` |
+| `ANTHROPIC_AUTH_TOKEN` | Bearer credential sent as `Authorization: Bearer`; wins when both are set |
+| `ANTHROPIC_API_KEY` | Credential sent as `x-api-key`; at least one of the two is required |
+| `ANTHROPIC_MODEL` | Model ID; falls back to `ANTHROPIC_DEFAULT_SONNET_MODEL`, then an error. `--model` wins |
+| `CLAUDE_CODE_EFFORT_LEVEL` | Reasoning effort, same values as `--thinking`; `--thinking` wins |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | Token threshold mapped to `context.compact_at` for this run |
+| `ANTHROPIC_CONTEXT_WINDOW` | Context window override (MinimalCode extension) |
+| `ANTHROPIC_MAX_TOKENS` | Output cap override, default `8192` (MinimalCode extension) |
+
+A Claude Code model suffix such as `[1m]` or `[200k]` selects the context window
+and is stripped before the request (`deepseek-flash[1m]` becomes
+`deepseek-flash` with a 1000000-token window). Without a suffix the Anthropic
+standard of 200000 applies. The flag rejects `--provider`, and it does not read
+the file's `web_tools` / `vision` blocks, so `web_search`, `web_fetch`, and
+`read_image` are unavailable for that run; use `--provider deepseek-anthropic`
+when those tools are needed.
 
 ## Web tools
 

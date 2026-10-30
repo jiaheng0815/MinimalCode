@@ -1,4 +1,4 @@
-"""Provider client shared by the Chat and Responses protocol mixins."""
+"""Provider client shared by the Chat, Responses, and Anthropic mixins."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import httpx2
 from ..config import provider_api_key
 from ..errors import ProviderError
 from ..httpclient import build_client, build_headers
+from .anthropic import AnthropicProtocolMixin
 from .chat import ChatProtocolMixin
 from .responses import ResponsesProtocolMixin
 from .transport import TransportMixin
@@ -22,8 +23,9 @@ class OpenAICompatibleProvider(
     TransportMixin,
     ChatProtocolMixin,
     ResponsesProtocolMixin,
+    AnthropicProtocolMixin,
 ):
-    """HTTP client for OpenAI-compatible Chat Completions and Responses APIs."""
+    """HTTP client for OpenAI Chat/Responses and Anthropic Messages APIs."""
 
     def __init__(
         self,
@@ -38,10 +40,15 @@ class OpenAICompatibleProvider(
         # Unknown names are rejected rather than defaulted to Chat: the dialects
         # need different payload keys and parsers, so a fallback would send a
         # request the server rejects or we misparse.
-        if protocol not in {"openai_chat", "openai_responses"}:
+        if protocol not in {
+            "openai_chat",
+            "openai_responses",
+            "anthropic_messages",
+        }:
             raise ProviderError(
                 f"provider {name!r} uses unsupported protocol {protocol!r}; "
-                "expected 'openai_chat' or 'openai_responses'"
+                "expected 'openai_chat', 'openai_responses', or "
+                "'anthropic_messages'"
             )
         self.name = name
         self.config = config
@@ -66,6 +73,7 @@ class OpenAICompatibleProvider(
         try:
             self.context_window = int(config.get("context_window", 128_000))
             self.timeout_seconds = float(config.get("timeout_seconds", 120))
+            self.max_tokens = int(config.get("max_tokens", 8192))
         except (TypeError, ValueError, OverflowError) as exc:
             raise ProviderError(
                 f"provider {name!r} has invalid numeric settings"
@@ -76,6 +84,8 @@ class OpenAICompatibleProvider(
             raise ProviderError(
                 f"provider {name!r} requires a positive timeout_seconds"
             )
+        if self.max_tokens < 1:
+            raise ProviderError(f"provider {name!r} requires a positive max_tokens")
         self.stream_enabled = bool(config.get("stream", True))
         self.include_usage = bool(config.get("include_usage", True))
         self.send_reasoning_effort = bool(config.get("send_reasoning_effort", False))
@@ -90,7 +100,27 @@ class OpenAICompatibleProvider(
                 f"provider {name!r} requires API key in environment variable {key_env}"
             )
 
-        headers = build_headers(api_key, config.get("headers"))
+        custom_headers = config.get("headers")
+        custom_names = (
+            {str(key).lower() for key in custom_headers}
+            if isinstance(custom_headers, dict)
+            else set()
+        )
+        headers = build_headers(api_key, custom_headers)
+        if protocol == "anthropic_messages":
+            # Anthropic authenticates with x-api-key; Authorization is accepted
+            # only by some gateways (DeepSeek accepts both). A caller-supplied
+            # auth header always wins over the one derived from api_key.
+            if (
+                api_key
+                and "x-api-key" not in custom_names
+                and "authorization" not in custom_names
+            ):
+                headers["x-api-key"] = api_key
+            if "authorization" not in custom_names:
+                headers.pop("Authorization", None)
+            if "anthropic-version" not in custom_names:
+                headers["anthropic-version"] = "2023-06-01"
         self.headers = headers
         self._client = build_client(
             base_url=self.base_url,
@@ -113,6 +143,14 @@ class OpenAICompatibleProvider(
 
     def _endpoint(self) -> str:
         """Return the full protocol endpoint, accepting a full URL as-is."""
+        if self.protocol == "anthropic_messages":
+            if self.base_url.endswith("/messages"):
+                return self.base_url
+            if self.base_url.endswith("/v1"):
+                return f"{self.base_url}/messages"
+            # DeepSeek's Anthropic base is https://api.deepseek.com/anthropic,
+            # so the version segment is appended unless the caller supplied it.
+            return f"{self.base_url}/v1/messages"
         if self.protocol == "openai_responses":
             if self.base_url.endswith("/responses"):
                 return self.base_url
@@ -130,6 +168,15 @@ class OpenAICompatibleProvider(
         on_thinking: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         """Send one conversation turn using the configured wire protocol."""
+        if self.protocol == "anthropic_messages":
+            payload = self._anthropic_payload(messages, tools)
+            if self.stream_enabled:
+                return self._anthropic_stream_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+            return self._anthropic_regular_request(
+                payload, on_text=on_text, on_thinking=on_thinking
+            )
         if self.protocol == "openai_responses":
             payload = self._responses_payload(messages, tools)
             if self.stream_enabled:

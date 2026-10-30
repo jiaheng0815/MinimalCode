@@ -263,6 +263,68 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[2]["role"], "tool")
             self.assertEqual(session.messages[3]["role"], "assistant")
 
+    def test_switch_runtime_and_new_session_reset_model_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            agent.last_prompt_tokens = 123
+
+            provider = FakeProvider()
+            provider.name = "other"
+            provider.model = "other-model"
+            provider.thinking = "low"
+            provider.context_window = 4096
+            runtime = ToolRuntime(
+                settings,
+                workspace,
+                shell,
+                provider_name="other",
+                model="other-model",
+                thinking="low",
+            )
+            agent.switch_runtime(provider, runtime)
+
+            self.assertIs(agent.provider, provider)
+            self.assertIs(agent.tools, runtime)
+            self.assertEqual(agent.last_prompt_tokens, 0)
+            self.assertEqual(agent.status()["model"], "other-model")
+
+            agent.total_usage["total_tokens"] = 9
+            agent.last_prompt_tokens = 321
+            agent.estimated_turns = 2
+            agent._system_prompt = "cached"
+            next_session = SessionStore(settings).create(
+                workspace,
+                provider="other",
+                model="other-model",
+                save=False,
+            )
+            agent.new_session(next_session, runtime)
+
+            self.assertIs(agent.session, next_session)
+            self.assertEqual(agent.total_usage["total_tokens"], 0)
+            self.assertEqual(agent.last_prompt_tokens, 0)
+            self.assertEqual(agent.estimated_turns, 0)
+            self.assertIsNone(agent._system_prompt)
+
     def test_run_usage_is_per_turn_while_usage_accumulates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

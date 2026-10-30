@@ -23,6 +23,10 @@ class ProviderReply:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
+    # Anthropic thinking blocks must be replayed with their signatures while a
+    # tool call is open. Other protocols ignore this field, and the Chat payload
+    # builder strips it before sending.
+    provider_content: list[dict[str, Any]] | None = None
 
     def as_message(self) -> dict[str, Any]:
         """Render the reply as an assistant message for the conversation log."""
@@ -30,6 +34,8 @@ class ProviderReply:
             "role": "assistant",
             "content": self.content or None,
         }
+        if self.provider_content:
+            message["provider_content"] = self.provider_content
         if self.tool_calls:
             message["tool_calls"] = [
                 {

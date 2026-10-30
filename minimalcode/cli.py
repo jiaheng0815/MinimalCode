@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -26,6 +27,7 @@ from .sandbox import NETWORK_POLICIES, SANDBOX_BACKENDS
 
 if TYPE_CHECKING:
     from .agent import Agent, AgentResult
+    from .provider.anthropic_env import AnthropicEnvConfig
     from .session import Session, SessionStore
 
 
@@ -43,6 +45,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", help="Session ID, partial ID, or JSONL path")
     parser.add_argument("--no-session", action="store_true")
     parser.add_argument("--provider", help="Provider name from settings")
+    parser.add_argument(
+        "--anthropic-env",
+        action="store_true",
+        help=(
+            "Use the Anthropic Messages protocol configured by Claude Code style "
+            "ANTHROPIC_* / CLAUDE_CODE_* environment variables without editing "
+            "settings.json"
+        ),
+    )
     parser.add_argument("-m", "--model", help="Provider model ID")
     parser.add_argument(
         "--thinking",
@@ -331,6 +342,24 @@ def _apply_sandbox_overrides(settings: Settings, args: argparse.Namespace) -> No
         )
 
 
+def _apply_anthropic_env(
+    settings: Settings, args: argparse.Namespace
+) -> AnthropicEnvConfig:
+    """Install the environment-derived provider in memory and return it.
+
+    The settings file stays untouched: only this process's ``settings.data``
+    gains the provider entry, so the next ordinary run behaves as before.
+    """
+    from .provider.anthropic_env import from_anthropic_env
+
+    env_config = from_anthropic_env(model=args.model, thinking=args.thinking)
+    settings.data.setdefault("providers", {})[env_config.provider] = env_config.config
+    settings.data["provider"] = env_config.provider
+    if env_config.compact_at is not None:
+        settings.data.setdefault("context", {})["compact_at"] = env_config.compact_at
+    return env_config
+
+
 def _load_or_create_session(
     store: SessionStore,
     args: argparse.Namespace,
@@ -451,6 +480,165 @@ def _handle_effort(agent: Agent, text: str) -> None:
     print(f"effort: {requested}")
 
 
+def _provider_credential(config: dict[str, object]) -> str:
+    """Describe where a provider key comes from without printing its value."""
+    if config.get("api_key"):
+        return "inline key (set)"
+    headers = config.get("headers")
+    if isinstance(headers, dict):
+        names = {str(name).lower() for name in headers}
+        if "authorization" in names or "x-api-key" in names:
+            return "header credential (set)"
+    env_name = config.get("api_key_env")
+    if isinstance(env_name, str) and env_name:
+        if os.environ.get(env_name):
+            return f"{env_name} (set)"
+        if config.get("require_api_key", True) is False:
+            return f"{env_name} (not required)"
+        return f"{env_name} (missing)"
+    if config.get("require_api_key", True) is False:
+        return "no key required"
+    return "no key"
+
+
+def _print_models(agent: Agent, settings: Settings) -> None:
+    print(
+        "model: "
+        f"{sanitize_terminal_text(str(agent.provider.name))}/"
+        f"{sanitize_terminal_text(str(agent.provider.model))}"
+    )
+    print("providers (name  default model  credential):")
+    providers = settings.data.get("providers", {})
+    for name in sorted(providers):
+        config = providers[name]
+        if not isinstance(config, dict):
+            continue
+        default_model = config.get("model")
+        model_text = (
+            str(default_model)
+            if isinstance(default_model, str) and default_model.strip()
+            else "-"
+        )
+        print(
+            "  "
+            f"{sanitize_terminal_text(str(name))}  "
+            f"{sanitize_terminal_text(model_text)}  "
+            f"{sanitize_terminal_text(_provider_credential(config))}"
+        )
+    print("use /model provider/model to switch")
+
+
+def _switch_runtime(
+    agent: Agent,
+    settings: Settings,
+    provider_name: str,
+    model: str,
+) -> tuple[str, str]:
+    """Build and install a new provider without losing the session history."""
+    from .provider import create_provider
+    from .tools import ToolRuntime
+    from .vision import ProviderVisionClient
+    from .web import ProviderWebClient
+
+    provider, name, resolved_model = create_provider(
+        settings,
+        provider_name=provider_name,
+        model=model,
+        thinking=agent.provider.thinking,
+    )
+    web_client: ProviderWebClient | None = None
+    vision_client: ProviderVisionClient | None = None
+    try:
+        web_client = ProviderWebClient(name, provider.config)
+        vision_client = ProviderVisionClient(
+            name, provider.config, model=resolved_model
+        )
+        tools = ToolRuntime(
+            settings,
+            agent.session.cwd,
+            agent.shell,
+            web_client=web_client,
+            vision_client=vision_client,
+            provider_name=name,
+            model=resolved_model,
+            thinking=provider.thinking,
+        )
+        old_provider = agent.provider
+        old_tools = agent.tools
+        agent.switch_runtime(provider, tools)
+    except BaseException:
+        if web_client is not None:
+            web_client.close()
+        if vision_client is not None:
+            vision_client.close()
+        provider.close()
+        raise
+    old_provider.close()
+    for client in (old_tools.web_client, old_tools.vision_client):
+        if client is not None:
+            client.close()
+    return name, resolved_model
+
+
+def _handle_model(agent: Agent, settings: Settings, text: str) -> bool:
+    parts = text.split()
+    if len(parts) == 1:
+        _print_models(agent, settings)
+        return False
+    if len(parts) != 2:
+        print("usage: /model [provider/model]", file=sys.stderr)
+        return False
+
+    provider_name, separator, model = parts[1].partition("/")
+    provider_name = provider_name.strip()
+    model = model.strip()
+    if not provider_name or (separator and not model):
+        print("usage: /model [provider/model]", file=sys.stderr)
+        return False
+
+    providers = settings.data.get("providers")
+    config = providers.get(provider_name) if isinstance(providers, dict) else None
+    if not isinstance(config, dict):
+        available = ", ".join(sorted(providers)) if isinstance(providers, dict) else ""
+        message = f"unknown provider: {sanitize_terminal_text(provider_name)}"
+        if available:
+            message += f" (available: {sanitize_terminal_text(available)})"
+        print(message, file=sys.stderr)
+        return False
+    if not separator:
+        try:
+            _, resolved_config = settings.provider_config(provider_name)
+        except ConfigError as exc:
+            print(
+                f"model switch failed: {sanitize_terminal_text(str(exc))}",
+                file=sys.stderr,
+            )
+            return False
+        default_model = resolved_config.get("model")
+        if not isinstance(default_model, str) or not default_model.strip():
+            print(
+                f"provider {sanitize_terminal_text(provider_name)} has no default "
+                f"model; use /model {sanitize_terminal_text(provider_name)}/<model>",
+                file=sys.stderr,
+            )
+            return False
+        model = default_model.strip()
+
+    try:
+        name, resolved_model = _switch_runtime(agent, settings, provider_name, model)
+    except (MinimalCodeError, OSError, TypeError, ValueError) as exc:
+        print(
+            f"model switch failed: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        "model: "
+        f"{sanitize_terminal_text(name)}/{sanitize_terminal_text(resolved_model)}"
+    )
+    return True
+
+
 def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
     result = agent.run(prompt)
     if args.json_output:
@@ -481,7 +669,6 @@ def _interactive(
     provider_name: str,
     model: str,
 ) -> int:
-    from .agent import Agent
     from .tools import ToolRuntime
 
     _print_banner(
@@ -508,15 +695,13 @@ def _interactive(
             save = bool(settings.get("session.save", True)) and not args.no_session
             session = store.create(
                 agent.session.cwd,
-                provider=provider_name,
-                model=model,
+                provider=agent.provider.name,
+                model=agent.provider.model,
                 save=save,
             )
-            agent = Agent(
-                settings=settings,
-                provider=agent.provider,
-                session=session,
-                tool_runtime=ToolRuntime(
+            agent.new_session(
+                session,
+                ToolRuntime(
                     settings,
                     session.cwd,
                     agent.shell,
@@ -526,11 +711,6 @@ def _interactive(
                     model=agent.provider.model,
                     thinking=agent.provider.thinking,
                 ),
-                shell=agent.shell,
-                max_turns=args.max_turns,
-                quiet=args.quiet,
-                stream_output=not args.json_output,
-                markdown_highlight=False if args.no_highlight else None,
             )
             print("new session")
             continue
@@ -569,8 +749,14 @@ def _interactive(
         if command.split()[0] == "/effort":
             _handle_effort(agent, text)
             continue
+        if command.split()[0] == "/model":
+            _handle_model(agent, settings, text)
+            continue
         if command == "/help":
-            print("/new  /clear  /compact  /summary  /session  /status  /effort  /exit")
+            print(
+                "/new  /clear  /compact  /summary  /session  /status  "
+                "/model  /effort  /exit"
+            )
             continue
         if text.startswith("/"):
             print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)
@@ -608,6 +794,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error("--sandbox-max-output must be at least 1")
     if args.json_output:
         args.print_mode = True
+    if args.anthropic_env and args.provider:
+        parser.error("--anthropic-env cannot be combined with --provider")
 
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
@@ -629,15 +817,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         ensure_config(args.home)
         settings = load_settings(args.home, require_file=True)
     _apply_sandbox_overrides(settings, args)
+    env_config = _apply_anthropic_env(settings, args) if args.anthropic_env else None
     shell = detect_shell(settings.get("shell.path"))
     provider, provider_name, model = create_provider(
         settings,
         provider_name=args.provider,
         model=args.model,
-        thinking=args.thinking,
+        thinking=args.thinking or (env_config.thinking if env_config else None),
     )
     web_client = None
     vision_client = None
+    agent = None
     try:
         store = SessionStore(settings)
         session, effective_cwd = _load_or_create_session(
@@ -687,6 +877,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             model,
         )
     finally:
+        # `/model` swaps the provider and its optional clients. Close whatever is
+        # active now instead of the objects created before the interactive loop.
+        if agent is not None:
+            web_client = agent.tools.web_client
+            vision_client = agent.tools.vision_client
+            provider = agent.provider
         if web_client is not None:
             web_client.close()
         if vision_client is not None:

@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.1.0.
+Applies to MinimalCode 1.2.0.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -23,20 +23,20 @@ CLI
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Settings merge, validation, environment expansion, atomic config writes |
+| `config.py` | Settings merge, provider presets in `defaults.json`, validation, environment expansion, atomic config writes |
 | `httpclient.py` | Client construction, proxy policy for loopback targets, bounded connection retries |
 | `sandbox/` | Sandbox policy, path/network checks, pluggable backends, bounded execution, audit |
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt, `AGENTS.md` discovery, marked summary block merge |
-| `provider/` | OpenAI Chat/Responses payloads, HTTP retries, and SSE parsing |
+| `provider/` | OpenAI Chat/Responses and Anthropic Messages payloads, HTTP retries, and SSE parsing |
 | `web.py` | Configurable provider web search and fetch client |
 | `vision.py` | Configurable provider vision client for inline image understanding |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
-| `agent.py` | Tool loop, usage accounting, compaction, session summary, interrupted-turn repair |
+| `agent.py` | Tool loop, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
-| `cli.py` | Interactive and non-interactive command handling |
+| `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap |
 
 ## Package layout
 
@@ -79,6 +79,8 @@ every tool shares one sandbox, workspace, and configuration instance.
 | `client.py` | `OpenAICompatibleProvider`: configuration, HTTP client, dispatch |
 | `chat.py` | Chat Completions payload, SSE stream, non-stream parsing |
 | `responses.py` | Responses payload, event stream, non-stream parsing |
+| `anthropic.py` | Anthropic Messages payload, SSE stream, non-stream parsing |
+| `anthropic_env.py` | Claude Code style `ANTHROPIC_*` environment provider for `--anthropic-env` |
 | `transport.py` | Request construction, connection retries, HTTP status retries |
 | `common.py` | Usage/content/argument normalization shared by both protocols |
 | `types.py` | `ToolCall` and `ProviderReply` |

@@ -1,8 +1,9 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.1.0 and later. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, and 1.1 added no further breaking
-import changes (`minimalcode.httpclient` is a new module, not a renamed one).
+Applies to MinimalCode 1.2.0. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, and 1.2 added no further
+breaking import changes (`minimalcode.httpclient` is a new module, not a renamed
+one).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
@@ -14,6 +15,29 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.2.0 changed
+
+No public name, CLI flag, configuration key, JSON field, session format, or tool
+schema was removed. Additions only:
+
+- A third wire protocol, `anthropic_messages`, alongside `openai_chat` and
+  `openai_responses`. It is selected per provider, so an existing file that uses
+  the other two is unaffected.
+- The `--anthropic-env` flag, which synthesizes a provider from `ANTHROPIC_*` /
+  `CLAUDE_CODE_*` for one run without touching `settings.json`. It is mutually
+  exclusive with `--provider`.
+- The interactive `/model [provider/model]` command, which switches the active
+  provider and model for the current session only. `settings.json` is not
+  rewritten, so the next run starts from the configured default again.
+- Provider presets in `defaults.json` for 33 hosted vendors plus `ollama`,
+  `lmstudio`, and `vllm`. Presets merge under existing settings, so a provider a
+  user already defined keeps the keys it sets.
+
+The only observable behavior change for an unchanged settings file is the
+provider listing growing: `config show` and the `/model` listing now include
+`deepseek-anthropic` and the new presets. `--json` output, exit codes, session
+files, and the four package `__all__` surfaces are unchanged.
 
 ## What 1.1.0 changed
 

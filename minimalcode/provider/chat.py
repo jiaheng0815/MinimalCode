@@ -34,6 +34,15 @@ class ChatProtocolMixin:
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         raise NotImplementedError
 
+    @staticmethod
+    def _chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop the Anthropic-only history field from Chat messages."""
+        return [
+            {key: value for key, value in message.items() if key != "provider_content"}
+            for message in messages
+            if isinstance(message, dict)
+        ]
+
     def _chat_payload(
         self,
         messages: list[dict[str, Any]],
@@ -42,7 +51,7 @@ class ChatProtocolMixin:
         """Build the Chat Completions request body."""
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._chat_messages(messages),
             "stream": self.stream_enabled,
         }
         if tools:

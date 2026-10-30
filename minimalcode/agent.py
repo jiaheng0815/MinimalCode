@@ -711,6 +711,46 @@ class Agent:
             text = text[:head] + "\n...<middle omitted>...\n" + text[-tail:]
         return text
 
+    def new_session(self, session: Session, tool_runtime: ToolRuntime) -> None:
+        """Start a fresh conversation while keeping the active provider."""
+        schemas = available_tool_schemas(
+            tool_runtime.web_client,
+            tool_runtime.vision_client,
+            tool_runtime.subagent_enabled,
+        )
+        self.session = session
+        self.tools = tool_runtime
+        self.tool_schemas = schemas
+        self.last_prompt_tokens = 0
+        self.estimated_turns = 0
+        self._system_prompt = None
+        self.total_usage = dict.fromkeys(self.total_usage, 0)
+
+    def switch_runtime(
+        self,
+        provider: OpenAICompatibleProvider,
+        tool_runtime: ToolRuntime,
+    ) -> None:
+        """Adopt a new provider/model without discarding the session history.
+
+        The caller owns the old provider and its optional web/vision clients and
+        closes them after this returns. Tool declarations are rebuilt because a
+        provider without ``web_tools`` or ``vision`` must stop advertising those
+        tools, and the previous prompt size is dropped because it describes the
+        old model's context window.
+        """
+        schemas = available_tool_schemas(
+            tool_runtime.web_client,
+            tool_runtime.vision_client,
+            tool_runtime.subagent_enabled,
+        )
+        if hasattr(provider, "notify"):
+            provider.notify = self._activity
+        self.provider = provider
+        self.tools = tool_runtime
+        self.tool_schemas = schemas
+        self.last_prompt_tokens = 0
+
     def status(self) -> dict[str, Any]:
         summary = getattr(self.tools, "sandbox_summary", None)
         return {
