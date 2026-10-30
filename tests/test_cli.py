@@ -382,8 +382,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stub.tools.thinking, "high")
             output = stdout.getvalue()
             self.assertIn("model: fake/fake-model", output)
+            self.assertIn("providers with detected credentials", output)
             self.assertIn("OPENAI_API_KEY (set)", output)
             self.assertIn("no key required", output)
+            self.assertNotIn("(missing)", output)
             self.assertIn("model: openai/gpt-test", output)
             self.assertEqual(stderr.getvalue(), "")
 
@@ -394,6 +396,49 @@ class CliTests(unittest.TestCase):
             persisted = load_settings(home, require_file=True)
             self.assertEqual(persisted.get("provider"), "deepseek")
             self.assertEqual(persisted.get("model"), "deepseek-flash")
+
+            stub.provider.close()
+            for client in (stub.tools.web_client, stub.tools.vision_client):
+                if client is not None:
+                    client.close()
+
+    def test_interactive_model_listing_shows_only_detected_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["/model", "/exit"])
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+                patch("builtins.input", lambda prompt="": next(answers)),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "fake-model")
+
+            self.assertEqual(code, 0)
+            output = stdout.getvalue()
+            # One hosted provider with a key plus the three keyless local presets.
+            self.assertIn("providers with detected credentials (4):", output)
+            self.assertIn("openai  -  OPENAI_API_KEY (set)", output)
+            self.assertEqual(output.count("no key required"), 3)
+            self.assertNotIn("deepseek", output)
+            self.assertNotIn("ANTHROPIC_API_KEY", output)
+            self.assertEqual(stderr.getvalue(), "")
 
             stub.provider.close()
             for client in (stub.tools.web_client, stub.tools.vision_client):
@@ -473,7 +518,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIs(stub.provider, old_provider)
             self.assertFalse(old_provider.closed)
-            self.assertIn("OPENAI_API_KEY (missing)", stdout.getvalue())
+            self.assertNotIn("(missing)", stdout.getvalue())
             self.assertIn("model switch failed", stderr.getvalue())
             self.assertIn("OPENAI_API_KEY", stderr.getvalue())
 

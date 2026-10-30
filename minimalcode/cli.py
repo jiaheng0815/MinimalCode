@@ -480,25 +480,25 @@ def _handle_effort(agent: Agent, text: str) -> None:
     print(f"effort: {requested}")
 
 
-def _provider_credential(config: dict[str, object]) -> str:
-    """Describe where a provider key comes from without printing its value."""
+def _provider_credential(config: dict[str, object]) -> tuple[str, bool]:
+    """Describe a provider key without printing its value and say if it is usable."""
     if config.get("api_key"):
-        return "inline key (set)"
+        return "inline key (set)", True
     headers = config.get("headers")
     if isinstance(headers, dict):
         names = {str(name).lower() for name in headers}
         if "authorization" in names or "x-api-key" in names:
-            return "header credential (set)"
+            return "header credential (set)", True
     env_name = config.get("api_key_env")
     if isinstance(env_name, str) and env_name:
         if os.environ.get(env_name):
-            return f"{env_name} (set)"
+            return f"{env_name} (set)", True
         if config.get("require_api_key", True) is False:
-            return f"{env_name} (not required)"
-        return f"{env_name} (missing)"
+            return f"{env_name} (not required)", True
+        return f"{env_name} (missing)", False
     if config.get("require_api_key", True) is False:
-        return "no key required"
-    return "no key"
+        return "no key required", True
+    return "no key", False
 
 
 def _print_models(agent: Agent, settings: Settings) -> None:
@@ -507,11 +507,14 @@ def _print_models(agent: Agent, settings: Settings) -> None:
         f"{sanitize_terminal_text(str(agent.provider.name))}/"
         f"{sanitize_terminal_text(str(agent.provider.model))}"
     )
-    print("providers (name  default model  credential):")
     providers = settings.data.get("providers", {})
+    detected: list[tuple[str, str, str]] = []
     for name in sorted(providers):
         config = providers[name]
         if not isinstance(config, dict):
+            continue
+        credential, available = _provider_credential(config)
+        if not available:
             continue
         default_model = config.get("model")
         model_text = (
@@ -519,12 +522,18 @@ def _print_models(agent: Agent, settings: Settings) -> None:
             if isinstance(default_model, str) and default_model.strip()
             else "-"
         )
-        print(
-            "  "
-            f"{sanitize_terminal_text(str(name))}  "
-            f"{sanitize_terminal_text(model_text)}  "
-            f"{sanitize_terminal_text(_provider_credential(config))}"
-        )
+        detected.append((str(name), model_text, credential))
+    if detected:
+        print(f"providers with detected credentials ({len(detected)}):")
+        for name, model_text, credential in detected:
+            print(
+                "  "
+                f"{sanitize_terminal_text(name)}  "
+                f"{sanitize_terminal_text(model_text)}  "
+                f"{sanitize_terminal_text(credential)}"
+            )
+    else:
+        print("no provider credentials detected")
     print("use /model provider/model to switch")
 
 

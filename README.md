@@ -155,7 +155,7 @@ JSON 输出字段：
 | `/summary` | 让模型总结全部上下文并写入工作区 `AGENTS.md`；文件不存在则创建，已存在则只更新 `<!-- minimalcode:summary:start/end -->` 之间的块，其余内容原样保留 |
 | `/session` | 显示会话文件路径 |
 | `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
-| `/model [供应商/模型]` | 查看当前模型和内置供应商；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
+| `/model [供应商/模型]` | 查看当前模型和可用供应商（只列出已检测到凭据的，含免密钥的本地预设）；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
 | `/status` | 显示模型、推理强度、shell、上下文和 token 统计（JSON） |
 | `/help` | 显示命令 |
 | `/exit`、`/quit` | 退出 |
