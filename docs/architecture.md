@@ -122,5 +122,6 @@ The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 - Shell and search output is captured through bounded head/tail buffers, so a noisy command cannot exhaust memory or disk.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
 - Untrusted model, tool, and error text is stripped of terminal control sequences before display.
+- Interactive input is read line by line: bracketed paste keeps a pasted block in one message, buffered input (`msvcrt.kbhit` on Windows, `select` elsewhere) joins the lines of a terminal that does not support it, and a trailing `\` continues the message. Non-interactive prompts and piped stdin are untouched.
 - Session writes are append-only; configuration is the only atomically rewritten file.
 - The renderer treats incomplete inline markers as active styles, emits text without waiting for a newline, and keeps redirected and JSON output as raw Markdown.

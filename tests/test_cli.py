@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from minimalcode.cli import _interactive, run
+from minimalcode.cli import _interactive, _read_message, run
 from minimalcode.config import EFFORT_LEVELS, ensure_config, load_settings
 from minimalcode.provider import ProviderError, ProviderReply
 from minimalcode.session import SessionStore
@@ -761,6 +761,79 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr.getvalue().count("[usage]"), 2)
             self.assertIn("9 total", stderr.getvalue())
+
+    def test_read_message_joins_backslash_continuations(self) -> None:
+        answers = iter(["first line \\", "second line"])
+        prompts: list[str] = []
+
+        def ask(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        with patch("builtins.input", ask):
+            text = _read_message()
+
+        self.assertEqual(text, "first line \nsecond line")
+        self.assertEqual(prompts, ["> ", "... "])
+
+    def test_read_message_keeps_an_escaped_trailing_backslash(self) -> None:
+        with patch("builtins.input", lambda prompt="": "path C:\\\\"):
+            self.assertEqual(_read_message(), "path C:\\")
+
+    def test_read_message_unwraps_a_bracketed_paste(self) -> None:
+        answers = iter(["\x1b[200~def f():"])
+        rest = io.StringIO("\n    return 1\x1b[201~")
+        with (
+            patch("builtins.input", lambda prompt="": next(answers)),
+            patch("sys.stdin", rest),
+        ):
+            text = _read_message()
+
+        self.assertEqual(text, "def f():\n    return 1")
+
+    def test_read_message_keeps_text_typed_before_a_paste(self) -> None:
+        pasted = "run \x1b[200~pytest -q\x1b[201~"
+        with patch("builtins.input", lambda prompt="": pasted):
+            self.assertEqual(_read_message(), "run pytest -q")
+
+    def test_read_message_drains_a_paste_without_bracket_markers(self) -> None:
+        answers = iter(["line one", "line two", "line three"])
+        with (
+            patch("builtins.input", lambda prompt="": next(answers)),
+            patch("minimalcode.cli._input_pending", side_effect=[True, True, False]),
+        ):
+            text = _read_message()
+
+        self.assertEqual(text, "line one\nline two\nline three")
+
+    def test_interactive_forwards_a_multiline_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["first \\", "second", "/exit"])
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch("minimalcode.cli._input_pending", return_value=False),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, ["first \nsecond"])
 
 
 if __name__ == "__main__":

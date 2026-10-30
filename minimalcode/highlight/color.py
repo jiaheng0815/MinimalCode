@@ -29,10 +29,14 @@ def _supports_color(stream: TextIO) -> bool:
     return True
 
 
-def _enable_windows_ansi(stream: TextIO) -> None:
-    """Enable virtual-terminal processing on a Windows console handle."""
+def _enable_windows_ansi(stream: TextIO) -> bool:
+    """Enable virtual-terminal processing on a Windows console handle.
+
+    Returns False only when a Windows console refused the mode change; callers
+    that write raw escape sequences use that to avoid printing them literally.
+    """
     if os.name != "nt":
-        return
+        return True
     try:
         import ctypes
         import msvcrt
@@ -43,8 +47,9 @@ def _enable_windows_ansi(stream: TextIO) -> None:
         # 0x0004 is ENABLE_VIRTUAL_TERMINAL_PROCESSING. The current mode is read
         # first and the bit is OR-ed in so other console flags (line input, echo
         # state) survive; SetConsoleMode alone would clear them.
-        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
     except (AttributeError, OSError, ValueError):
         # Styling is cosmetic; a console API failure must not break output.
-        pass
+        return False

@@ -5,7 +5,9 @@ import json
 import math
 import os
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -410,7 +412,7 @@ def _print_banner(
     print(f"cwd: {sanitize_terminal_text(str(cwd))}")
     if session.path:
         print(f"session: {sanitize_terminal_text(str(session.path))}")
-    print("Type /help for commands.")
+    print("Type /help for commands. End a line with \\ to continue, or paste text.")
 
 
 def _ensure_newline(result: AgentResult) -> None:
@@ -670,6 +672,126 @@ def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
     return 0 if result.completed else 1
 
 
+_PASTE_START = "\x1b[200~"
+_PASTE_END = "\x1b[201~"
+_PASTE_SETTLE_SECONDS = 0.02
+
+
+def _terminal_can_paste() -> bool:
+    """Return True when bracketed paste can be enabled safely."""
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _write_terminal(sequence: str) -> None:
+    try:
+        sys.stdout.write(sequence)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+@contextmanager
+def _bracketed_paste() -> Iterator[None]:
+    """Let the terminal mark pasted text so its newlines do not submit."""
+    enabled = _terminal_can_paste()
+    if enabled:
+        from .highlight.color import _enable_windows_ansi
+
+        # On Windows the enable sequence only becomes a control code once
+        # virtual-terminal output is on; otherwise it prints as garbage.
+        enabled = _enable_windows_ansi(sys.stdout)
+    if enabled:
+        _write_terminal("\x1b[?2004h")
+    try:
+        yield
+    finally:
+        if enabled:
+            _write_terminal("\x1b[?2004l")
+
+
+def _read_paste(line: str) -> str:
+    """Collect a bracketed paste that continues after its first line.
+
+    Reading stops exactly at the closing marker, so a newline inside the pasted
+    block never submits the message and text typed after the block is left for
+    the next prompt.
+    """
+    before, _, pasted = line.partition(_PASTE_START)
+    while _PASTE_END not in pasted:
+        try:
+            char = sys.stdin.read(1)
+        except (AttributeError, OSError, ValueError):
+            break
+        if not char:
+            break
+        pasted += char
+    end = pasted.find(_PASTE_END)
+    return before + (pasted if end < 0 else pasted[:end])
+
+
+def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
+    """Return True when stdin already holds more input (a multi-line paste).
+
+    A terminal without bracketed-paste support hands a pasted block over one
+    line at a time, so the lines are drained with a short settle window before
+    the first line is submitted as a message.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except (AttributeError, OSError, ValueError):
+        return False
+    if os.name == "nt":
+        try:
+            import msvcrt
+        except ImportError:
+            return False
+        deadline = time.monotonic() + timeout
+        while True:
+            if msvcrt.kbhit():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.002)
+    try:
+        import select
+    except ImportError:
+        return False
+    try:
+        readable, _, _ = select.select([sys.stdin], [], [], timeout)
+    except (OSError, ValueError):
+        return False
+    return bool(readable)
+
+
+def _read_message(prompt: str = "> ") -> str:
+    """Read one message, keeping pasted lines and manual continuations.
+
+    A trailing backslash continues the message on the next line; ``\\\\`` at the
+    end of the last line means a literal backslash instead.
+    """
+    line = input(prompt)
+    if _PASTE_START in line:
+        return _read_paste(line)
+    lines = [line]
+    while _input_pending():
+        lines.append(input(""))
+    if len(lines) > 1:
+        # Pasted lines are literal text: no continuation markers to interpret.
+        return "\n".join(lines)
+    while lines[-1].endswith("\\") and not lines[-1].endswith("\\\\"):
+        lines[-1] = lines[-1][:-1]
+        lines.append(input("... "))
+    if lines[-1].endswith("\\\\"):
+        lines[-1] = lines[-1][:-1]
+    return "\n".join(lines)
+
+
 def _interactive(
     agent: Agent,
     args: argparse.Namespace,
@@ -678,8 +800,6 @@ def _interactive(
     provider_name: str,
     model: str,
 ) -> int:
-    from .tools import ToolRuntime
-
     _print_banner(
         provider_name,
         model,
@@ -688,9 +808,21 @@ def _interactive(
         agent.session.cwd,
         agent.session,
     )
+    with _bracketed_paste():
+        return _chat_loop(agent, args, settings, store)
+
+
+def _chat_loop(
+    agent: Agent,
+    args: argparse.Namespace,
+    settings: Settings,
+    store: SessionStore,
+) -> int:
+    from .tools import ToolRuntime
+
     while True:
         try:
-            text = input("> ")
+            text = _read_message("> ")
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -766,6 +898,7 @@ def _interactive(
                 "/new  /clear  /compact  /summary  /session  /status  "
                 "/model  /effort  /exit"
             )
+            print("multiline: end a line with \\ to continue, or paste a block")
             continue
         if text.startswith("/"):
             print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)
