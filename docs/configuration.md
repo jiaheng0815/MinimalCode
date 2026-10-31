@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.2.0.
+Applies to MinimalCode 1.3.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -34,8 +34,9 @@ Usage written to the session may be estimated. When a provider omits the usage o
 | `timeout_seconds` | `120` | Default and maximum command timeout; model-requested timeouts are capped at this value |
 | `max_output_chars` | `60000` | Maximum stdout and stderr returned to the model |
 
-Auto-detection probes each candidate (`pwsh`, then `bash`/`sh`, or
-`powershell` on Windows) with a trivial command before accepting it, so an
+Auto-detection probes each candidate (`pwsh`, then `bash`, `zsh`, and `sh`, or
+`powershell` and Git Bash after `pwsh` on Windows) with a trivial command before
+accepting it, so an
 installed shell that cannot start — a pwsh build without libicu, a .NET runtime
 that cannot reserve memory, a wrong-architecture binary — falls through to the
 next one instead of failing every command. The probe costs one shell start

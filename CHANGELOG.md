@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## 1.3.0 - 2026-10-31
 
 ### 新增
 
@@ -25,6 +25,16 @@
 - 会话：恢复会话时恢复记录的供应商与模型，`/model` 切换后写入会话 meta；会话追加 fsync 并收紧到 `0600`；配置目录统一 `0700`。
 - 交互：粘贴结束标记之后的文本不再丢失，粘贴长度有上限；POSIX 上补读 `TextIOWrapper` 已缓冲的多行；Windows 用 `GetConsoleMode` 判断真实控制台，NUL 设备与重定向设备不再让 `kbhit()` 一直报告有输入。
 - 其他：`BrokenPipeError` 安静退出（`minimalcode ... | head`）；Windows 控制台拒绝 VT 模式时禁用着色而不是打印原始 ANSI；POSIX 增加 `zsh` 候选、Windows 增加 Git Bash 候选；`requires-python` 限定为 `>=3.11,<3.14`。
+
+### 变更
+
+- 版本号升级到 1.3.0。本次发布没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段或会话格式；`minimalcode/clipboard.py` 与 `ClipboardError` 是新增模块和异常类型。
+- 可观察的行为变化：JSON API 请求遇到 3xx 现在直接报错而不是跟随跳转；新建文件按进程 umask 创建（此前固定 `0600`）；`config set-model` 会同时更新当前供应商的 `model`；恢复会话时沿用会话记录的供应商与模型（显式 `--provider` / `--model` 仍然优先）；Chat 空回复不再写入 `content: null`。
+- `requires-python` 收窄为 `>=3.11,<3.14`，与实际测试矩阵一致；Python 3.14 及更高版本不再被声明为兼容。
+
+### 文档
+
+- README 增加剪贴板图片粘贴说明、`clipboard.py` 目录项和 1.2 → 1.3 升级说明；`docs/compatibility.md` 增加 1.3.0 的兼容性与行为变化说明；`docs/architecture.md`、`docs/configuration.md` 更新适用版本与剪贴板模块。
 
 ### 测试
 

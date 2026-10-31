@@ -1,9 +1,9 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.2.0. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, 1.1, and 1.2 added no further
-breaking import changes (`minimalcode.httpclient` is a new module, not a renamed
-one).
+Applies to MinimalCode 1.3.0. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, 1.2, and 1.3 added no
+further breaking import changes (`minimalcode.httpclient` and
+`minimalcode.clipboard` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
@@ -15,6 +15,28 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.3.0 changed
+
+No public name, CLI flag, configuration key, JSON field, session format, or tool
+schema was removed. Additions: interactive clipboard image paste (empty Enter
+reads the clipboard image and routes it through the provider `vision` block),
+the `minimalcode.clipboard` module, and the `ClipboardError` exception type.
+
+Observable behavior changes for an existing installation:
+
+- A provider, web, or vision request answered with a 3xx now fails with an
+  error instead of following the redirect. Following a 307/308 replayed the
+  whole request body, and `x-api-key` plus custom credential headers survived a
+  cross-origin hop.
+- Files created by `write` use the process umask instead of a fixed `0600`.
+- `minimalcode config set-model` also rewrites the active provider's `model`,
+  so the command changes the model that is actually sent.
+- Resuming a session restores the provider and model recorded in it; explicit
+  `--provider` / `--model` still win.
+- An empty Chat reply is stored with `content: ""` instead of `null`, and null
+  history from older sessions is repaired at startup.
+- `requires-python` is now `>=3.11,<3.14`, matching the tested matrix.
 
 ## What 1.2.0 changed
 

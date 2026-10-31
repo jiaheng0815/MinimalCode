@@ -4,11 +4,11 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.2.0`。运行时依赖只有 `httpx2`，Python 3.11+。
+当前版本：`1.3.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
-- **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` 选择，其他平台按 `pwsh` → `bash` → `sh` 选择；启动时解析一次，可在配置中固定路径。
+- **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。
 - **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
 - **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
@@ -37,9 +37,13 @@ minimalcode init
 
 `init` 会在配置目录写入 `settings.json` 并创建 `sessions/`。首次正常运行如果发现配置缺失，也会自动生成，因此这一步是可选的。
 
-要求 Python 3.11 及以上。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
+要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.2 升级到 1.3
+
+1.3.0 没有删除任何公开名字、CLI 参数、配置键、JSON 字段或会话格式，升级不需要改代码。新增的是交互式剪贴板图片粘贴：空回车读取系统剪贴板里的图片，经供应商 `vision` 配置转成文字描述后随消息发送。可观察的行为变化有四处：JSON API 请求遇到 3xx 现在直接报错而不是跟随跳转（跳转会重发请求体与 `x-api-key` 等认证头）；新建文件按进程 umask 创建，不再固定 `0600`；`config set-model` 同时更新当前供应商的 `model`；恢复会话时沿用会话记录的供应商与模型，显式 `--provider` / `--model` 仍然优先。`requires-python` 收窄为 `>=3.11,<3.14`。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.1 升级到 1.2
 
@@ -214,7 +218,7 @@ JSON 输出字段：
 - **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。`--no-sandbox` 只关闭执行层（后端包装、网络策略、资源限制），工作区与敏感文件边界照旧生效。
 - **沙箱执行层**：`sandbox.enabled` 默认关闭（等同默认 `--no-sandbox`），`--sandbox` 或任意 `--sandbox-*` 选项会开启它；开启后默认后端 `local`（跨平台策略与子进程限制基线），可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。开启时路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
 - **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义，且都不解析 `.gitignore`；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
-- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash`/`sh`（Windows 为 `powershell`）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
+- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash` → `zsh` → `sh`（Windows 为 `powershell` → Git Bash）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
 - **误报网络命令**：`local` 基线的 `deny` 基于命令字符串识别，只读的 `python -m pip show/list`、`pip --version` 会被放行，`pip install/download` 等会触网子命令才会被拒绝。
 - **资源限制**：POSIX 下对子进程设置 `RLIMIT_CORE` 和按超时推算的 `RLIMIT_CPU`；Linux 的 `RLIMIT_AS`（`sandbox.max_memory_mb`）和 `RLIMIT_NPROC`（`sandbox.max_processes`）默认关闭，因为 `RLIMIT_AS` 限制的是预留地址空间而非实际占用，2 GB 的默认值会让 .NET（pwsh）、JVM、Go 子进程在真正运行前就报 `Out of memory`。
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾 `exit $LASTEXITCODE` 保留子进程真实退出码。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
