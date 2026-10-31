@@ -34,6 +34,7 @@ def quote_argument(value: str, shell: ShellSpec) -> str:
         return "'" + text.replace("'", "''") + "'"
     return shlex.quote(text)
 
+
 def build_argv(
     *,
     cwd: Path,
@@ -49,7 +50,11 @@ def build_argv(
     """Raw argv for the child process, independent of any shell."""
     argv = [
         str(python or sys.executable),
-        "-m", "minimalcode", "-p", "--no-session", "--quiet",
+        "-m",
+        "minimalcode",
+        "-p",
+        "--no-session",
+        "--quiet",
     ]
     argv.extend(extra_flags or ())
     options = [
@@ -65,6 +70,7 @@ def build_argv(
         if value:
             argv.extend([flag, value])
     return argv
+
 
 def build_command(shell: ShellSpec, **kwargs) -> str:
     argv = build_argv(**kwargs)

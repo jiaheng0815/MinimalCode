@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -15,7 +16,7 @@ from .highlight import (
     style_activity_tag,
 )
 from .prompt import build_system_prompt, merge_agents_summary
-from .provider import OpenAICompatibleProvider, ProviderError
+from .provider import OpenAICompatibleProvider, ProviderError, ToolCall
 from .session import Session
 from .shell import ShellSpec
 from .tools import ToolError, ToolRuntime, available_tool_schemas, tool_result_text
@@ -497,14 +498,16 @@ class Agent:
             )
             self.error_output.flush()
 
-    def _execute_tool(self, name: str, raw_arguments: str) -> dict[str, Any]:
+    def _parse_tool_arguments(self, raw_arguments: str) -> dict[str, Any]:
         try:
             arguments = json.loads(raw_arguments or "{}")
         except json.JSONDecodeError as exc:
-            return {"status": "error", "message": f"invalid tool JSON: {exc}"}
+            raise ToolError(f"invalid tool JSON: {exc}") from exc
         if not isinstance(arguments, dict):
-            return {"status": "error", "message": "tool arguments must be an object"}
-        self._activity(self.tools.activity(name, arguments))
+            raise ToolError("tool arguments must be an object")
+        return arguments
+
+    def _run_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
             return self.tools.dispatch(name, arguments)
         except (ToolError, OSError, TypeError, ValueError) as exc:
@@ -512,8 +515,89 @@ class Agent:
         except Exception as exc:  # noqa: BLE001 - a bad tool must not end the turn
             # Any unexpected failure inside a handler is still reported to the
             # model as a tool result; re-raising would abort the whole turn and
-            # leave the user message without an answer.
+            # leave the user message without an answer. Subagent workers rely on
+            # the same contract, so this never raises inside a thread either.
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+
+    def _execute_tool(self, name: str, raw_arguments: str) -> dict[str, Any]:
+        try:
+            arguments = self._parse_tool_arguments(raw_arguments)
+        except ToolError as exc:
+            return {"status": "error", "message": str(exc)}
+        self._activity(self.tools.activity(name, arguments))
+        return self._run_tool(name, arguments)
+
+    def _execute_tool_calls(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
+        """Run one turn's tool calls, overlapping adjacent subagent calls.
+
+        A subagent is a separate process that shares no in-memory state with
+        the parent, so a run of adjacent ``subagent`` calls can execute at the
+        same time. Every other tool keeps request order: a ``write`` followed
+        by a command that reads the file depends on the earlier call finishing,
+        so a subagent group never overlaps a neighbouring tool.
+        """
+        results: list[dict[str, Any]] = []
+        index = 0
+        while index < len(calls):
+            name = calls[index].name
+            if name != "subagent":
+                results.append(self._execute_tool(name, calls[index].arguments))
+                index += 1
+                continue
+            end = index
+            while end < len(calls) and calls[end].name == "subagent":
+                end += 1
+            results.extend(self._execute_subagents(calls[index:end]))
+            index = end
+        return results
+
+    def _execute_subagents(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
+        """Run one run of adjacent subagent calls concurrently, in call order."""
+        # Every slot gets an answer up front: a worker that dies before writing
+        # its result must not turn into a KeyError that aborts the turn.
+        outcomes: dict[int, dict[str, Any]] = {
+            index: {"status": "error", "message": "subagent result was not recorded"}
+            for index in range(len(calls))
+        }
+        runnable: list[tuple[int, dict[str, Any]]] = []
+        for index, call in enumerate(calls):
+            try:
+                arguments = self._parse_tool_arguments(call.arguments)
+            except ToolError as exc:
+                # A malformed call is answered at once so it cannot block the
+                # valid subagents requested in the same turn.
+                outcomes[index] = {"status": "error", "message": str(exc)}
+                continue
+            self._activity(self.tools.activity(call.name, arguments))
+            runnable.append((index, arguments))
+        if runnable:
+            # The semaphore, not the thread count, is the concurrency limit:
+            # one thread per call keeps Ctrl-C free to abandon the join below.
+            slots = threading.BoundedSemaphore(self.tools.subagent_max_parallel)
+            lock = threading.Lock()
+
+            def run(index: int, arguments: dict[str, Any]) -> None:
+                with slots:
+                    result = self._run_tool("subagent", arguments)
+                with lock:
+                    outcomes[index] = result
+
+            threads = [
+                threading.Thread(
+                    target=run,
+                    args=(index, arguments),
+                    name=f"subagent-{index}",
+                    daemon=True,
+                )
+                for index, arguments in runnable
+            ]
+            for thread in threads:
+                thread.start()
+            # Daemon threads keep Ctrl-C from waiting on every child: the
+            # interrupt leaves this join and the process can exit.
+            for thread in threads:
+                thread.join()
+        return [outcomes[index] for index in range(len(calls))]
 
     def run(self, user_text: str) -> AgentResult:
         if not user_text.strip():
@@ -599,8 +683,8 @@ class Agent:
                 self._activity(f"  {message}")
                 break
 
-            for call in reply.tool_calls:
-                result = self._execute_tool(call.name, call.arguments)
+            results = self._execute_tool_calls(reply.tool_calls)
+            for call, result in zip(reply.tool_calls, results):
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call.id,

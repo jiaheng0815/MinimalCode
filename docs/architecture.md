@@ -35,7 +35,7 @@ CLI
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |
-| `agent.py` | Tool loop, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
+| `agent.py` | Tool loop, parallel subagent dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap |
 

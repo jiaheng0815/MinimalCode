@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -138,6 +139,26 @@ class ShellProvider(FakeProvider):
                 tool_calls=[],
                 finish_reason="stop",
                 usage={"prompt_tokens": 20, "completion_tokens": 1, "total_tokens": 21},
+            ),
+        ]
+
+
+class DelegatingProvider(FakeProvider):
+    """Ask for a fixed batch of tool calls, then finish with plain text."""
+
+    def __init__(self, calls: list[ToolCall]) -> None:
+        self.name = "fake"
+        self.model = "fake-model"
+        self.context_window = 100_000
+        self.responses = [
+            ProviderReply(
+                content="",
+                tool_calls=calls,
+                finish_reason="tool_calls",
+                usage={},
+            ),
+            ProviderReply(
+                content="done", tool_calls=[], finish_reason="stop", usage={}
             ),
         ]
 
@@ -314,6 +335,138 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[1]["role"], "assistant")
             self.assertEqual(session.messages[2]["role"], "tool")
             self.assertEqual(session.messages[3]["role"], "assistant")
+
+    def test_adjacent_subagent_calls_run_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            provider = DelegatingProvider(
+                [
+                    ToolCall(
+                        id="call_a",
+                        name="subagent",
+                        arguments=json.dumps({"task": "review a"}),
+                    ),
+                    ToolCall(
+                        id="call_b",
+                        name="subagent",
+                        arguments=json.dumps({"task": "review b"}),
+                    ),
+                ]
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            barrier = threading.Barrier(2, timeout=10)
+
+            def fake_subagent(
+                task: str,
+                cwd: str = ".",
+                timeout: float | None = None,
+                max_turns: int | None = None,
+            ) -> dict[str, object]:
+                # Both children must be in flight at once; a sequential loop
+                # leaves the first one here until the barrier times out.
+                barrier.wait()
+                return {"status": "success", "exit_code": 0, "stdout": task}
+
+            tools.subagent = fake_subagent
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("delegate both")
+        self.assertTrue(result.completed)
+        tool_messages = [
+            message for message in session.messages if message["role"] == "tool"
+        ]
+        self.assertEqual(
+            [message["tool_call_id"] for message in tool_messages],
+            ["call_a", "call_b"],
+        )
+        self.assertIn("review a", tool_messages[0]["content"])
+        self.assertIn("review b", tool_messages[1]["content"])
+
+    def test_subagents_separated_by_another_tool_stay_sequential(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            provider = DelegatingProvider(
+                [
+                    ToolCall(
+                        id="call_a",
+                        name="subagent",
+                        arguments=json.dumps({"task": "a"}),
+                    ),
+                    ToolCall(
+                        id="call_shell",
+                        name="shell",
+                        arguments=json.dumps({"command": "step"}),
+                    ),
+                    ToolCall(
+                        id="call_b",
+                        name="subagent",
+                        arguments=json.dumps({"task": "b"}),
+                    ),
+                ]
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            events: list[str] = []
+
+            def fake_subagent(
+                task: str,
+                cwd: str = ".",
+                timeout: float | None = None,
+                max_turns: int | None = None,
+            ) -> dict[str, object]:
+                events.append(f"subagent:{task}")
+                return {"status": "success", "exit_code": 0, "stdout": task}
+
+            def fake_shell(
+                command: str,
+                timeout: float | None = None,
+                cwd: str = ".",
+            ) -> dict[str, object]:
+                events.append(f"shell:{command}")
+                return {"status": "success", "exit_code": 0, "stdout": ""}
+
+            tools.subagent = fake_subagent
+            tools.shell = fake_shell
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("delegate around a command")
+        self.assertTrue(result.completed)
+        # A subagent group never overlaps its neighbours: the shell command
+        # between the two calls keeps the request order observable.
+        self.assertEqual(events, ["subagent:a", "shell:step", "subagent:b"])
 
     def test_switch_runtime_and_new_session_reset_model_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

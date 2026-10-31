@@ -34,6 +34,7 @@
     "enabled": true,
     "max_depth": 2,
     "max_turns": 40,
+    "max_parallel": 4,
     "timeout_seconds": 900
   },
   "context": {

@@ -65,6 +65,9 @@ class ToolRuntime(
         )
         self.subagent_timeout = float(settings.get("subagent.timeout_seconds", 900))
         self.subagent_max_turns = int(settings.get("subagent.max_turns", 40))
+        self.subagent_max_parallel = max(
+            1, int(settings.get("subagent.max_parallel", 4))
+        )
 
         self.allow_outside = bool(settings.get("tools.allow_outside_workspace", False))
         self.max_file_chars = int(settings.get("tools.max_file_chars", 160_000))

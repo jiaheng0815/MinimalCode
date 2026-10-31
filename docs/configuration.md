@@ -190,6 +190,7 @@ protocol: the child is spawned through the configured shell.
 | `enabled` | `true` | Offer the `subagent` tool at all |
 | `max_depth` | `2` | Maximum nesting level; a child at this depth no longer receives the tool |
 | `max_turns` | `40` | Default and maximum model/tool rounds for one child |
+| `max_parallel` | `4` | Adjacent `subagent` calls in one turn run concurrently, up to this many at a time |
 | `timeout_seconds` | `900` | Default and maximum runtime for one child, further capped by `sandbox.timeout_seconds` while the execution layer is enabled |
 
 The child inherits the parent's `--home`, provider, model, reasoning effort, and
@@ -199,6 +200,12 @@ final answer and leaves no session files behind. Because a child is one command,
 its runtime is also bounded by `sandbox.timeout_seconds` while the execution layer
 is enabled: when the subagent budget is larger, the tool clamps to the sandbox cap
 and records the reason in the sandbox notes.
+
+When one turn requests several adjacent `subagent` calls, they run in parallel
+processes and their results are recorded in the original call order. Other tools
+keep the request order, because a `write` followed by a `shell` command depends
+on the earlier call finishing; a subagent group therefore never overlaps a
+neighbouring tool call.
 
 ## Context
 

@@ -238,6 +238,16 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "output.theme"):
                 load_settings(home, require_file=True)
 
+    def test_invalid_subagent_parallelism_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = ensure_config(home)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["subagent"]["max_parallel"] = 0
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "subagent.max_parallel"):
+                load_settings(home, require_file=True)
+
     def test_invalid_thinking_level_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

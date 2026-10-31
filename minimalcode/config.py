@@ -282,6 +282,13 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         minimum=1,
         maximum=10_000,
     )
+    _validate_integer(
+        subagent.get("max_parallel"),
+        path,
+        "subagent.max_parallel",
+        minimum=1,
+        maximum=32,
+    )
     _validate_number(
         subagent.get("timeout_seconds"),
         path,

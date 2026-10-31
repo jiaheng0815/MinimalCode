@@ -34,11 +34,9 @@ def _parse(command: str) -> list[str]:
     quoting style.
     """
     text = command
-    if text.startswith("& "):
-        text = text[2:]
+    text = text.removeprefix("& ")
     suffix = "; exit $LASTEXITCODE"
-    if text.endswith(suffix):
-        text = text[: -len(suffix)]
+    text = text.removesuffix(suffix)
     return shlex.split(text)
 
 
@@ -218,6 +216,12 @@ class SubagentToolTests(unittest.TestCase):
         args = _parse(command)
         self.assertIn("--anthropic-env", args)
         self.assertNotIn("--provider", args)
+
+    def test_parallel_limit_comes_from_configuration(self) -> None:
+        self.assertEqual(self.tools.subagent_max_parallel, 4)
+        self.settings.data["subagent"]["max_parallel"] = 2
+        tools = ToolRuntime(self.settings, self.workspace, detect_shell())
+        self.assertEqual(tools.subagent_max_parallel, 2)
 
     def test_nested_subagents_are_refused_at_the_depth_limit(self) -> None:
         with patch.dict(os.environ, {DEPTH_ENV: "2"}, clear=False):

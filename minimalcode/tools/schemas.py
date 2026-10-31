@@ -195,7 +195,9 @@ SUBAGENT_SCHEMA: dict[str, Any] = {
             "Delegate a self-contained task to a fresh MinimalCode agent in a child "
             "shell and return its final answer. Use it for code review, broad "
             "analysis, or independent verification whose output would flood this "
-            "context. The subagent is workspace-aware and uses the same provider."
+            "context. Adjacent subagent calls in one turn run concurrently, so "
+            "dispatch independent tasks as separate calls. The subagent is "
+            "workspace-aware and uses the same provider."
         ),
         "parameters": {
             "type": "object",

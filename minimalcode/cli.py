@@ -1370,6 +1370,7 @@ def _write_error(message: str) -> None:
     except (OSError, ValueError):
         _discard_standard_streams()
 
+
 def _configure_stdio() -> None:
     """Normalize stdio so a stray byte from CJK backspace cannot become a surrogate."""
     for stream in (sys.stdin, sys.stdout, sys.stderr):
