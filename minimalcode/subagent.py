@@ -34,9 +34,7 @@ def quote_argument(value: str, shell: ShellSpec) -> str:
         return "'" + text.replace("'", "''") + "'"
     return shlex.quote(text)
 
-
-def build_command(
-    shell: ShellSpec,
+def build_argv(
     *,
     cwd: Path,
     python: str | None = None,
@@ -47,27 +45,14 @@ def build_command(
     max_turns: int | None = None,
     extra_flags: Sequence[str] | None = None,
     extra_options: Sequence[tuple[str, str]] | None = None,
-) -> str:
-    """Build the ``minimalcode -p`` command line for a child agent."""
-    launcher = quote_argument(python or sys.executable, shell)
-    if shell.kind in _POWERSHELL_KINDS:
-        # A bare quoted path is a string literal, not a command; PowerShell
-        # needs the call operator. The trailing exit also keeps the child's
-        # real exit code, which pwsh otherwise collapses to 1.
-        launcher = f"& {launcher}"
-        suffix = "; exit $LASTEXITCODE"
-    else:
-        suffix = ""
-    parts = [
-        launcher,
-        "-m",
-        "minimalcode",
-        "-p",
-        "--no-session",
-        "--quiet",
+) -> list[str]:
+    """Raw argv for the child process, independent of any shell."""
+    argv = [
+        str(python or sys.executable),
+        "-m", "minimalcode", "-p", "--no-session", "--quiet",
     ]
-    parts.extend(extra_flags or ())
-    options: list[tuple[str, str | None]] = [
+    argv.extend(extra_flags or ())
+    options = [
         ("--cwd", str(cwd)),
         ("--home", None if home is None else str(home)),
         ("--provider", provider),
@@ -78,8 +63,15 @@ def build_command(
     ]
     for flag, value in options:
         if value:
-            parts.extend([flag, quote_argument(value, shell)])
-    return " ".join(parts) + suffix
+            argv.extend([flag, value])
+    return argv
+
+def build_command(shell: ShellSpec, **kwargs) -> str:
+    argv = build_argv(**kwargs)
+    quoted = [quote_argument(a, shell) for a in argv]
+    if shell.kind in _POWERSHELL_KINDS:
+        return f"& {quoted[0]} " + " ".join(quoted[1:]) + "; exit $LASTEXITCODE"
+    return " ".join(quoted)
 
 
 def package_root() -> Path:

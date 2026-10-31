@@ -1370,9 +1370,21 @@ def _write_error(message: str) -> None:
     except (OSError, ValueError):
         _discard_standard_streams()
 
+def _configure_stdio() -> None:
+    """Normalize stdio so a stray byte from CJK backspace cannot become a surrogate."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
+        _configure_stdio()
         return _exit_code(argv)
     finally:
         # Buffered output may only fail here, when the reader is already gone.

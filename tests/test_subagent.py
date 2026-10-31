@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,14 +24,34 @@ POWERSHELL = ShellSpec(
 BASH = ShellSpec(kind="bash", executable="/bin/bash", label="bash", is_windows=False)
 
 
+def _parse(command: str) -> list[str]:
+    """Extract argv from a shell command string.
+
+    ``build_command`` renders per-shell syntax: PowerShell gets a leading
+    ``&`` call operator and a trailing ``; exit $LASTEXITCODE``.  Neither is
+    an argument to the child.  ``shlex.split`` (POSIX mode) unquotes both
+    shells' output to the same argv, so assertions stay independent of the
+    quoting style.
+    """
+    text = command
+    if text.startswith("& "):
+        text = text[2:]
+    suffix = "; exit $LASTEXITCODE"
+    if text.endswith(suffix):
+        text = text[: -len(suffix)]
+    return shlex.split(text)
+
+
 class SubagentCommandTests(unittest.TestCase):
     def test_command_targets_a_quiet_print_run(self) -> None:
         command = build_command(POWERSHELL, cwd=Path("work"), max_turns=7)
-        self.assertIn("-m minimalcode", command)
-        self.assertIn("-p", command.split())
-        self.assertIn("--no-session", command)
-        self.assertIn("--quiet", command)
-        self.assertIn("--max-turns '7'", command)
+        args = _parse(command)
+        self.assertIn("-m", args)
+        self.assertEqual(args[args.index("-m") + 1], "minimalcode")
+        self.assertIn("-p", args)
+        self.assertIn("--no-session", args)
+        self.assertIn("--quiet", args)
+        self.assertEqual(args[args.index("--max-turns") + 1], "7")
 
     def test_powershell_uses_the_call_operator_and_keeps_the_exit_code(self) -> None:
         command = build_command(POWERSHELL, cwd=Path("work"))
@@ -92,9 +113,11 @@ class SubagentToolTests(unittest.TestCase):
             )
 
         command = run.call_args.args[0]
+        args = _parse(command)
         options = run.call_args.kwargs
-        self.assertIn("-m minimalcode", command)
-        self.assertIn("--cwd", command)
+        self.assertIn("-m", args)
+        self.assertEqual(args[args.index("-m") + 1], "minimalcode")
+        self.assertIn("--cwd", args)
         self.assertIn("review src/app.py", options["stdin_text"])
         self.assertEqual(options["env"][DEPTH_ENV], "1")
         self.assertEqual(options["cwd"], self.workspace.resolve())
@@ -111,9 +134,10 @@ class SubagentToolTests(unittest.TestCase):
         ) as run:
             result = self.tools.subagent("review", timeout=3600, max_turns=500)
         command = run.call_args.args[0]
+        args = _parse(command)
         self.assertEqual(run.call_args.kwargs["timeout"], 60)
         self.assertEqual(result["timeout_seconds"], 60)
-        self.assertIn("--max-turns '5'", command)
+        self.assertEqual(args[args.index("--max-turns") + 1], "5")
 
     def test_timeout_is_capped_by_the_sandbox_policy(self) -> None:
         # A subagent is one sandboxed command, so sandbox.timeout_seconds wins;
@@ -168,6 +192,7 @@ class SubagentToolTests(unittest.TestCase):
         ) as run:
             tools.subagent("review")
         command = run.call_args.args[0]
+        args = _parse(command)
         for fragment in (
             "--sandbox",
             "--sandbox-backend",
@@ -175,7 +200,7 @@ class SubagentToolTests(unittest.TestCase):
             "--sandbox-allow-host",
             "--sandbox-allow-sensitive",
         ):
-            self.assertIn(fragment, command)
+            self.assertIn(fragment, args)
 
     def test_anthropic_env_child_rebuilds_the_provider_from_environment(self) -> None:
         tools = ToolRuntime(
@@ -190,8 +215,9 @@ class SubagentToolTests(unittest.TestCase):
         ) as run:
             tools.subagent("review")
         command = run.call_args.args[0]
-        self.assertIn("--anthropic-env", command)
-        self.assertNotIn("--provider", command)
+        args = _parse(command)
+        self.assertIn("--anthropic-env", args)
+        self.assertNotIn("--provider", args)
 
     def test_nested_subagents_are_refused_at_the_depth_limit(self) -> None:
         with patch.dict(os.environ, {DEPTH_ENV: "2"}, clear=False):
