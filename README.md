@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.3.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.3.1`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
@@ -40,6 +40,10 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.3.0 升级到 1.3.1
+
+1.3.1 是缺陷修复版本，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，升级不需要改代码。可观察的行为变化只有两处，且都是修正错误行为：stdout 读取端提前关闭（`minimalcode ... | head`）现在按 `0` 退出，不再在 Windows 上打印 `error: [Errno 22] Invalid argument` 并以 `2` 退出；`--home` 写在管理命令前面时（`minimalcode --home DIR sessions`）按管理命令执行，不再把命令词当成提示词发给模型。其余修复（协议解析、压缩边界、搜索回退语义、沙箱网络识别、`trust_env` 布尔转换）都只改变出错场景下的结果。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.2 升级到 1.3
 
@@ -126,7 +130,7 @@ minimalcode [prompt ...] [options]
 | `--no-highlight` | 关闭 Markdown 高亮 |
 | `--version` | 打印版本 |
 
-管理命令按第一个词识别，因此以这些词开头的提示词需要用 `--` 分隔：`minimalcode -- init config show` 发送的是提示词而不是执行子命令。
+管理命令按第一个词识别，`--home` 可以写在命令前面（`minimalcode --home DIR sessions` 等价于 `minimalcode sessions --home DIR`）；其他选项写在前面时会被当成普通提示词。以命令词开头的提示词需要用 `--` 分隔：`minimalcode -- init config show` 发送的是提示词而不是执行子命令。
 
 管理命令：
 
@@ -144,7 +148,7 @@ minimalcode [prompt ...] [options]
 
 `import-pi` 默认**不**复制 API key，而是写入指向环境变量的 `api_key_env`；确实要把密钥复制进权限受限的配置时加 `--secrets`（密钥不会在终端打印）。`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
 
-退出码：`0` 任务完成，`1` 未在轮次上限内完成，`2` 配置或运行错误，`130` 被 Ctrl+C 中断。
+退出码：`0` 任务完成，`1` 未在轮次上限内完成，`2` 配置或运行错误，`130` 被 Ctrl+C 中断。stdout 的读取端提前关闭（例如 `minimalcode ... | head`）按 `0` 退出，不会打印错误或 `Exception ignored`。
 
 JSON 输出字段：
 
@@ -426,7 +430,7 @@ minimalcode --anthropic-env
 - 执行层关闭时 `local` 的网络 `deny` 不生效；开启后 `deny` 基于命令字符串识别，无法阻止任意程序自行发起网络连接；`allowlist` 同样依赖命令中的主机可被识别。真正的禁网依赖支持网络命名空间的后端。
 - 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
 - `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
-- 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...` 仍会被拒绝。它不是网络防火墙。
+- 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，引号内的 `|` / `;` 也不会被拆成多条命令（`rg 'nc|netcat'` 同样放行）；而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...`、`busybox wget ...`、`sh -c "sudo curl ..."` 仍会被拒绝。它不是网络防火墙。
 - `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词，并在每次运行开始前重新读取（文件不存在则跳过）。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。`/summary` 写入 `AGENTS.md` 的路径同样经过这层校验。
 - `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。

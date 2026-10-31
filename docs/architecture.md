@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.3.0.
+Applies to MinimalCode 1.3.1.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 

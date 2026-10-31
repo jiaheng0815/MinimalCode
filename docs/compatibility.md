@@ -1,8 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.3.0. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, 1.1, 1.2, and 1.3 added no
-further breaking import changes (`minimalcode.httpclient` and
+Applies to MinimalCode 1.3.1. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, and 1.3.1 added
+no further breaking import changes (`minimalcode.httpclient` and
 `minimalcode.clipboard` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
@@ -15,6 +15,32 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.3.1 changed
+
+A defect-fix release: no public name, CLI flag, configuration key, JSON field,
+session format, or tool schema was removed, and no import path moved.
+
+Observable behavior changes, both corrections of a wrong result:
+
+- A closed stdout reader (`minimalcode ... | head`) exits `0`. On Windows the
+  broken pipe surfaces as `OSError: EINVAL`, which used to be reported as
+  `error: [Errno 22] Invalid argument` with exit code `2`; the shutdown flush
+  then failed again and replaced the status with `120`.
+- `minimalcode --home DIR <command>` runs the management command. It used to
+  send the command word to the model as a prompt, which cost a request and could
+  execute tools.
+
+The remaining fixes only change the outcome of failing cases: non-string
+`role`/`type` values in provider payloads and session files are skipped instead
+of raising, `redacted_thinking` in a non-streaming Anthropic reply no longer
+breaks the turn, compaction cannot re-summarize its own summary, the Python
+`grep` fallback matches line content without the terminator and reports
+`truncated` only past the limit, `**/` globs match zero directories, quoted
+command operators are not treated as separators, `busybox`/`toybox` wrappers and
+wrapped commands inside `sh -c` are detected, `web_tools.trust_env` /
+`vision.trust_env` honour `${ENV}` expansion, and a rate limit without retry time
+reports the HTTP status instead of `None`.
 
 ## What 1.3.0 changed
 

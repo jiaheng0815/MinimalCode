@@ -1,5 +1,37 @@
 # 更新日志
 
+## 1.3.1 - 2026-10-31
+
+### 修复
+
+- 协议：Anthropic 非流式响应里的 `redacted_thinking` 块会把响应体变量覆盖成字符串，随后读取 `stop_reason` / `usage` 抛 `AttributeError`，整轮直接失败。思考块现在正常保留，并在工具调用轮继续回传。
+- 协议：Responses 输出项的 `type` 不是字符串时（部分网关下发对象或数组），与已知类型集合比较会抛 `TypeError`；现在按未知类型忽略该条，其余输出照常解析。
+- 协议：会话历史里的 `role` 或 `provider_content[].type` 不是字符串时（手改过的 JSONL），Anthropic 载荷构造抛 `TypeError`；现在跳过这类条目。
+- 会话：`tool_calls[].function` 不是对象时，启动时的历史修复抛 `AttributeError`；现在按无工具名处理，照常补齐被中断的工具结果。
+- 上下文压缩：一次很长的工具循环之后，最近的 user 边界可能就是上一次压缩产生的总结头，此时压缩会只总结自己的总结：历史长度不变、每轮重复一次总结请求，并逐步丢掉细节。现在只有“重写总结头”这一种边界被排除，其他能丢弃消息的边界照常使用（开头两条很大的消息仍会被总结掉）；总结内容覆盖被丢弃的全部消息，没有任何可行边界时不发请求。`/compact` 在这种情况会报出明确原因，而不是假装成功。
+- 配置：`web_tools.trust_env` / `vision.trust_env` 没有参与 `${ENV}` 展开后的类型转换，`"${X}"` 展开出的 `"false"` 是字符串，`resolve_trust_env` 会静默忽略（代理设置失效）；现在与供应商级 `trust_env` 一样转换为布尔值，非法值直接报错。
+- HTTP：`web_tools` / `vision` 的 429/503 在预算耗尽时无法安排重试，此前报 `request failed after 1 attempts: None` 并丢掉状态码；现在报出实际状态码和“没有剩余时间重试”。
+- 搜索：`grep` 的两套 Python 回退把行尾换行符一起交给正则，`\s+$`、`[^0-9]$` 会匹配每一行，而 CRLF 文件里的 `needle$` 反而匹配不到；现在按行内容（不含行结束符）匹配，与 ripgrep 和 `--max-columns` 语义一致。
+- 搜索：Python 回退在结果数恰好等于 `max_results` 时误报 `truncated: true`；现在多取一条才判定截断，与 ripgrep 和进程内引擎一致。
+- 搜索：Python 回退的 glob 把 `**/` 当成至少一层目录，`find("pkg/**/*.py")` 会漏掉 `pkg/config.py` 并报告结果完整；现在同时尝试 `**/` 折叠为空的写法。
+- 沙箱：按原始字符串切分命令时，引号内的 `|` / `;` 也会切断命令，`rg 'nc|netcat'`、`grep -E 'curl|wget'` 被当成联网命令拒绝；现在只在引号外切分。
+- 沙箱：内联 shell 里的包装命令（`sh -c "sudo curl ..."`）此前只凭第一个 token 判断，真实客户端被 `sudo` 挡住；`busybox` / `toybox` 也补进前缀词。两者现在都能识别。
+- CLI：stdout 读取端提前关闭（`minimalcode ... | head`）时按 0 退出。此前 Windows 把关闭的管道报成 `OSError: [Errno 22]`，打印 `error: [Errno 22] Invalid argument` 并以 2 退出；缓冲输出还会在解释器退出时再次 flush 失败，把退出码改成 120 并打印 `Exception ignored`。现在退出前统一 flush，失败时把标准流指向空设备，`--version`、`--help`、用法错误等由 argparse 退出的路径同样覆盖。
+- CLI：`--home` 写在管理命令前面时（`minimalcode --home DIR sessions`）不再把命令词当成提示词发给模型——那会产生一次付费请求并可能执行工具。该写法现在与 `minimalcode sessions --home DIR` 等价；其他前置选项仍按提示词处理。
+- 文档：修正 `minimalcode shell` 会打印探测失败原因的说法（只有在没有任何 shell 能启动时，原因才随 `ShellError` 一起报出），并记录 `keep_messages` 在一次长工具轮次中可能保留更少消息。
+
+### 变更
+
+- 版本号升级到 1.3.1。本次发布没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema，升级不需要改代码。
+- 可观察的行为变化只有两处，且都是修正错误行为：stdout 读取端提前关闭时按 0 退出（此前 Windows 上打印 `error: [Errno 22]` 并以 2 退出），以及 `--home` 写在管理命令前面时按管理命令执行（此前会把命令词当成提示词）。压缩边界的变化只影响“总结自己的总结”这种退化情况。
+
+### 测试
+
+- 新增回归测试：Anthropic 非流式 `redacted_thinking` 的保留与 `stop_reason` / `usage` 解析、非字符串 `role` 与块类型被跳过、Responses 非字符串输出项类型被忽略、非对象 `tool_calls[].function` 的历史修复、长工具循环后的压缩进度与总结覆盖范围。
+- 新增回归测试：`web_tools` / `vision` 块内 `${ENV}` 布尔转换、429 预算耗尽的状态码报告、`$` 锚点与 CRLF 行匹配、恰好等于上限的 `truncated`、`pkg/**/*.py` 的零层目录匹配。
+- 新增回归测试：引号内 `|` 不被当作命令分隔符、内联 shell 中的 `sudo curl` 与 `busybox wget` 仍被识别。
+- 新增回归测试：`--home` 前置的管理命令与普通提示词的区分、stdout 管道提前关闭时的退出码与 stderr 静默，以及 `_reader_closed` / `_discard_standard_streams` 的管道判定。
+
 ## 1.3.0 - 2026-10-31
 
 ### 新增

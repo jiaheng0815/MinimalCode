@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.3.0.
+Applies to MinimalCode 1.3.1.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -42,7 +42,8 @@ that cannot reserve memory, a wrong-architecture binary — falls through to the
 next one instead of failing every command. The probe costs one shell start
 (roughly 0.2 s for pwsh) per process and is cached per executable. A
 `shell.path` override is probed too and reports the failure instead of silently
-switching shells. The fallback reason is printed by `minimalcode shell`.
+switching shells. When no candidate starts, the `ShellError` raised by
+`minimalcode shell` lists every probe failure.
 
 ## Tools
 
@@ -204,7 +205,7 @@ and records the reason in the sandbox notes.
 | Key | Default | Meaning |
 |---|---:|---|
 | `compact_at` | `0.8` | Compact when estimated context reaches this fraction |
-| `keep_messages` | `12` | Minimum recent messages retained after compaction |
+| `keep_messages` | `12` | Minimum recent messages retained after compaction; a cut inside one long tool turn retains fewer so the history still shrinks |
 | `max_instruction_chars` | `60000` | Combined budget for `SYSTEM.md`, global `AGENTS.md`, and project instruction files |
 
 Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading.
