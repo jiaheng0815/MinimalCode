@@ -41,9 +41,11 @@ class FileToolsMixin:
             raise ToolError("end_line must be greater than or equal to start_line")
 
         # Reject binary input before decoding so a NUL-containing file is not
-        # rendered as a wall of replacement characters.
+        # rendered as a wall of replacement characters. The sample catches the
+        # common case early; the per-line check below catches a NUL that only
+        # appears after the sample.
         with target.open("rb") as binary:
-            sample = binary.read(4096)
+            sample = binary.read(65536)
         if b"\x00" in sample:
             raise ToolError("binary files are not supported by read")
 
@@ -53,15 +55,28 @@ class FileToolsMixin:
         actual_end = 0
         truncated = False
         last_line = 0
+        pending = ""
         line_limit = min(self.max_file_chars + 1, _MAX_READ_LINE_CHARS)
         with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
             number = 0
             while True:
-                line = handle.readline(line_limit)
+                line = pending + handle.readline(line_limit)
+                pending = ""
                 if not line:
                     break
+                if line.endswith("\r") and len(line) >= line_limit:
+                    # A limit that lands between CR and LF must not turn the
+                    # LF into a separate empty line. Peek one character and
+                    # keep it for the next iteration when it is real content.
+                    following = handle.read(1)
+                    if following == "\n":
+                        line += following
+                    else:
+                        pending = following
                 number += 1
                 last_line = number
+                if "\x00" in line:
+                    raise ToolError("binary files are not supported by read")
                 line_cut = len(line) >= line_limit and not line.endswith(("\n", "\r"))
                 if number < start or (stop is not None and number > stop):
                     if line_cut:
@@ -120,7 +135,9 @@ class FileToolsMixin:
         """Write a sibling temp file, fsync it, then replace the target.
 
         The rename keeps readers from observing a half-written file, and the
-        original mode is restored for executable scripts.
+        original mode is restored for executable scripts. A new file uses the
+        process umask instead of mkstemp's 0600 so other users/groups can read
+        source files created by the agent.
         """
         fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
         temp_path = Path(temp_name)
@@ -129,12 +146,26 @@ class FileToolsMixin:
                 handle.write(text)
                 handle.flush()
                 os.fsync(handle.fileno())
-            if mode is not None:
+            if mode is None:
+                current_umask = os.umask(0)
+                os.umask(current_umask)
+                mode = 0o666 & ~current_umask
+            try:
+                os.chmod(temp_path, mode)
+            except OSError:
+                pass
+            os.replace(temp_path, target)
+            try:
+                directory_fd = os.open(target.parent, os.O_RDONLY)
+            except OSError:
+                directory_fd = -1
+            if directory_fd >= 0:
                 try:
-                    os.chmod(temp_path, mode)
+                    os.fsync(directory_fd)
                 except OSError:
                     pass
-            os.replace(temp_path, target)
+                finally:
+                    os.close(directory_fd)
         finally:
             # A failed write or replace must not leave a hidden temp file.
             temp_path.unlink(missing_ok=True)
@@ -204,22 +235,22 @@ class FileToolsMixin:
         pattern = re.compile(
             r"(?:\r\n|\r|\n)".join(re.escape(part) for part in needle.split("\n"))
         )
-        matches = list(pattern.finditer(original))
-        count = len(matches)
-        if count == 0:
+        # Do not materialize every match: a one-character needle in a
+        # multi-megabyte file would allocate millions of match objects even
+        # when only the first occurrence is replaced.
+        first = pattern.search(original)
+        if first is None:
             raise ToolError("old_text was not found")
-        if count > 1 and not replace_all:
+        second = pattern.search(original, first.end())
+        if second is not None and not replace_all:
             raise ToolError(
-                f"old_text occurs {count} times; make it unique or set replace_all"
+                "old_text occurs more than once; make it unique or set replace_all"
             )
-        if not replace_all:
-            matches = matches[:1]
 
         # Replace only the matched spans so untouched lines keep their own endings.
         normalized_new = new_text.replace("\r\n", "\n").replace("\r", "\n")
-        updated = original
-        for match in reversed(matches):
-            span = match.group(0)
+
+        def replacement_for(span: str) -> str:
             if "\r\n" in span:
                 span_newline = "\r\n"
             elif "\r" in span:
@@ -228,8 +259,25 @@ class FileToolsMixin:
                 span_newline = "\n"
             else:
                 span_newline = default_newline
-            replacement = normalized_new.replace("\n", span_newline)
-            updated = updated[: match.start()] + replacement + updated[match.end() :]
+            return normalized_new.replace("\n", span_newline)
+
+        if replace_all:
+            pieces: list[str] = []
+            last = 0
+            count = 0
+            for count, match in enumerate(pattern.finditer(original), start=1):
+                pieces.append(original[last : match.start()])
+                pieces.append(replacement_for(match.group(0)))
+                last = match.end()
+            pieces.append(original[last:])
+            updated = "".join(pieces)
+        else:
+            updated = (
+                original[: first.start()]
+                + replacement_for(first.group(0))
+                + original[first.end() :]
+            )
+            count = 1
         try:
             encoded = updated.encode("utf-8")
         except UnicodeEncodeError as exc:

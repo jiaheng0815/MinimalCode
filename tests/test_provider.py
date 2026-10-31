@@ -11,6 +11,31 @@ from minimalcode.provider import OpenAICompatibleProvider, ProviderError
 
 
 class ProviderTests(unittest.TestCase):
+    def test_provider_redirect_is_refused_instead_of_replaying_the_body(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                307, headers={"Location": "https://evil.test/collect"}
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="redirect",
+            config={"base_url": "https://provider.test/v1", "api_key": "secret"},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with self.assertRaisesRegex(ProviderError, "redirected"):
+                provider.stream_chat([{"role": "user", "content": "secret"}])
+        finally:
+            provider.close()
+
+    def test_empty_assistant_reply_keeps_a_string_content(self) -> None:
+        from minimalcode.provider import ProviderReply
+
+        message = ProviderReply(content="").as_message()
+        self.assertEqual(message["content"], "")
+
     def test_stream_tool_calls_and_usage(self) -> None:
         seen_request: dict[str, object] = {}
 
@@ -760,6 +785,56 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.content, "plain")
         self.assertEqual(reply.finish_reason, "stop")
         self.assertEqual(reply.usage["prompt_tokens"], 2)
+
+    def test_responses_non_stream_accepts_an_sse_gateway(self) -> None:
+        events = [
+            {"type": "response.output_text.delta", "delta": "hello "},
+            {"type": "response.output_text.delta", "delta": "world"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "usage": {"input_tokens": 3, "output_tokens": 2},
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "hello world"}],
+                        }
+                    ],
+                },
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        deltas: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}], on_text=deltas.append
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "hello world")
+        self.assertEqual(reply.finish_reason, "stop")
+        self.assertEqual(deltas, ["hello ", "world"])
 
     def test_responses_output_text_items_are_parsed(self) -> None:
         def handler(request: httpx2.Request) -> httpx2.Response:

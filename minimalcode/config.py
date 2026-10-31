@@ -35,6 +35,8 @@ DEFAULT_SETTINGS: dict[str, Any] = json.loads(
 )
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_TRUE_STRINGS = frozenset({"1", "true", "yes", "on"})
+_FALSE_STRINGS = frozenset({"0", "false", "no", "off"})
 
 
 def home_dir(path: str | Path | None = None) -> Path:
@@ -93,6 +95,93 @@ def _unresolved_env(value: Any) -> str | None:
             if unresolved is not None:
                 return unresolved
     return None
+
+
+def _coerce_bool(value: Any, label: str) -> bool:
+    """Convert an expanded string setting to a real boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_STRINGS:
+            return True
+        if lowered in _FALSE_STRINGS:
+            return False
+    raise ConfigError(f"{label} must be a boolean (got {value!r})")
+
+
+def _coerce_int(value: Any, label: str) -> int:
+    """Convert an expanded string setting to an integer."""
+    if isinstance(value, bool):
+        raise ConfigError(f"{label} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(f"{label} must be an integer (got {value!r})") from exc
+
+
+def _coerce_float(value: Any, label: str) -> float:
+    """Convert an expanded string setting to a finite float."""
+    if isinstance(value, bool):
+        raise ConfigError(f"{label} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigError(f"{label} must be a number (got {value!r})") from exc
+    if not math.isfinite(number):
+        raise ConfigError(f"{label} must be a finite number")
+    return number
+
+
+def _coerce_provider_values(name: str, provider: dict[str, Any]) -> dict[str, Any]:
+    """Re-type values that came from ``${ENV}`` placeholders.
+
+    Validation runs before expansion and therefore only checks placeholders.
+    Once expanded, ``"false"`` is still a string unless it is converted here;
+    ``bool("false")`` is ``True``, and ``int("128000")`` is the only reason
+    numeric placeholders work at all.
+    """
+    result = provider
+    for key in ("stream", "include_usage", "send_reasoning_effort", "require_api_key"):
+        if key in result:
+            result[key] = _coerce_bool(result[key], f"provider {name!r} {key}")
+    if "trust_env" in result:
+        result["trust_env"] = _coerce_bool(
+            result["trust_env"], f"provider {name!r} trust_env"
+        )
+    for key in ("context_window", "max_tokens"):
+        if key in result:
+            result[key] = _coerce_int(result[key], f"provider {name!r} {key}")
+    if "timeout_seconds" in result:
+        result["timeout_seconds"] = _coerce_float(
+            result["timeout_seconds"], f"provider {name!r} timeout_seconds"
+        )
+    for block_name in ("web_tools", "vision"):
+        block = result.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        for key in ("enabled",):
+            if key in block:
+                block[key] = _coerce_bool(
+                    block[key], f"provider {name!r} {block_name}.{key}"
+                )
+        for key in ("timeout_seconds",):
+            if key in block:
+                block[key] = _coerce_float(
+                    block[key], f"provider {name!r} {block_name}.{key}"
+                )
+        for key in (
+            "default_count",
+            "max_count",
+            "max_content_chars",
+            "max_image_bytes",
+            "max_chars",
+        ):
+            if key in block:
+                block[key] = _coerce_int(
+                    block[key], f"provider {name!r} {block_name}.{key}"
+                )
+    return result
 
 
 def _validate(data: dict[str, Any], path: Path) -> None:
@@ -451,6 +540,8 @@ class Settings:
                 f"provider {provider_name!r} has an unset environment variable: "
                 f"{unresolved}"
             )
+        expanded = _coerce_provider_values(provider_name, expanded)
+        _validate_provider(provider_name, expanded, self.source)
         return provider_name, expanded
 
     def effective_provider(self, override: str | None = None) -> str:
@@ -507,21 +598,24 @@ def _atomic_write(path: Path, text: str) -> None:
         except OSError:
             pass
         os.replace(temp_path, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            directory_fd = -1
+        if directory_fd >= 0:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_fd)
     finally:
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
 
 
-def write_settings(data: dict[str, Any], home: str | Path | None = None) -> Path:
-    root = home_dir(home)
-    path = root / SETTINGS_FILENAME
-    _validate(data, path)
-    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    return path
-
-
-def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) -> Path:
-    root = home_dir(home)
+def _ensure_home_layout(root: Path) -> Path:
+    """Create the config home and session directory with private permissions."""
     path = root / SETTINGS_FILENAME
     root.mkdir(parents=True, exist_ok=True)
     sessions = root / "sessions"
@@ -531,6 +625,20 @@ def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) ->
         os.chmod(sessions, 0o700)
     except OSError:
         pass
+    return path
+
+
+def write_settings(data: dict[str, Any], home: str | Path | None = None) -> Path:
+    root = home_dir(home)
+    path = _ensure_home_layout(root)
+    _validate(data, path)
+    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return path
+
+
+def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) -> Path:
+    root = home_dir(home)
+    path = _ensure_home_layout(root)
     if overwrite or not path.exists():
         _atomic_write(
             path, json.dumps(DEFAULT_SETTINGS, indent=2, ensure_ascii=False) + "\n"

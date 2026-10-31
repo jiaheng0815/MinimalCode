@@ -139,9 +139,15 @@ class ToolRuntime(
         elif name in {"read", "write", "edit", "read_image"}:
             detail = clip(str(arguments.get("path", "")))
         elif name == "grep":
-            detail = f"{clip(str(arguments.get('pattern', '')))} in {arguments.get('path', '.')}"
+            detail = (
+                f"{clip(str(arguments.get('pattern', '')))} in "
+                f"{clip(str(arguments.get('path', '.')))}"
+            )
         elif name == "find":
-            detail = f"{arguments.get('pattern', '*')} in {arguments.get('path', '.')}"
+            detail = (
+                f"{clip(str(arguments.get('pattern', '*')))} in "
+                f"{clip(str(arguments.get('path', '.')))}"
+            )
         elif name == "web_search":
             detail = clip(str(arguments.get("query", "")))
         elif name == "web_fetch":

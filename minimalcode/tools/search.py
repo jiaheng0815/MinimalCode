@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,15 @@ for path in spec["files"]:
                 line = handle.readline(spec["max_line_chars"])
                 if not line:
                     break
+                if line.endswith("\r") and len(line) >= spec["max_line_chars"]:
+                    # The limit may land between CR and LF; consume the LF so
+                    # it cannot be counted as an extra empty line.
+                    position = handle.tell()
+                    following = handle.read(1)
+                    if following == "\n":
+                        line += following
+                    else:
+                        handle.seek(position)
                 number += 1
                 cut = len(line) >= spec["max_line_chars"] and not line.endswith(
                     ("\n", "\r")
@@ -87,8 +97,21 @@ for path in spec["files"]:
                     # with the file instead of counting each fragment.
                     while True:
                         rest = handle.readline(spec["max_line_chars"])
-                        if not rest or rest.endswith(("\n", "\r")):
+                        if not rest:
                             break
+                        if rest.endswith("\n"):
+                            break
+                        if rest.endswith("\r") and len(rest) >= spec["max_line_chars"]:
+                            rest_position = handle.tell()
+                            rest_following = handle.read(1)
+                            if rest_following != "\n":
+                                handle.seek(rest_position)
+                                break
+                            break
+                        if rest.endswith("\r"):
+                            break
+                if "\x00" in line:
+                    continue
                 if not regex.search(line):
                     continue
                 text = line.rstrip("\r\n")
@@ -115,7 +138,20 @@ def drain_physical_line(handle: Any, limit: int) -> None:
     """Consume the rest of a line that was longer than ``limit``."""
     while True:
         rest = handle.readline(limit)
-        if not rest or rest.endswith(("\n", "\r")):
+        if not rest:
+            return
+        if rest.endswith("\n"):
+            return
+        if rest.endswith("\r") and len(rest) >= limit:
+            # A CRLF split at the limit must consume the LF too; otherwise it
+            # becomes an empty line and shifts every later line number.
+            position = handle.tell()
+            following = handle.read(1)
+            if following != "\n":
+                handle.seek(position)
+                return
+            return
+        if rest.endswith("\r"):
             return
 
 
@@ -313,35 +349,65 @@ def inline_python_grep(
     limit: int,
     max_bytes: int,
 ) -> dict[str, Any]:
-    """Pure-Python fallback used when the backend cannot run argv children."""
+    """Pure-Python fallback used when the backend cannot run argv children.
+
+    A backend without argv support runs the regular expression in this process,
+    so a bounded alarm is the only thing that keeps a catastrophic pattern from
+    hanging the agent. Windows has no SIGALRM; the docker backend that needs
+    this path is POSIX-only, so the guard is best-effort elsewhere.
+    """
     flags = re.IGNORECASE if smart_case_ignore(pattern) else 0
     try:
         regex = re.compile(pattern, flags)
     except re.error as exc:
         raise ToolError(f"invalid regular expression: {exc}") from exc
+
+    use_alarm = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    previous_handler: Any = None
+    if use_alarm:
+
+        def _timeout(_signum: int, _frame: Any) -> None:
+            raise ToolError(
+                f"search timed out after {_SEARCH_TIMEOUT_SECONDS:g} seconds"
+            )
+
+        previous_handler = signal.signal(signal.SIGALRM, _timeout)
+        signal.setitimer(signal.ITIMER_REAL, _SEARCH_TIMEOUT_SECONDS)
+
     matches: list[str] = []
-    for path in files:
-        try:
-            if path.stat().st_size > max_bytes:
+    try:
+        for path in files:
+            try:
+                if path.stat().st_size > max_bytes:
+                    continue
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for number, line in enumerate(handle, start=1):
+                        if "\x00" in line:
+                            continue
+                        if not regex.search(line):
+                            continue
+                        text = line.rstrip("\r\n")
+                        if len(text) > _MAX_GREP_LINE_CHARS:
+                            text = (
+                                text[:_MAX_GREP_LINE_CHARS]
+                                + " [... omitted end of long line]"
+                            )
+                        matches.append(f"{path}:{number}:{text}")
+                        if len(matches) > limit:
+                            return {
+                                "status": "success",
+                                "matches": matches[:limit],
+                                "truncated": True,
+                            }
+            except (OSError, UnicodeError):
+                # An unreadable file must not abort a repository-wide search.
                 continue
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                for number, line in enumerate(handle, start=1):
-                    if not regex.search(line):
-                        continue
-                    text = line.rstrip("\r\n")
-                    if len(text) > _MAX_GREP_LINE_CHARS:
-                        text = (
-                            text[:_MAX_GREP_LINE_CHARS]
-                            + " [... omitted end of long line]"
-                        )
-                    matches.append(f"{path}:{number}:{text}")
-                    if len(matches) >= limit:
-                        return {
-                            "status": "success",
-                            "matches": matches[:limit],
-                            "truncated": True,
-                        }
-        except (OSError, UnicodeError):
-            # An unreadable file must not abort a repository-wide search.
-            continue
-    return {"status": "success", "matches": matches, "truncated": False}
+    finally:
+        if use_alarm:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if previous_handler is not None:
+                signal.signal(signal.SIGALRM, previous_handler)
+    return {"status": "success", "matches": matches[:limit], "truncated": False}

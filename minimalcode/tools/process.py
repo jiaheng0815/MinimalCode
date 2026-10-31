@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from ..errors import ToolError
+from ..provider.anthropic_env import ANTHROPIC_ENV_PROVIDER
 from ..shell import run_shell
 from ..subagent import PREAMBLE as SUBAGENT_PREAMBLE
 from ..subagent import build_command as build_subagent_command
@@ -14,6 +15,34 @@ from ..subagent import child_env as subagent_env
 
 class ProcessToolsMixin:
     """Run commands and nested agents inside the active sandbox policy."""
+
+    def _subagent_sandbox_options(self) -> tuple[list[str], list[tuple[str, str]]]:
+        """Mirror the current in-memory sandbox policy onto the child command.
+
+        CLI flags are applied to ``settings.data`` in memory only; without this
+        the child reloads ``settings.json`` and silently drops ``--sandbox``,
+        ``--sandbox-network``, and the other per-run overrides.
+        """
+        policy = self.sandbox.policy
+        if not policy.enabled:
+            return ["--no-sandbox"], []
+        flags = ["--sandbox"]
+        options: list[tuple[str, str]] = [
+            ("--sandbox-backend", policy.backend),
+            ("--sandbox-network", policy.network_policy),
+            ("--sandbox-timeout", f"{policy.timeout_seconds:g}"),
+            ("--sandbox-max-output", str(policy.max_output_chars)),
+        ]
+        for root in policy.allowed_roots:
+            options.append(("--sandbox-root", str(root)))
+        for host in policy.allowed_hosts:
+            options.append(("--sandbox-allow-host", host))
+        flags.append(
+            "--sandbox-allow-sensitive"
+            if policy.allow_sensitive_files
+            else "--no-sandbox-allow-sensitive"
+        )
+        return flags, options
 
     def shell(
         self, command: str, timeout: float | None = None, cwd: str = "."
@@ -81,14 +110,24 @@ class ProcessToolsMixin:
             raise ToolError("max_turns must be an integer")
         turns = max(1, min(turns, self.subagent_max_turns))
 
+        sandbox_flags, sandbox_options = self._subagent_sandbox_options()
+        extra_flags = list(sandbox_flags)
+        provider = self.provider_name
+        if provider == ANTHROPIC_ENV_PROVIDER:
+            # The env-derived provider exists only in this process; the child
+            # must rebuild it from the inherited ANTHROPIC_* environment.
+            extra_flags.append("--anthropic-env")
+            provider = None
         command = build_subagent_command(
             self.shell_spec,
             cwd=workdir,
             home=self.settings.home,
-            provider=self.provider_name,
+            provider=provider,
             model=self.model,
             thinking=self.thinking,
             max_turns=turns,
+            extra_flags=extra_flags,
+            extra_options=sandbox_options,
         )
         result = run_shell(
             command,

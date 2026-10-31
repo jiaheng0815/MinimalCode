@@ -53,6 +53,29 @@ class FakeProvider:
         return "summary"
 
 
+class BurstToolProvider:
+    name = "fake"
+    model = "fake-model"
+    context_window = 100_000
+
+    def stream_chat(self, messages, *, tools=None, on_text=None, on_thinking=None):
+        return ProviderReply(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=f"call_{index}",
+                    name="write",
+                    arguments=json.dumps(
+                        {"path": f"burst-{index}.txt", "content": "nope\n"}
+                    ),
+                )
+                for index in range(40)
+            ],
+            finish_reason="tool_calls",
+            usage={},
+        )
+
+
 class MarkdownProvider(FakeProvider):
     text = "# Result\n\n**done**\n"
 
@@ -226,6 +249,35 @@ class FilteredReplyProvider(FakeProvider):
 
 
 class AgentTests(unittest.TestCase):
+    def test_a_burst_of_tool_calls_is_refused_without_executing_any(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(home)
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace, provider="fake", model="fake-model", save=False
+            )
+            agent = Agent(
+                settings=settings,
+                provider=BurstToolProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("write everything")
+        self.assertFalse(result.completed)
+        self.assertEqual(list(workspace.glob("burst-*.txt")), [])
+        tool_messages = [
+            message for message in session.messages if message["role"] == "tool"
+        ]
+        self.assertEqual(len(tool_messages), 40)
+        self.assertIn("limit is", tool_messages[0]["content"])
+
     def test_tool_loop_writes_file_and_records_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

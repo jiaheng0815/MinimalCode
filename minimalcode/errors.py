@@ -25,3 +25,7 @@ class ProviderError(MinimalCodeError):
 
 class ToolError(MinimalCodeError):
     """Raised for invalid or unsafe tool input."""
+
+
+class ClipboardError(MinimalCodeError):
+    """Raised when an image cannot be read from the system clipboard."""

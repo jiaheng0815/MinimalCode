@@ -55,14 +55,20 @@ def content_text(value: Any) -> str:
         return value
     if isinstance(value, dict):
         text = value.get("text")
-        return text if isinstance(text, str) else ""
+        if isinstance(text, str):
+            return text
+        refusal = value.get("refusal")
+        return refusal if isinstance(refusal, str) else ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
             if isinstance(item, str):
                 parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("refusal"), str):
+                    parts.append(item["refusal"])
         # No separator is inserted because this same helper flattens streaming
         # deltas and finished messages; adding one would make the reassembled
         # text differ from what the model actually produced.

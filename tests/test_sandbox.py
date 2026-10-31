@@ -228,6 +228,9 @@ class NetworkPolicyTests(SandboxTestBase):
             "rg curl",
             "grep curl README.md",
             "echo wget",
+            'grep "git clone" README.md',
+            'rg "pip install" .',
+            "echo git clone",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(policy.network_denial(command))
@@ -241,8 +244,14 @@ class NetworkPolicyTests(SandboxTestBase):
             "sudo wget https://example.com/file",
             'pwsh -Command "iwr https://example.com"',
             "bash -c 'scp a b'",
+            "bash -lc 'curl https://example.com'",
             "VAR=1 curl https://example.com",
             "$(curl https://example.com)",
+            "sudo -u root curl https://example.com",
+            "timeout 5 curl https://example.com",
+            "env -i curl https://example.com",
+            "nice -n 5 curl https://example.com",
+            "if true; then curl https://example.com; fi",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(policy.network_denial(command))
@@ -306,6 +315,21 @@ class ExecutionBaselineTests(SandboxTestBase):
         # File tools do not depend on the external backend and keep working.
         tools.write("still-works.txt", "ok\n")
         self.assertTrue((self.workspace / "still-works.txt").exists())
+
+    def test_search_falls_back_when_the_backend_is_unavailable(self) -> None:
+        (self.workspace / "app.py").write_text("needle\n", encoding="utf-8")
+        tools = self._tools(backend="bwrap")
+        with (
+            patch(
+                "minimalcode.sandbox.backends.BwrapBackend.available",
+                return_value=False,
+            ),
+            patch("minimalcode.tools.search_tools.shutil.which", return_value=None),
+        ):
+            grep_result = tools.grep("needle")
+            find_result = tools.find("*.py")
+        self.assertTrue(any("app.py" in line for line in grep_result["matches"]))
+        self.assertTrue(any(path.endswith("app.py") for path in find_result["files"]))
 
     def test_recording_backend_receives_every_shell_invocation(self) -> None:
         policy = SandboxPolicy.from_settings(self._settings(), self.workspace)
@@ -425,7 +449,12 @@ class BackendTests(SandboxTestBase):
         if os.name == "nt":
             self.assertFalse(backend.available())
         else:
-            self.assertEqual(backend.available(), shutil.which("docker") is not None)
+            # Availability also probes the daemon, so a missing binary must
+            # always be false, but a present binary may still be unusable.
+            if shutil.which("docker") is None:
+                self.assertFalse(backend.available())
+            else:
+                self.assertIsInstance(backend.available(), bool)
 
     def test_docker_wrap_runs_as_the_invoking_user(self) -> None:
         policy = SandboxPolicy.from_settings(

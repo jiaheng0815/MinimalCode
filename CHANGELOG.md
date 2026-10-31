@@ -6,10 +6,31 @@
 
 - 交互模式支持多行输入：行尾写 `\` 继续录入下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠。多行消息作为一个整体发给模型，行间换行原样保留。
 - 长文本可直接粘贴：交互模式启用终端 bracketed paste，粘贴块的换行不会逐行提交；终端不支持该协议时，改用缓冲探测把连续到达的行拼成一条消息（Windows 控制台走 `msvcrt.kbhit`，其他平台走 `select`）。`-p` 与管道输入仍是原样读取，不受影响。
+- 交互模式支持从剪贴板粘贴图片：按终端的粘贴快捷键（Windows `Ctrl+V`、macOS `Cmd+V`、多数 Linux 终端 `Ctrl+Shift+V`）后再回车，MinimalCode 直接读取系统剪贴板里的 PNG 图片，不需要事先保存文件。空回车触发读取，随后可以输入配套问题；直接回车则由供应商 `vision` 配置的视觉模型生成描述，并作为同一条消息发给主模型。Windows 通过 PowerShell 读取剪贴板，macOS 走 `osascript`，Linux 优先 `wl-paste`、回退 `xclip`。剪贴板里没有图片时保持原来的空输入行为；读取失败、格式不支持或超过 `max_image_bytes` 时只报错，不结束会话。
+
+### 修复
+
+- HTTP：JSON API 客户端不再自动跟随重定向。307/308 会把完整请求体（对话、工具输出、图片 base64）重发到新地址，而 httpx2 只会删除 `Authorization`，`x-api-key` 与自定义认证头会保留；现在 3xx 直接报错并给出目标地址。`web_tools` / `vision` 补上 429/503 单次重试（含 `Retry-After`）。
+- `/summary`：只剩单边标记时不再把标记之间的正文当作块内容删除；多个完整块归一为一个，孤立标记行按注释丢弃，正文原样保留。总结请求不再把系统提示词（含旧 `AGENTS.md`）喂回模型。
+- 沙箱：子代理继承父进程的 `--sandbox`、后端、网络策略、允许根、允许主机、超时、输出上限与敏感文件开关；`--anthropic-env` 启动时子代理改用 `--anthropic-env` 重建供应商，而不是引用只存在于父进程内存的 `anthropic-env`。
+- 沙箱：`grep` / `find` 在后端不可用时回退到进程内扫描，不再整体失败；进程内扫描对二进制行跳过，并用 30 秒 alarm 兜底灾难性正则。
+- 沙箱：网络识别补齐 `sudo -u`、`sudo -E`、`timeout`、`env -i`、`nice -n`、`xargs`、`bash -lc`、`if/then` 等包装与控制结构；引号内的 `grep "git clone"`、`rg "pip install"` 不再被判定为联网。`allowed_hosts` 接受带端口或完整 URL 的条目。
+- 沙箱：Docker 后端增加 daemon 探测（daemon 未运行不再报告可用）、`--name`，并在超时或 Ctrl-C 后 `docker kill` + `docker rm`，避免 docker 客户端被杀而容器继续运行；bwrap 增加真实可用性探测。超时清理会额外收集脱离进程组的子进程并直接 kill。
+- 协议：Chat 空回复不再写入 `content: null`（严格服务端会拒绝，导致后续会话卡死），历史中的 null assistant 会在启动时修复。
+- 协议：Anthropic 流式与非流式都保留并回放 `redacted_thinking`，扩展思考 + 工具调用可以继续；Responses 非流式请求遇到返回 SSE 的网关时正确解析；Chat 缺失 `index` 的 tool call 分片按 id 归并，整对象 arguments 不再覆盖已累积片段；`refusal` 内容按文本处理。
+- 协议：`--anthropic-env -m model[1m]` 在构造客户端时剥离后缀并使用对应上下文窗口，不再把后缀发给服务端。
+- 工具：`edit` 不再为单字符匹配枚举全部结果（`replace_all=False` 找到第二个匹配即停止，`replace_all=True` 改为流式替换）；修复 `read` 与 Python grep 在 CRLF 恰好被行长度上限切开时的行号漂移；`read` 检测 64KB 之后的 NUL；新建文件按 umask 而非 `mkstemp` 的 `0600`；文件与目录写入后 fsync。
+- 工具：显式搜索被忽略的目录时，ripgrep 与 Python 回退使用同一套忽略规则；`find` 与进程内 grep 的 `truncated` 不再在恰好等于上限时误报；`activity` 对搜索路径做截断。
+- 配置：`${ENV}` 展开后按字段重新转换为布尔/整数/浮点数，`stream: "${X}"` 且 `X=false` 不再被 `bool("false")` 当成真；`config set-model` 同步更新当前供应商的 `model`，`set-provider` 同步或提示模型；`import-pi` 为每个供应商保留自己的模型；`/model` 的凭据检测能识别未解析的 `${...}`。
+- 会话：恢复会话时恢复记录的供应商与模型，`/model` 切换后写入会话 meta；会话追加 fsync 并收紧到 `0600`；配置目录统一 `0700`。
+- 交互：粘贴结束标记之后的文本不再丢失，粘贴长度有上限；POSIX 上补读 `TextIOWrapper` 已缓冲的多行；Windows 用 `GetConsoleMode` 判断真实控制台，NUL 设备与重定向设备不再让 `kbhit()` 一直报告有输入。
+- 其他：`BrokenPipeError` 安静退出（`minimalcode ... | head`）；Windows 控制台拒绝 VT 模式时禁用着色而不是打印原始 ANSI；POSIX 增加 `zsh` 候选、Windows 增加 Git Bash 候选；`requires-python` 限定为 `>=3.11,<3.14`。
 
 ### 测试
 
 - 新增多行输入回归测试：`\` 续行拼接与提示符、`\\` 转义、bracketed paste 解包（含结束标记前的换行）、无标记粘贴的逐行缓冲拼接，以及交互循环把多行消息整体交给 Agent。
+- 新增剪贴板图片回归测试：Windows base64 解码与无图片退出码、macOS AppleScript 十六进制解析、Linux 工具探测、平台分派、格式校验，以及交互循环中图像与问题合并、纯图片描述、空剪贴板、未启用 `vision` 和视觉调用失败时保留原消息。
+- 新增缺陷回归测试：跨源 307 拒绝、`/summary` 不完整标记、单字符 `edit`、CRLF 长行行号、`sudo -u` / `timeout` 等网络识别与引号内文本不误报、后端不可用时搜索回退、子代理沙箱参数与 `--anthropic-env` 重建、Chat 空回复、Anthropic `redacted_thinking`、Responses SSE 网关、`${ENV}` 布尔转换、会话供应商恢复、粘贴结束标记之后的文本、未解析凭据占位符、单轮工具调用数量上限。
 
 ## 1.2.0 - 2026-10-30
 

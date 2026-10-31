@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,9 @@ class SandboxBackend:
         """Path the child should use for TMPDIR, or None to disable the override."""
         return str(request.temp_dir) if request.temp_dir is not None else None
 
+    def cleanup(self, request: CommandRequest) -> None:
+        """Release resources that outlive the wrapped client process, if any."""
+
 
 class LocalSandboxBackend(SandboxBackend):
     """Cross-platform baseline: policy layer plus subprocess limits."""
@@ -62,7 +66,35 @@ class BwrapBackend(SandboxBackend):
     capabilities = frozenset({"argv", "shell", "filesystem", "network"})
 
     def available(self) -> bool:
-        return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
+        if not sys.platform.startswith("linux"):
+            return False
+        cached = getattr(self, "_available", None)
+        if cached is not None:
+            return bool(cached)
+        executable = shutil.which("bwrap")
+        usable = False
+        if executable is not None:
+            try:
+                probe = subprocess.run(
+                    [
+                        executable,
+                        "--unshare-all",
+                        "--ro-bind",
+                        "/",
+                        "/",
+                        "true",
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                usable = probe.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                usable = False
+        self._available = usable
+        return usable
 
     def wrap(self, request: CommandRequest) -> list[str]:
         argv = [
@@ -146,7 +178,33 @@ class DockerBackend(SandboxBackend):
         # Docker Desktop on Windows cannot mount drive-letter paths the way this
         # backend builds them (`C:\ws:C:\ws`), so claiming availability there
         # would produce a confusing failure after the policy said it was usable.
-        return os.name != "nt" and shutil.which("docker") is not None
+        if os.name == "nt":
+            return False
+        cached = getattr(self, "_available", None)
+        if cached is not None:
+            return bool(cached)
+        executable = shutil.which("docker")
+        usable = False
+        if executable is not None:
+            try:
+                probe = subprocess.run(
+                    [executable, "info", "--format", "{{.ServerVersion}}"],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                usable = probe.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                usable = False
+        self._available = usable
+        return usable
+
+    @staticmethod
+    def _container_name(request: CommandRequest) -> str | None:
+        if request.temp_dir is None:
+            return None
+        return f"minimalcode-{request.temp_dir.name}"
 
     def wrap(self, request: CommandRequest) -> list[str]:
         if not request.command:
@@ -165,6 +223,12 @@ class DockerBackend(SandboxBackend):
             "--network",
             network,
         ]
+        name = self._container_name(request)
+        if name is not None:
+            # `--rm` cleans up after a normal exit, but the container belongs to
+            # the daemon; killing the docker client leaves it running. A name is
+            # what lets cleanup() stop it after a timeout or Ctrl-C.
+            argv.extend(["--name", name])
         user = _docker_user()
         if user is not None:
             # Containers run as root by default, which would leave root-owned
@@ -191,6 +255,27 @@ class DockerBackend(SandboxBackend):
 
     def temp_path(self, request: CommandRequest) -> str | None:
         return "/tmp" if request.temp_dir is not None else None
+
+    def cleanup(self, request: CommandRequest) -> None:
+        """Stop and remove a container whose docker client was killed."""
+        name = self._container_name(request)
+        if name is None:
+            return
+        executable = shutil.which("docker")
+        if executable is None:
+            return
+        for arguments in (["kill", name], ["rm", "-f", name]):
+            try:
+                subprocess.run(
+                    [executable, *arguments],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
 
 
 def _docker_user() -> str | None:

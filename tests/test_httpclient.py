@@ -115,6 +115,31 @@ class LoopbackDetectionTests(unittest.TestCase):
 
 
 class RetryPolicyTests(unittest.TestCase):
+    def test_json_clients_do_not_follow_redirects(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            seen.append(request.url.path)
+            if request.url.path.endswith("/redirect"):
+                return httpx2.Response(
+                    307, headers={"Location": "https://evil.test/final"}
+                )
+            return httpx2.Response(200, json={"ok": True})
+
+        client = build_client(
+            base_url="https://provider.test/v1",
+            headers={"x-api-key": "secret"},
+            timeout=5,
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            self.assertFalse(client.follow_redirects)
+            response = client.post("https://provider.test/v1/redirect", json={"x": 1})
+            self.assertEqual(response.status_code, 307)
+        finally:
+            client.close()
+        self.assertEqual(seen, ["/v1/redirect"])
+
     def test_backoff_is_capped(self) -> None:
         self.assertEqual(connection_backoff(0), 0.5)
         self.assertEqual(connection_backoff(1), 1.0)

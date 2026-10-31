@@ -85,6 +85,24 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(merged.count(SUMMARY_END), 1)
         self.assertIn("body", merged)
 
+    def test_unterminated_marker_does_not_swallow_later_prose(self) -> None:
+        # A stray start marker used to pair with the end marker of the newly
+        # appended block, deleting everything in between on the second run.
+        existing = (
+            "# Project\n\nKeep me\n\n"
+            f"{SUMMARY_START}\nold summary without end\n\n## Also keep me\n"
+        )
+        first = merge_agents_summary(existing, "first summary")
+        second = merge_agents_summary(first, "second summary")
+        self.assertIn("Keep me", second)
+        self.assertIn("Also keep me", second)
+        # The unterminated block is ambiguous, so its body is preserved as
+        # ordinary prose rather than being paired with a later marker.
+        self.assertIn("old summary without end", second)
+        self.assertEqual(second.count(SUMMARY_START), 1)
+        self.assertEqual(second.count(SUMMARY_END), 1)
+        self.assertIn(f"{SUMMARY_START}\nsecond summary\n{SUMMARY_END}", second)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,8 @@ minimalcode
 
 输入支持多行：行尾写 `\` 回车继续下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠；也可以直接粘贴整段长文本，粘贴块里的换行不会被当作多次提交，整段内容作为一条消息发送。`-p` 或管道输入时不做改写。
 
+如果剪贴板里是图片，先按终端的粘贴快捷键（Windows 为 `Ctrl+V`，macOS 为 `Cmd+V`，多数 Linux 终端为 `Ctrl+Shift+V`）再回车即可发送：终端本身无法把图片粘进输入行，所以 MinimalCode 把空回车当作读取剪贴板的信号。随后可以输入要一起发送的问题再回车；直接回车则让视觉模型完整描述图片。图片不需要事先保存成文件，由供应商 `vision` 配置的视觉模型转成文字描述后随消息一起发给主模型；未配置 `vision` 时该功能不可用。
+
 单次任务：
 
 ```powershell
@@ -202,6 +204,7 @@ JSON 输出字段：
 ```
 
 - 图片以 base64 data URL 内联发送，格式按文件内容判断，支持 JPEG、PNG、GIF 和 WebP，不依赖扩展名。
+- 交互模式下也可以直接从剪贴板粘贴图片：按终端的粘贴快捷键后再回车（Windows `Ctrl+V`、macOS `Cmd+V`、多数 Linux 终端 `Ctrl+Shift+V`），不需要先保存文件。MinimalCode 调用同一个 `vision` 配置读取剪贴板图片并生成描述；图片超过 `max_image_bytes`、剪贴板里没有图片或读取失败时会报错并继续会话。
 - `prompt` 可选；缺省时要求模型详细描述图片并逐字转写可见文字，结果超过 `max_chars` 时截断并标记 `<description truncated>`。
 - `read_image` 和其他文件工具一样受工作区限制，读取工作区外的图片需要 `tools.allow_outside_workspace`。
 - 内置默认配置只为 DeepSeek 打开了 `vision`（`deepseek-flash`），其他供应商默认关闭，需要时按上面的结构自行添加。
@@ -488,6 +491,7 @@ minimalcode/
 ├── config.py        # 配置合并、校验、脱敏、原子写入
 ├── web.py           # 供应商 web_search / web_fetch 客户端
 ├── vision.py        # 供应商视觉客户端
+├── clipboard.py     # 系统剪贴板图片读取
 ├── subagent.py      # 子进程命令构建与深度传递
 ├── importer.py      # Pi 配置迁移
 ├── errors.py        # 统一异常类型

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import signal
@@ -98,6 +99,46 @@ def _finish_capture(capture: _Capture, limit: int) -> tuple[str, bool]:
     return text, True
 
 
+def _run_cleanup(callback: Callable[[], None] | None) -> None:
+    """Run a backend cleanup hook without letting it mask the real failure."""
+    if callback is None:
+        return
+    with contextlib.suppress(Exception):
+        callback()
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    """Return descendants of ``root_pid`` using ps when it is available."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, parent = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(parent, []).append(pid)
+    result: list[int] = []
+    pending = list(children.get(root_pid, ()))
+    while pending:
+        pid = pending.pop()
+        result.append(pid)
+        pending.extend(children.get(pid, ()))
+    return result
+
+
 def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
     """Kill a timed-out command and every process it spawned."""
     if os.name == "nt":
@@ -113,10 +154,18 @@ def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
         except (OSError, subprocess.TimeoutExpired):
             pass
     else:
+        # A child that called setsid() is no longer in our process group, so
+        # collect descendants before the group kill and signal them directly.
+        descendants = _descendant_pids(process.pid)
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except OSError:
             pass
+        for pid in descendants:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
     # The tree kill can race with an already-exiting process; the direct kill
     # is a harmless fallback and ensures the leader is reaped.
     try:
@@ -231,6 +280,7 @@ def _execute(
     stdin_text: str | None,
     shell_label: str,
     preexec: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Run one prepared command with bounded captures and tree-wide timeout."""
     tree_options: dict[str, object] = (
@@ -285,6 +335,7 @@ def _execute(
                 returncode = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 _terminate_tree(process)
+                _run_cleanup(on_timeout)
                 _join_readers(readers, 2.0)
                 stdout, stdout_truncated = _finish_capture(
                     out_capture, max_output_chars
@@ -303,6 +354,7 @@ def _execute(
             except BaseException:
                 # Ctrl-C must not leave the command's process tree running.
                 _terminate_tree(process)
+                _run_cleanup(on_timeout)
                 _join_readers(readers, 2.0)
                 raise
             _join_readers(readers, 5.0)

@@ -133,7 +133,9 @@ def select_shell(
     probe: Callable[[ShellSpec], str | None] | None = None,
 ) -> ShellSpec:
     """Resolve the shell order without depending on the host platform."""
-    candidates = ("pwsh", "powershell") if is_windows else ("pwsh", "bash", "sh")
+    candidates = (
+        ("pwsh", "powershell", "bash") if is_windows else ("pwsh", "bash", "zsh", "sh")
+    )
     unusable: list[str] = []
     for name in candidates:
         executable = finder(name)

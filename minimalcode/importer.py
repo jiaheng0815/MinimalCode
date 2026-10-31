@@ -145,6 +145,9 @@ def import_pi_settings(
         provider_config: dict[str, Any] = {
             "protocol": protocol,
             "base_url": base_url,
+            # Each imported provider keeps its own model; otherwise switching
+            # to a later provider would silently reuse the selected one.
+            "model": model_id,
             "context_window": context_window,
             "timeout_seconds": 120,
             "stream": True,

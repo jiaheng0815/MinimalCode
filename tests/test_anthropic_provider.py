@@ -6,6 +6,7 @@ import unittest
 import httpx2
 
 from minimalcode.provider import OpenAICompatibleProvider, ProviderError
+from minimalcode.provider.anthropic import AnthropicProtocolMixin
 
 
 def _sse(events: list[dict]) -> bytes:
@@ -213,6 +214,35 @@ class AnthropicProviderTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_redacted_thinking_is_replayed_verbatim(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": "",
+            "provider_content": [
+                {"type": "redacted_thinking", "data": "opaque-data"},
+                {"type": "thinking", "thinking": "plan", "signature": "sig-1"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read",
+                    "input": {"path": "a.py"},
+                },
+            ],
+            "tool_calls": [
+                {
+                    "id": "toolu_1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": '{"path":"a.py"}'},
+                }
+            ],
+        }
+        blocks = AnthropicProtocolMixin._anthropic_assistant_blocks(message)
+        self.assertEqual(
+            [block["type"] for block in blocks],
+            ["redacted_thinking", "thinking", "tool_use"],
+        )
+        self.assertEqual(blocks[0]["data"], "opaque-data")
 
     def test_streaming_tool_call_and_thinking_replay(self) -> None:
         requests: list[dict[str, object]] = []

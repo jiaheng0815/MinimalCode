@@ -119,12 +119,13 @@ class ChatProtocolMixin:
         # while the arguments JSON string is split across many chunks, so each
         # entry accumulates instead of being overwritten.
         calls: dict[int, dict[str, str]] = {}
+        last_call_index = -1
         finish_reason: str | None = None
         saw_terminal = False
         usage: dict[str, int] = {}
 
         try:
-            for line in lines:
+            for line in self._checked_lines(lines):
                 if not line or line.startswith((":", "event:")):
                     continue
                 if not line.startswith("data:"):
@@ -161,7 +162,9 @@ class ChatProtocolMixin:
                 delta = choice.get("delta")
                 if not isinstance(delta, dict):
                     delta = {}
-                text = content_text(delta.get("content"))
+                text = content_text(delta.get("content")) or content_text(
+                    delta.get("refusal")
+                )
                 if text:
                     content_parts.append(text)
                     if on_text is not None:
@@ -183,12 +186,31 @@ class ChatProtocolMixin:
                         if not isinstance(raw_call, dict):
                             continue
                         try:
-                            index = int(raw_call.get("index", len(calls)))
-                        except (TypeError, ValueError):
-                            # Some OpenAI-compatible servers omit `index`; the
-                            # number of calls seen so far is then the only
-                            # ordering signal available.
-                            index = len(calls)
+                            index = int(raw_call["index"])
+                        except (KeyError, TypeError, ValueError):
+                            # Some OpenAI-compatible servers omit `index`. A
+                            # fragment without one belongs to the call that is
+                            # already open; a new id starts the next call.
+                            incoming_id = str(raw_call.get("id") or "")
+                            previous_id = (
+                                calls.get(last_call_index, {}).get("id", "")
+                                if last_call_index >= 0
+                                else ""
+                            )
+                            if (
+                                last_call_index >= 0
+                                and incoming_id
+                                and previous_id
+                                and incoming_id != previous_id
+                            ):
+                                index = len(calls)
+                            else:
+                                index = (
+                                    last_call_index
+                                    if last_call_index >= 0
+                                    else len(calls)
+                                )
+                        last_call_index = index
                         entry = calls.setdefault(
                             index,
                             {"id": "", "name": "", "arguments": ""},
@@ -202,7 +224,10 @@ class ChatProtocolMixin:
                             arguments = function.get("arguments")
                             if isinstance(arguments, str):
                                 entry["arguments"] += arguments
-                            elif arguments is not None:
+                            elif arguments is not None and not entry["arguments"]:
+                                # A whole-object argument value is complete on
+                                # its own; do not replace a partial string that
+                                # earlier chunks already accumulated.
                                 entry["arguments"] = tool_arguments(arguments)
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
@@ -265,7 +290,9 @@ class ChatProtocolMixin:
         message = choice.get("message")
         if not isinstance(message, dict):
             raise ProviderError("provider response has no message")
-        content = content_text(message.get("content"))
+        content = content_text(message.get("content")) or content_text(
+            message.get("refusal")
+        )
         if content and on_text is not None:
             on_text(content)
         if on_thinking is not None:

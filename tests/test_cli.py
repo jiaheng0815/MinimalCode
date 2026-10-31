@@ -53,16 +53,42 @@ class FakeClosingClient:
         self.closed = True
 
 
+class StubVisionClient:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.enabled = True
+        self.max_image_bytes = 1024
+        self.error = error
+        self.calls: list[tuple[str, bytes, str | None]] = []
+
+    def describe(
+        self,
+        media_type: str,
+        data: bytes,
+        *,
+        question: str | None = None,
+    ) -> str:
+        self.calls.append((media_type, data, question))
+        if self.error is not None:
+            raise self.error
+        return "A tiny screenshot."
+
+
 class StubAgent:
     """Minimal stand-in for the interactive loop's agent contract."""
 
-    def __init__(self, cwd: Path, *, failures: int = 0) -> None:
+    def __init__(
+        self,
+        cwd: Path,
+        *,
+        failures: int = 0,
+        vision_client: StubVisionClient | None = None,
+    ) -> None:
         self.shell = SimpleNamespace(label="stub-shell")
         self.session = SimpleNamespace(cwd=cwd, path=None)
         self.provider = FakeCliProvider()
         self.tools = SimpleNamespace(
             web_client=None,
-            vision_client=None,
+            vision_client=vision_client,
             thinking="high",
             subagent_enabled=True,
         )
@@ -183,6 +209,42 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn(str(requested.resolve()), system_message)
 
+    def test_resumed_session_restores_its_recorded_provider_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            session = SessionStore(settings).create(
+                workspace,
+                provider="deepseek",
+                model="deepseek-flash",
+                save=True,
+            )
+            provider = FakeCliProvider()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "deepseek", "deepseek-flash"),
+                ) as create,
+                redirect_stdout(io.StringIO()),
+            ):
+                code = run(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--session",
+                        session.session_id,
+                        "say completed",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(create.call_args.kwargs["provider_name"], "deepseek")
+            self.assertEqual(create.call_args.kwargs["model"], "deepseek-flash")
+
     def test_session_path_must_be_a_jsonl_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -280,6 +342,40 @@ class CliTests(unittest.TestCase):
             settings = load_settings(home, require_file=True)
             self.assertEqual(settings.get("model"), "new-model")
             self.assertEqual(settings.get("provider"), "deepseek")
+
+    def test_config_set_model_updates_the_active_provider_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                run(
+                    [
+                        "config",
+                        "set-provider",
+                        "deepseek-anthropic",
+                        "--home",
+                        str(home),
+                    ]
+                )
+                run(["config", "set-model", "new-model", "--home", str(home)])
+            settings = load_settings(home, require_file=True)
+            self.assertEqual(settings.get("model"), "new-model")
+            self.assertEqual(
+                settings.data["providers"]["deepseek-anthropic"]["model"],
+                "new-model",
+            )
+
+    def test_read_message_keeps_text_after_a_bracketed_paste(self) -> None:
+        pasted = "run \x1b[200~pytest -q\x1b[201~ now"
+        with patch("builtins.input", lambda prompt="": pasted):
+            self.assertEqual(_read_message(), "run pytest -q now")
+
+    def test_provider_credential_rejects_an_unexpanded_placeholder(self) -> None:
+        from minimalcode.cli import _provider_credential
+
+        label, available = _provider_credential({"api_key": "${MISSING_KEY}"})
+        self.assertFalse(available)
+        self.assertIn("unresolved", label)
 
     def test_interactive_effort_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -805,6 +901,175 @@ class CliTests(unittest.TestCase):
             text = _read_message()
 
         self.assertEqual(text, "line one\nline two\nline three")
+
+    def test_interactive_pastes_a_clipboard_image_with_a_message(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            vision = StubVisionClient()
+            stub = StubAgent(workspace, vision_client=vision)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["", "what is this?", "/exit"])
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch(
+                    "minimalcode.clipboard.clipboard_image",
+                    return_value=("image/png", png),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(vision.calls, [("image/png", png, None)])
+            self.assertEqual(len(stub.prompts), 1)
+            self.assertIn("what is this?", stub.prompts[0])
+            self.assertIn("[pasted image from clipboard: image/png", stub.prompts[0])
+            self.assertIn("A tiny screenshot.", stub.prompts[0])
+            self.assertIn("clipboard image attached", stderr.getvalue())
+
+    def test_interactive_describes_a_pasted_image_without_text(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace, vision_client=StubVisionClient())
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["", "", "/exit"])
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch(
+                    "minimalcode.clipboard.clipboard_image",
+                    return_value=("image/png", png),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(len(stub.prompts), 1)
+            self.assertTrue(stub.prompts[0].startswith("[pasted image from clipboard:"))
+
+    def test_interactive_ignores_an_empty_clipboard(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace, vision_client=StubVisionClient())
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["", "hello", "/exit"])
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch("minimalcode.clipboard.clipboard_image", return_value=None),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, ["hello"])
+
+    def test_interactive_does_not_read_clipboard_without_vision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            stub = StubAgent(workspace)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["", "hello", "/exit"])
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch("minimalcode.clipboard.clipboard_image") as read,
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            read.assert_not_called()
+            self.assertEqual(stub.prompts, ["hello"])
+
+    def test_interactive_keeps_the_message_when_the_image_fails(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            store = SessionStore(settings)
+            vision = StubVisionClient(error=ProviderError("vision is down"))
+            stub = StubAgent(workspace, vision_client=vision)
+            args = argparse.Namespace(
+                no_session=True,
+                max_turns=None,
+                quiet=True,
+                json_output=False,
+                no_highlight=False,
+            )
+            answers = iter(["", "keep this", "/exit"])
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", lambda prompt="": next(answers)),
+                patch(
+                    "minimalcode.clipboard.clipboard_image",
+                    return_value=("image/png", png),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                code = _interactive(stub, args, settings, store, "fake", "model")
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stub.prompts, ["keep this"])
+            self.assertIn("image paste failed: vision is down", stderr.getvalue())
 
     def test_interactive_forwards_a_multiline_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

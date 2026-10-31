@@ -73,6 +73,25 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(len(result["matches"]), 1)
         self.assertTrue(result["matches"][0].endswith(":2:needle"))
 
+    def test_read_keeps_line_numbers_when_limit_splits_crlf(self) -> None:
+        # The per-line cap used to land between CR and LF, making the LF look
+        # like a new empty line and shifting every later line number.
+        target = self.workspace / "windows.txt"
+        target.write_bytes((("a" * 99) + "\r\nTARGET\r\n").encode())
+        self.tools.max_file_chars = 100
+        result = self.tools.read("windows.txt", start_line=2)
+        self.assertEqual(result["start_line"], 2)
+        self.assertEqual(result["end_line"], 2)
+        self.assertIn("TARGET", result["content"])
+
+    def test_single_character_edit_does_not_enumerate_every_match(self) -> None:
+        self.tools.write("many.txt", "a" * 100_000)
+        with self.assertRaisesRegex(ToolError, "more than once"):
+            self.tools.edit("many.txt", "a", "b")
+        result = self.tools.edit("many.txt", "a", "b", replace_all=True)
+        self.assertEqual(result["replacements"], 100_000)
+        self.assertEqual((self.workspace / "many.txt").read_text(), "b" * 100_000)
+
     def test_read_returns_prefix_of_oversized_first_line(self) -> None:
         self.tools.write("minified.js", "x" * 5000 + "\nshort\n")
         self.tools.max_file_chars = 200

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import re
 from pathlib import Path
 
 from .config import Settings
@@ -80,22 +81,51 @@ def _summary_block(summary: str, newline: str) -> str:
     return f"{SUMMARY_START}\n{body}\n{SUMMARY_END}".replace("\n", newline)
 
 
+_SUMMARY_BLOCK_RE = re.compile(
+    re.escape(SUMMARY_START) + r".*?" + re.escape(SUMMARY_END), re.DOTALL
+)
+
+
+def _remove_marker_lines(text: str) -> str:
+    """Drop stray marker lines while keeping every other line intact.
+
+    A previous summary edit can leave one marker without its partner. Treating
+    such a marker as the start of a block made the next edit swallow all prose
+    up to the newly appended end marker. Markers are comments, so removing the
+    stray line is safe; the surrounding content is never touched.
+    """
+    lines = [
+        line
+        for line in text.splitlines(keepends=True)
+        if line.strip() not in {SUMMARY_START, SUMMARY_END}
+    ]
+    return "".join(lines)
+
+
 def merge_agents_summary(existing: str | None, summary: str) -> str:
     """Return ``AGENTS.md`` text carrying ``summary`` in one managed block.
 
-    Existing prose is preserved verbatim: only the marked block is rewritten,
-    and a file without the block gets one appended.
+    Existing prose is preserved verbatim: only complete marked blocks are
+    rewritten or removed, and a file without one gets a block appended. A
+    stray start/end marker is discarded as an empty comment line instead of
+    being paired with an unrelated marker.
     """
     if not existing or not existing.strip():
         return _summary_block(summary, "\n") + "\n"
     newline = _line_ending(existing)
     block = _summary_block(summary, newline)
-    start = existing.find(SUMMARY_START)
-    end = existing.find(SUMMARY_END, start + len(SUMMARY_START)) if start != -1 else -1
-    if start != -1 and end != -1:
-        return existing[:start] + block + existing[end + len(SUMMARY_END) :]
-    separator = "" if existing.endswith(("\n", "\r")) else newline
-    return existing + separator + newline + block + newline
+    complete = list(_SUMMARY_BLOCK_RE.finditer(existing))
+    if complete:
+        first = complete[0]
+        prefix = _SUMMARY_BLOCK_RE.sub("", existing[: first.start()])
+        suffix = _SUMMARY_BLOCK_RE.sub("", existing[first.end() :])
+        prefix = _remove_marker_lines(prefix)
+        suffix = _remove_marker_lines(suffix)
+        return prefix + block + suffix
+    # No well-formed block: remove stray marker lines and append one block.
+    cleaned = _remove_marker_lines(existing)
+    separator = "" if cleaned.endswith(("\n", "\r")) else newline
+    return cleaned + separator + newline + block + newline
 
 
 def build_system_prompt(settings: Settings, cwd: Path, shell: ShellSpec) -> str:

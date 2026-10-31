@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .shell import ShellSpec
@@ -45,6 +45,8 @@ def build_command(
     model: str | None = None,
     thinking: str | None = None,
     max_turns: int | None = None,
+    extra_flags: Sequence[str] | None = None,
+    extra_options: Sequence[tuple[str, str]] | None = None,
 ) -> str:
     """Build the ``minimalcode -p`` command line for a child agent."""
     launcher = quote_argument(python or sys.executable, shell)
@@ -64,6 +66,7 @@ def build_command(
         "--no-session",
         "--quiet",
     ]
+    parts.extend(extra_flags or ())
     options: list[tuple[str, str | None]] = [
         ("--cwd", str(cwd)),
         ("--home", None if home is None else str(home)),
@@ -71,6 +74,7 @@ def build_command(
         ("--thinking", thinking),
         ("--max-turns", None if max_turns is None else str(max_turns)),
         ("-m", model),
+        *(extra_options or ()),
     ]
     for flag, value in options:
         if value:

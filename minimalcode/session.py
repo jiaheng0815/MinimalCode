@@ -40,6 +40,10 @@ class Session:
     path: Path | None
     cwd: Path
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # Provider/model recorded in the session meta. Resuming must not silently
+    # send a history recorded for one wire protocol to another provider.
+    provider: str = ""
+    model: str = ""
 
     def append_event(self, event: dict[str, Any]) -> None:
         if self.path is None:
@@ -59,7 +63,13 @@ class Session:
         # already on disk.
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
             handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def append_message(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
@@ -122,11 +132,23 @@ class SessionStore:
     ) -> Session:
         session_id = uuid.uuid4().hex
         if not save:
-            return Session(session_id=session_id, path=None, cwd=cwd.resolve())
+            return Session(
+                session_id=session_id,
+                path=None,
+                cwd=cwd.resolve(),
+                provider=provider,
+                model=model,
+            )
 
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path = self.workspace_dir(cwd) / f"{stamp}-{session_id[:10]}.jsonl"
-        session = Session(session_id=session_id, path=path, cwd=cwd.resolve())
+        session = Session(
+            session_id=session_id,
+            path=path,
+            cwd=cwd.resolve(),
+            provider=provider,
+            model=model,
+        )
         session.append_event(
             {
                 "type": "meta",
@@ -228,6 +250,8 @@ class SessionStore:
     def load(self, path: Path, *, default_workspace: Path | None = None) -> Session:
         messages: list[dict[str, Any]] = []
         session_id = path.stem
+        recorded_provider = ""
+        recorded_model = ""
         if path.suffix.lower() != ".jsonl":
             raise ValueError(f"not a session file (expected .jsonl): {path}")
         # Never default to the sessions directory: a metadata-less file loaded
@@ -250,6 +274,12 @@ class SessionStore:
                         recorded_id = event.get("session_id")
                         if isinstance(recorded_id, str) and recorded_id:
                             session_id = recorded_id
+                        provider = event.get("provider")
+                        model = event.get("model")
+                        if isinstance(provider, str):
+                            recorded_provider = provider
+                        if isinstance(model, str):
+                            recorded_model = model
                         recorded_workspace = event.get("workspace")
                         if (
                             trust_recorded_workspace
@@ -278,6 +308,8 @@ class SessionStore:
             path=path,
             cwd=workspace,
             messages=messages,
+            provider=recorded_provider,
+            model=recorded_model,
         )
 
     def list(self) -> list[dict[str, Any]]:

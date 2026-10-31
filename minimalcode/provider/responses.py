@@ -236,7 +236,7 @@ class ResponsesProtocolMixin:
             # Several implementations stream only `output_text.done` and then
             # repeat the same text in the completed message item; dedupe so the
             # fallback path cannot print the answer twice.
-            if text and text not in fallback_text:
+            if text and (not fallback_text or fallback_text[-1] != text):
                 fallback_text.append(text)
 
         response = self._open(payload)
@@ -258,7 +258,7 @@ class ResponsesProtocolMixin:
             else:
                 lines = response.iter_lines()
             try:
-                for line in lines:
+                for line in self._checked_lines(lines):
                     if not line or line.startswith((":", "event:")):
                         continue
                     if not line.startswith("data:"):
@@ -450,6 +450,62 @@ class ResponsesProtocolMixin:
             usage=normalize_usage(data.get("usage")),
         )
 
+    def _parse_responses_sse_body(
+        self,
+        response: httpx2.Response,
+        *,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ProviderReply:
+        """Parse an SSE body received for a non-streaming request."""
+        try:
+            body = response.read()
+        except httpx2.HTTPError as exc:
+            raise ProviderError(f"provider stream interrupted: {exc}") from exc
+        text = body.decode("utf-8", errors="replace")
+        if "data:" not in text:
+            raise ProviderError("provider returned an invalid response")
+        content_parts: list[str] = []
+        final_response: dict[str, Any] = {}
+        for line in self._checked_lines(text.splitlines()):
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "")
+            if event_type == "response.output_text.delta":
+                delta = content_text(event.get("delta"))
+                if delta:
+                    content_parts.append(delta)
+                    if on_text is not None:
+                        on_text(delta)
+            elif event_type in {"response.completed", "response.incomplete"}:
+                completed = event.get("response")
+                if isinstance(completed, dict):
+                    final_response = completed
+            elif event_type in {"response.failed", "error"}:
+                raise self._response_error(event)
+        if final_response:
+            reply = self._parse_responses_payload(
+                final_response, on_text=None, on_thinking=on_thinking
+            )
+            if not content_parts and reply.content and on_text is not None:
+                on_text(reply.content)
+            return reply
+        if not content_parts:
+            raise ProviderError("provider returned an empty stream")
+        return ProviderReply(
+            content="".join(content_parts),
+            finish_reason="incomplete",
+        )
+
     def _responses_regular_request(
         self,
         payload: dict[str, Any],
@@ -460,6 +516,12 @@ class ResponsesProtocolMixin:
         """Request a non-streaming Responses reply."""
         response = self._open(payload)
         try:
+            # Some gateways ignore `stream: false` and answer with SSE anyway,
+            # so the content type, not the request flag, selects the parser.
+            if is_event_stream(response):
+                return self._parse_responses_sse_body(
+                    response, on_text=on_text, on_thinking=on_thinking
+                )
             try:
                 data = response.json()
             except ValueError as exc:

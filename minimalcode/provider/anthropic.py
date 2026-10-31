@@ -168,7 +168,8 @@ class AnthropicProtocolMixin:
                 dict(block)
                 for block in raw_blocks
                 if isinstance(block, dict)
-                and block.get("type") in {"text", "thinking", "tool_use"}
+                and block.get("type")
+                in {"text", "thinking", "redacted_thinking", "tool_use"}
             ]
             # Reasoning is only replayed verbatim when every call it belongs to
             # is still there; a partial block list would orphan a tool_result.
@@ -430,12 +431,13 @@ class AnthropicProtocolMixin:
                     "name": "",
                     "input": {},
                     "partial_json": "",
+                    "data": "",
                 }
                 blocks[index] = state
             return state
 
         try:
-            for line in lines:
+            for line in self._checked_lines(lines):
                 if not line or line.startswith((":", "event:")):
                     continue
                 if not line.startswith("data:"):
@@ -466,13 +468,24 @@ class AnthropicProtocolMixin:
                     if index < 0 or not isinstance(block, dict):
                         continue
                     block_type = str(block.get("type") or "")
-                    if block_type not in {"text", "thinking", "tool_use"}:
+                    if block_type not in {
+                        "text",
+                        "thinking",
+                        "redacted_thinking",
+                        "tool_use",
+                    }:
                         # Server tools are executed provider-side and cannot be
                         # replayed as client content in the next request.
                         continue
                     state = state_for(index, block_type)
                     state["type"] = block_type
-                    if block_type == "text":
+                    if block_type == "redacted_thinking":
+                        # Anthropic requires this opaque block to be replayed
+                        # verbatim while a tool call is open.
+                        data = block.get("data")
+                        if isinstance(data, str):
+                            state["data"] += data
+                    elif block_type == "text":
                         text = content_text(block.get("text"))
                         if text:
                             state["text"] += text
@@ -547,6 +560,12 @@ class AnthropicProtocolMixin:
             if block_type == "text":
                 if state["text"]:
                     provider_content.append({"type": "text", "text": state["text"]})
+                continue
+            if block_type == "redacted_thinking":
+                if state["data"]:
+                    provider_content.append(
+                        {"type": "redacted_thinking", "data": state["data"]}
+                    )
                 continue
             if block_type == "thinking":
                 if not state["thinking"] and not state["signature"]:
@@ -644,6 +663,10 @@ class AnthropicProtocolMixin:
                     provider_content.append({"type": "text", "text": text})
                     if on_text is not None:
                         on_text(text)
+            elif block_type == "redacted_thinking":
+                data = block.get("data")
+                if isinstance(data, str) and data:
+                    provider_content.append({"type": "redacted_thinking", "data": data})
             elif block_type == "thinking":
                 thinking = content_text(block.get("thinking"))
                 if thinking and on_thinking is not None:

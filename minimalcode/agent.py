@@ -70,6 +70,9 @@ def _tool_output_preview(result: dict[str, Any]) -> str:
 
 _ACTIVITY_OUTPUT_MAX_LINES = 12
 _ACTIVITY_OUTPUT_MAX_CHARS = 4000
+# One model turn that asks for hundreds of calls is either a broken provider
+# or an attempted resource exhaustion; it is never a normal coding step.
+_MAX_TOOL_CALLS_PER_TURN = 32
 _INCOMPLETE_FINISH_REASONS = {
     "length",
     "max_tokens",
@@ -180,7 +183,17 @@ def _repair_tool_history(
             # it is a protocol error for every OpenAI-compatible server.
             changed = True
             continue
-        repaired.append(dict(message))
+        if (
+            role == "assistant"
+            and message.get("content") is None
+            and not isinstance(message.get("tool_calls"), list)
+        ):
+            # Older sessions stored an empty reply as null content. Providers
+            # reject that shape on the next request, so repair it in place.
+            repaired.append({**message, "content": ""})
+            changed = True
+        else:
+            repaired.append(dict(message))
         if role == "assistant" and isinstance(message.get("tool_calls"), list):
             call_order = []
             call_names = {}
@@ -306,6 +319,10 @@ class Agent:
             else None
         )
         self.last_prompt_tokens = 0
+        # Number of session messages covered by last_prompt_tokens. Messages
+        # appended after the request (the new user turn and tool results) are
+        # not in the provider-reported prompt size yet.
+        self._prompt_session_count = 0
         self.estimated_turns = 0
         self._system_prompt: str | None = None
         self._plain_sanitizer = TerminalSanitizer()
@@ -469,6 +486,7 @@ class Agent:
             if self.should_compact():
                 self._compact(force=False)
             messages = self._messages()
+            self._prompt_session_count = len(self.session.messages)
             try:
                 reply = self.provider.stream_chat(
                     messages,
@@ -479,8 +497,8 @@ class Agent:
             finally:
                 self._finish_delta()
             self._accumulate_usage(reply.usage, messages, reply.content)
-            assistant = reply.as_message()
-            self.session.append_message(assistant)
+            if reply.content or reply.tool_calls:
+                self.session.append_message(reply.as_message())
             final_text = reply.content
             final_finish_reason = reply.finish_reason
 
@@ -510,6 +528,27 @@ class Agent:
                         }
                     )
                     self._activity(f"  {_tool_output_preview(result)}")
+                break
+
+            if len(reply.tool_calls) > _MAX_TOOL_CALLS_PER_TURN:
+                message = (
+                    f"provider requested {len(reply.tool_calls)} tool calls in one "
+                    f"turn; the limit is {_MAX_TOOL_CALLS_PER_TURN}"
+                )
+                for call in reply.tool_calls:
+                    result = {
+                        "status": "error",
+                        "message": message,
+                    }
+                    self.session.append_message(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": tool_result_text(result),
+                        }
+                    )
+                self._activity(f"  {message}")
                 break
 
             for call in reply.tool_calls:
@@ -578,6 +617,12 @@ class Agent:
         current = self.last_prompt_tokens
         if current <= 0:
             current = estimate_tokens(self._messages())
+        else:
+            # The provider-reported size describes the request that was sent,
+            # not the user message and tool results appended since then.
+            appended = self.session.messages[self._prompt_session_count :]
+            if appended:
+                current += estimate_tokens(appended)
         return current >= int(window * threshold)
 
     def _compact(self, *, force: bool) -> bool:
@@ -638,6 +683,7 @@ class Agent:
             dropped_messages=len(old_messages),
         )
         self.last_prompt_tokens = 0
+        self._prompt_session_count = 0
         self._activity(f"[compact] {len(old_messages)} messages -> summary")
         return True
 
@@ -649,7 +695,13 @@ class Agent:
         summary = self.provider.complete_text(
             [
                 {"role": "system", "content": SUMMARY_PROMPT},
-                {"role": "user", "content": self._transcript(self._messages())},
+                {
+                    "role": "user",
+                    # Summarize the conversation, not the system prompt: the
+                    # prompt already includes AGENTS.md, and feeding it back
+                    # would copy old summaries into the new one.
+                    "content": self._transcript(self.session.messages),
+                },
             ]
         ).strip()
         if not summary:
@@ -722,6 +774,7 @@ class Agent:
         self.tools = tool_runtime
         self.tool_schemas = schemas
         self.last_prompt_tokens = 0
+        self._prompt_session_count = 0
         self.estimated_turns = 0
         self._system_prompt = None
         self.total_usage = dict.fromkeys(self.total_usage, 0)
@@ -750,6 +803,21 @@ class Agent:
         self.tools = tool_runtime
         self.tool_schemas = schemas
         self.last_prompt_tokens = 0
+        self._prompt_session_count = 0
+        # A resumed session must continue with the provider that was active
+        # when the switch happened, not the one recorded at creation.
+        self.session.provider = provider.name
+        self.session.model = provider.model
+        try:
+            self.session.append_event(
+                {
+                    "type": "meta",
+                    "provider": provider.name,
+                    "model": provider.model,
+                }
+            )
+        except (OSError, TypeError, ValueError):
+            pass
 
     def status(self) -> dict[str, Any]:
         summary = getattr(self.tools, "sandbox_summary", None)

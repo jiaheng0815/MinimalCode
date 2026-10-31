@@ -31,6 +31,7 @@ CLI
 | `provider/` | OpenAI Chat/Responses and Anthropic Messages payloads, HTTP retries, and SSE parsing |
 | `web.py` | Configurable provider web search and fetch client |
 | `vision.py` | Configurable provider vision client for inline image understanding |
+| `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history and project-scoped discovery |

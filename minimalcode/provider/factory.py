@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import re
+
 import httpx2
 
 from ..config import Settings
 from .client import OpenAICompatibleProvider
+
+_CONTEXT_SUFFIX = re.compile(r"^(?P<model>.+?)\[(?P<size>\d+)(?P<unit>[kKmM])\]$")
+
+
+def _strip_context_suffix(
+    model: str, config: dict[str, object]
+) -> tuple[str, int | None]:
+    """Strip Claude Code's ``[1m]`` suffix and return the window it selects."""
+    if config.get("protocol") != "anthropic_messages":
+        return model, None
+    match = _CONTEXT_SUFFIX.match(model)
+    if match is None:
+        return model, None
+    multiplier = 1_000 if match.group("unit").lower() == "k" else 1_000_000
+    window = max(1, int(match.group("size")) * multiplier)
+    return match.group("model"), window
 
 
 def create_provider(
@@ -29,6 +47,12 @@ def create_provider(
         or settings.effective_model()
     )
     effective_thinking = thinking or str(settings.get("thinking", "high"))
+    effective_model, suffix_window = _strip_context_suffix(effective_model, config)
+    if suffix_window is not None:
+        # The suffix is a client-side window selector; it must never reach the
+        # wire, and it overrides a context_window that was configured without
+        # knowing which model suffix the user asked for.
+        config["context_window"] = suffix_window
     provider = OpenAICompatibleProvider(
         name=name,
         config=config,

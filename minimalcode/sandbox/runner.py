@@ -206,7 +206,7 @@ class SandboxRunner:
         # With execution isolation disabled, still run through the same bounded
         # executor so timeouts and output caps behave consistently.
         if not self.policy.enabled:
-            return _execute(
+            result = _execute(
                 list(argv),
                 cwd=cwd,
                 timeout=max(1.0, min(requested_timeout, 3600.0)),
@@ -215,6 +215,8 @@ class SandboxRunner:
                 stdin_text=stdin_text,
                 shell_label=shell_label,
             )
+            result.setdefault("sandbox", self._sandbox_metadata(None))
+            return result
 
         effective_timeout = max(
             1.0, min(requested_timeout, self.policy.timeout_seconds)
@@ -280,6 +282,7 @@ class SandboxRunner:
                     stdin_text=stdin_text,
                     shell_label=shell_label,
                     preexec=_resource_limiter(self.policy, effective_timeout),
+                    on_timeout=lambda: self.backend.cleanup(request),
                 )
         finally:
             # Per-command temp directories are always removed, including when

@@ -8,6 +8,7 @@ gate is what makes the default ``deny`` meaningful on every platform.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 _NETWORK_COMMANDS = frozenset(
     {
@@ -67,7 +68,24 @@ _SEGMENT_PATTERN = re.compile(r"\|\||&&|[|;&\n\r(){}`]")
 # Prefixes that do not change which program runs next: `sudo curl ...` still
 # starts curl, so skipping them keeps the head token meaningful.
 _PREFIX_WORDS = frozenset(
-    {"command", "doas", "env", "exec", "nohup", "sudo", "time", "until", "while"}
+    {
+        "!",
+        "command",
+        "do",
+        "doas",
+        "elif",
+        "else",
+        "env",
+        "exec",
+        "for",
+        "if",
+        "nohup",
+        "sudo",
+        "then",
+        "time",
+        "until",
+        "while",
+    }
 )
 # Shells take the command as a quoted argument instead of as a head token;
 # without this, `pwsh -Command "iwr https://x"` would look harmless. Only real
@@ -92,16 +110,59 @@ _INLINE_COMMAND_SHELLS = frozenset(
         "zsh",
     }
 )
+# Wrappers run another program. The options that take a separate value must be
+# skipped with that value; otherwise `sudo -u root curl ...` treats `-u` as the
+# command and never sees curl.
+_WRAPPER_ARGUMENTS: dict[str, dict[str, int]] = {
+    "sudo": {"-u": 1, "-g": 1, "-p": 1, "-C": 1, "-h": 1, "-U": 1, "-r": 1},
+    "timeout": {"-s": 1, "-k": 1, "--signal": 1, "--kill-after": 1},
+    "env": {"-u": 1, "-C": 1, "-S": 1, "--unset": 1, "--chdir": 1},
+    "nice": {"-n": 1, "--adjustment": 1},
+    "xargs": {"-I": 1, "-n": 1, "-P": 1, "-d": 1, "-E": 1, "-L": 1, "-s": 1},
+}
+_WRAPPERS = frozenset(_WRAPPER_ARGUMENTS)
+_QUOTED_TEXT = re.compile(r"'[^']*'|\"[^\"]*\"")
+_MAX_NESTED_COMMANDS = 8
 
 
-def _command_heads(command: str) -> list[str]:
-    """Return the program names this command string would start.
+def _skip_wrapper(tokens: list[str], index: int, wrapper: str) -> int:
+    """Advance past a wrapper and its options to the command it wraps."""
+    index += 1
+    arguments = _WRAPPER_ARGUMENTS[wrapper]
+    seen_duration = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-"):
+            count = arguments.get(token, 0)
+            index += 1 + count
+            continue
+        if wrapper == "timeout" and not seen_duration:
+            # The first positional argument is the duration, not a command.
+            seen_duration = True
+            index += 1
+            continue
+        return index
+    return index
 
-    Only command positions are inspected. Scanning every token (the earlier
-    behaviour) made `git log --grep=curl` and `rg curl` look like downloads, so
-    the gate refused ordinary source searches for the word "curl".
-    """
+
+def _is_inline_flag(token: str) -> bool:
+    lowered = token.lower()
+    if lowered in _INLINE_COMMAND_FLAGS:
+        return True
+    # Combined short flags such as `-lc`, `-ec`, or `-ic` still end in `c`,
+    # which is what makes the interpreter read the next argument as a command.
+    return (
+        lowered.startswith("-")
+        and not lowered.startswith("--")
+        and len(lowered) > 1
+        and lowered.endswith("c")
+    )
+
+
+def _scan_commands(command: str) -> tuple[list[str], list[str]]:
+    """Return command-position heads and nested inline command strings."""
     heads: list[str] = []
+    inline: list[str] = []
     for segment in _SEGMENT_PATTERN.split(command):
         tokens = _TOKEN_PATTERN.findall(segment)
         index = 0
@@ -111,19 +172,71 @@ def _command_heads(command: str) -> list[str]:
             if "=" in token and not token.startswith("-"):
                 index += 1  # VAR=value prefix
                 continue
+            if lowered in _WRAPPERS:
+                index = _skip_wrapper(tokens, index, lowered)
+                continue
             if lowered in _PREFIX_WORDS:
                 index += 1
                 continue
             heads.append(token)
             head = token.replace("\\", "/").rsplit("/", 1)[-1]
             if head.lower().removesuffix(".exe") in _INLINE_COMMAND_SHELLS:
-                # A shell flag hands the real command over as the next argument.
                 for position in range(index + 1, len(tokens) - 1):
-                    if tokens[position].lower() in _INLINE_COMMAND_FLAGS:
+                    if _is_inline_flag(tokens[position]):
                         heads.append(tokens[position + 1])
+                        inner = " ".join(tokens[position + 1 :])
+                        if inner:
+                            inline.append(inner)
                         break
             break
-    return heads
+    return heads, inline
+
+
+def _command_heads(command: str) -> list[str]:
+    """Return the program names this command string would start.
+
+    Only command positions are inspected. Scanning every token (the earlier
+    behaviour) made `git log --grep=curl` and `rg curl` look like downloads, so
+    the gate refused ordinary source searches for the word "curl".
+    """
+    return _scan_commands(command)[0]
+
+
+def _command_position_text(segment: str) -> str:
+    """Return the part of one segment that starts a command."""
+    tokens = _TOKEN_PATTERN.findall(_QUOTED_TEXT.sub(" ", segment))
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        lowered = token.lower()
+        if "=" in token and not token.startswith("-"):
+            index += 1
+            continue
+        if lowered in _WRAPPERS:
+            index = _skip_wrapper(tokens, index, lowered)
+            continue
+        if lowered in _PREFIX_WORDS:
+            index += 1
+            continue
+        break
+    return " ".join(tokens[index:])
+
+
+def _sequence_detected(command: str, depth: int = 0) -> bool:
+    """Check network subcommands at command positions, including `sh -c`."""
+    if depth > _MAX_NESTED_COMMANDS:
+        return False
+    for segment in _SEGMENT_PATTERN.split(command):
+        # ``match`` (not ``search``) keeps `echo git clone` and
+        # `rg "pip install"` from looking like a download.
+        candidate = _command_position_text(segment)
+        if candidate and any(
+            pattern.match(candidate) for pattern in _NETWORK_SEQUENCES
+        ):
+            return True
+    return any(
+        _sequence_detected(inner, depth + 1) for inner in _scan_commands(command)[1]
+    )
 
 
 def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
@@ -154,16 +267,34 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
             detected = True
             break
     if not detected:
-        detected = any(pattern.search(command) for pattern in _NETWORK_SEQUENCES)
+        detected = _sequence_detected(command)
     return detected, tuple(hosts)
+
+
+def _normalize_host(value: str) -> str:
+    """Reduce a configured entry to a bare lowercase hostname."""
+    text = value.strip().lower()
+    if "://" in text:
+        try:
+            text = (urlsplit(text).hostname or "").lower()
+        except ValueError:
+            return ""
+    text = text.lstrip(".")
+    if text.startswith("[") and "]" in text:
+        text = text[1 : text.index("]")]
+    elif text.count(":") == 1:
+        # host:port, but leave bare IPv6 literals alone.
+        text = text.split(":", 1)[0]
+    return text.rstrip(".")
 
 
 def host_allowed(host: str, allowed: tuple[str, ...]) -> bool:
     """Return True when ``host`` matches an allowlist entry or its subdomain."""
+    normalized_host = _normalize_host(host)
     for entry in allowed:
-        candidate = entry.strip().lower().lstrip(".")
+        candidate = _normalize_host(entry)
         if not candidate:
             continue
-        if host == candidate or host.endswith("." + candidate):
+        if normalized_host == candidate or normalized_host.endswith("." + candidate):
             return True
     return False

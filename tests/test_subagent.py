@@ -151,6 +151,48 @@ class SubagentToolTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 900)
         self.assertEqual(result["timeout_seconds"], 900)
 
+    def test_sandbox_overrides_are_forwarded_to_the_child(self) -> None:
+        self.settings.data["sandbox"].update(
+            {
+                "enabled": True,
+                "backend": "local",
+                "network_policy": "allowlist",
+                "allowed_hosts": ["example.com"],
+                "allow_sensitive_files": True,
+            }
+        )
+        tools = ToolRuntime(self.settings, self.workspace, detect_shell())
+        with patch(
+            "minimalcode.tools.process.run_shell",
+            return_value={"status": "success", "exit_code": 0},
+        ) as run:
+            tools.subagent("review")
+        command = run.call_args.args[0]
+        for fragment in (
+            "--sandbox",
+            "--sandbox-backend",
+            "--sandbox-network",
+            "--sandbox-allow-host",
+            "--sandbox-allow-sensitive",
+        ):
+            self.assertIn(fragment, command)
+
+    def test_anthropic_env_child_rebuilds_the_provider_from_environment(self) -> None:
+        tools = ToolRuntime(
+            self.settings,
+            self.workspace,
+            detect_shell(),
+            provider_name="anthropic-env",
+        )
+        with patch(
+            "minimalcode.tools.process.run_shell",
+            return_value={"status": "success", "exit_code": 0},
+        ) as run:
+            tools.subagent("review")
+        command = run.call_args.args[0]
+        self.assertIn("--anthropic-env", command)
+        self.assertNotIn("--provider", command)
+
     def test_nested_subagents_are_refused_at_the_depth_limit(self) -> None:
         with patch.dict(os.environ, {DEPTH_ENV: "2"}, clear=False):
             tools = ToolRuntime(self.settings, self.workspace, detect_shell())

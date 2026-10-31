@@ -184,8 +184,8 @@ class SandboxPolicy:
         ):
             raise ConfigError("sandbox.max_processes must be a non-negative integer")
         docker_image = data.get("docker_image", "alpine:3")
-        if not isinstance(docker_image, str):
-            raise ConfigError("sandbox.docker_image must be a string")
+        if not isinstance(docker_image, str) or not docker_image.strip():
+            raise ConfigError("sandbox.docker_image must be a non-empty string")
 
         return cls(
             enabled=enabled,

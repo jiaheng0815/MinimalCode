@@ -25,7 +25,10 @@ def _supports_color(stream: TextIO) -> bool:
         # Streams that cannot report a terminal (closed pipe, detached buffer)
         # are treated as unstyled rather than failing the write.
         return False
-    _enable_windows_ansi(stream)
+    if os.name == "nt":
+        # A console that refuses virtual-terminal mode would print the SGR
+        # bytes literally; report unstyled output instead.
+        return _enable_windows_ansi(stream)
     return True
 
 

@@ -16,7 +16,9 @@ from .config import (
     APP_NAME,
     EFFORT_LEVELS,
     Settings,
+    _unresolved_env,
     ensure_config,
+    expand_env,
     home_dir,
     load_settings,
     redact_config,
@@ -175,17 +177,43 @@ def _management_command(argv: Sequence[str]) -> int | None:
         if args.action == "set-model":
             if not args.value or not args.value.strip():
                 raise ConfigError("model ID must not be empty")
-            settings.data["model"] = args.value.strip()
+            model = args.value.strip()
+            settings.data["model"] = model
+            providers = settings.data.get("providers")
+            active = (
+                providers.get(str(settings.data.get("provider")))
+                if isinstance(providers, dict)
+                else None
+            )
+            if isinstance(active, dict) and "model" in active:
+                # A provider-level model wins over the global setting; update
+                # it too or this command would report success and change
+                # nothing about the request that is actually sent.
+                active["model"] = model
             path = write_settings(settings.data, args.home)
-            print(sanitize_terminal_text(f"{path}: model={args.value.strip()}"))
+            print(sanitize_terminal_text(f"{path}: model={model}"))
             return 0
         if args.action == "set-provider":
             if not args.value:
                 raise ConfigError("provider name must not be empty")
             provider = args.value.strip()
-            if provider not in settings.data["providers"]:
+            providers = settings.data["providers"]
+            config = providers.get(provider)
+            if not isinstance(config, dict):
                 raise ConfigError(f"provider {provider!r} is not defined")
             settings.data["provider"] = provider
+            provider_model = config.get("model")
+            if isinstance(provider_model, str) and provider_model.strip():
+                settings.data["model"] = provider_model.strip()
+            else:
+                print(
+                    sanitize_terminal_text(
+                        f"warning: provider {provider!r} has no default model; "
+                        f"the current model {settings.data.get('model')!r} will "
+                        "be used until you run `minimalcode config set-model`"
+                    ),
+                    file=sys.stderr,
+                )
             path = write_settings(settings.data, args.home)
             print(sanitize_terminal_text(f"{path}: provider={provider}"))
             return 0
@@ -395,6 +423,15 @@ def _load_or_create_session(
     return store.create(cwd, provider=provider, model=model, save=save), cwd
 
 
+def _paste_shortcut() -> str:
+    """Name the terminal's paste shortcut without assuming it is Ctrl+V."""
+    if os.name == "nt":
+        return "Ctrl+V"
+    if sys.platform == "darwin":
+        return "Cmd+V"
+    return "Ctrl+Shift+V"
+
+
 def _print_banner(
     provider: str,
     model: str,
@@ -402,6 +439,8 @@ def _print_banner(
     effort: str,
     cwd: Path,
     session: Session,
+    *,
+    vision_enabled: bool = False,
 ) -> None:
     print(
         sanitize_terminal_text(
@@ -413,6 +452,8 @@ def _print_banner(
     if session.path:
         print(f"session: {sanitize_terminal_text(str(session.path))}")
     print("Type /help for commands. End a line with \\ to continue, or paste text.")
+    if vision_enabled:
+        print(f"Paste an image with {_paste_shortcut()}, then press Enter.")
 
 
 def _ensure_newline(result: AgentResult) -> None:
@@ -484,21 +525,28 @@ def _handle_effort(agent: Agent, text: str) -> None:
 
 def _provider_credential(config: dict[str, object]) -> tuple[str, bool]:
     """Describe a provider key without printing its value and say if it is usable."""
-    if config.get("api_key"):
+    expanded = expand_env(config)
+    unresolved = _unresolved_env(expanded)
+    if unresolved is not None:
+        return f"unresolved {unresolved}", False
+    if expanded.get("api_key"):
         return "inline key (set)", True
-    headers = config.get("headers")
+    headers = expanded.get("headers")
     if isinstance(headers, dict):
         names = {str(name).lower() for name in headers}
         if "authorization" in names or "x-api-key" in names:
             return "header credential (set)", True
-    env_name = config.get("api_key_env")
+    env_name = expanded.get("api_key_env")
+    require_key = expanded.get("require_api_key", True)
+    if isinstance(require_key, str):
+        require_key = require_key.strip().lower() not in {"0", "false", "no", "off"}
     if isinstance(env_name, str) and env_name:
         if os.environ.get(env_name):
             return f"{env_name} (set)", True
-        if config.get("require_api_key", True) is False:
+        if require_key is False:
             return f"{env_name} (not required)", True
         return f"{env_name} (missing)", False
-    if config.get("require_api_key", True) is False:
+    if require_key is False:
         return "no key required", True
     return "no key", False
 
@@ -675,6 +723,11 @@ def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
 _PASTE_START = "\x1b[200~"
 _PASTE_END = "\x1b[201~"
 _PASTE_SETTLE_SECONDS = 0.02
+_PASTE_MAX_CHARS = 1_000_000
+# Lines already buffered inside TextIOWrapper when select() only sees the raw
+# file descriptor. They are drained here so a POSIX multi-line paste does not
+# submit only its first line.
+_INPUT_LINES: list[str] = []
 
 
 def _terminal_can_paste() -> bool:
@@ -722,7 +775,7 @@ def _read_paste(line: str) -> str:
     the next prompt.
     """
     before, _, pasted = line.partition(_PASTE_START)
-    while _PASTE_END not in pasted:
+    while _PASTE_END not in pasted and len(pasted) < _PASTE_MAX_CHARS:
         try:
             char = sys.stdin.read(1)
         except (AttributeError, OSError, ValueError):
@@ -731,7 +784,35 @@ def _read_paste(line: str) -> str:
             break
         pasted += char
     end = pasted.find(_PASTE_END)
-    return before + (pasted if end < 0 else pasted[:end])
+    if end < 0:
+        return before + pasted
+    # Text typed after the closing marker belongs to this message too; the
+    # previous implementation silently dropped it.
+    return before + pasted[:end] + pasted[end + len(_PASTE_END) :]
+
+
+def _read_buffered_line() -> str | None:
+    """Try to read a line already buffered inside ``sys.stdin``.
+
+    ``select`` only observes the file descriptor; ``input()`` may have read a
+    whole paste into TextIOWrapper's decoded buffer. A non-blocking ``readline``
+    returns that line without waiting for the terminal.
+    """
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        os.set_blocking(fd, False)
+        try:
+            line = sys.stdin.readline()
+        except (BlockingIOError, OSError, ValueError):
+            return None
+        finally:
+            os.set_blocking(fd, True)
+    except (OSError, ValueError):
+        return None
+    return line or None
 
 
 def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
@@ -746,10 +827,20 @@ def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
             return False
     except (AttributeError, OSError, ValueError):
         return False
+    if _INPUT_LINES:
+        return True
     if os.name == "nt":
         try:
+            import ctypes
             import msvcrt
-        except ImportError:
+
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            mode = ctypes.c_uint32()
+            if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                # NUL and redirected character devices report isatty() but are
+                # not consoles; kbhit() on them would claim input forever.
+                return False
+        except (AttributeError, ImportError, OSError, ValueError):
             return False
         deadline = time.monotonic() + timeout
         while True:
@@ -766,7 +857,21 @@ def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
         readable, _, _ = select.select([sys.stdin], [], [], timeout)
     except (OSError, ValueError):
         return False
-    return bool(readable)
+    if readable:
+        return True
+    line = _read_buffered_line()
+    if line is not None:
+        _INPUT_LINES.append(line)
+        return True
+    return False
+
+
+def _read_input_line(prompt: str = "") -> str:
+    """Return a buffered line when one exists, else read from the terminal."""
+    if _INPUT_LINES:
+        line = _INPUT_LINES.pop(0).removesuffix("\n")
+        return line.removesuffix("\r")
+    return input(prompt)
 
 
 def _read_message(prompt: str = "> ") -> str:
@@ -775,21 +880,82 @@ def _read_message(prompt: str = "> ") -> str:
     A trailing backslash continues the message on the next line; ``\\\\`` at the
     end of the last line means a literal backslash instead.
     """
-    line = input(prompt)
+    line = _read_input_line(prompt)
     if _PASTE_START in line:
         return _read_paste(line)
     lines = [line]
     while _input_pending():
-        lines.append(input(""))
+        lines.append(_read_input_line(""))
     if len(lines) > 1:
         # Pasted lines are literal text: no continuation markers to interpret.
         return "\n".join(lines)
     while lines[-1].endswith("\\") and not lines[-1].endswith("\\\\"):
         lines[-1] = lines[-1][:-1]
-        lines.append(input("... "))
+        lines.append(_read_input_line("... "))
     if lines[-1].endswith("\\\\"):
         lines[-1] = lines[-1][:-1]
     return "\n".join(lines)
+
+
+def _vision_enabled(agent: Agent) -> bool:
+    client = getattr(agent.tools, "vision_client", None)
+    return bool(getattr(client, "enabled", False))
+
+
+def _read_clipboard_image(agent: Agent) -> tuple[str, bytes] | None:
+    """Return the clipboard image when vision can describe it, else None."""
+    if not _vision_enabled(agent):
+        return None
+    from .clipboard import clipboard_image
+
+    try:
+        return clipboard_image()
+    except (MinimalCodeError, OSError) as exc:
+        print(
+            f"clipboard image unavailable: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _image_message(
+    agent: Agent,
+    image: tuple[str, bytes],
+    text: str,
+) -> str | None:
+    """Merge a clipboard image into the message via the vision model.
+
+    Returns the text to send, or None when there is nothing left to send.
+    """
+    client = getattr(agent.tools, "vision_client", None)
+    if client is None or not getattr(client, "enabled", False):
+        print(
+            "clipboard image needs provider vision; enable vision.enabled",
+            file=sys.stderr,
+        )
+        return text or None
+    media_type, data = image
+    limit = int(getattr(client, "max_image_bytes", 0) or 0)
+    if limit and len(data) > limit:
+        print(
+            f"clipboard image is too large: {len(data)} bytes exceeds "
+            f"vision.max_image_bytes ({limit})",
+            file=sys.stderr,
+        )
+        return text or None
+    try:
+        description = client.describe(media_type, data)
+    except (MinimalCodeError, OSError) as exc:
+        print(
+            f"image paste failed: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return text or None
+    note = (
+        f"[pasted image from clipboard: {media_type}, {len(data)} bytes]\n"
+        f"The vision model described it as follows:\n{description}"
+    )
+    return f"{text}\n\n{note}" if text else note
 
 
 def _interactive(
@@ -807,6 +973,7 @@ def _interactive(
         agent.provider.thinking,
         agent.session.cwd,
         agent.session,
+        vision_enabled=_vision_enabled(agent),
     )
     with _bracketed_paste():
         return _chat_loop(agent, args, settings, store)
@@ -826,10 +993,29 @@ def _chat_loop(
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
+        image: tuple[str, bytes] | None = None
+        if not text.strip():
+            # A terminal cannot carry an image through its paste shortcut, so
+            # the gesture is paste followed by Enter: the empty line asks for
+            # the clipboard image.
+            image = _read_clipboard_image(agent)
+            if image is None:
+                continue
+            print(
+                "clipboard image attached; type a message to send with it, "
+                "or press Enter to describe it",
+                file=sys.stderr,
+            )
+            try:
+                text = _read_message("> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
         text = text.strip()
-        if not text:
+        if not text and image is None:
             continue
         command = text.lower()
+        head = command.split(maxsplit=1)[0] if command else ""
         if command in {"/exit", "/quit"}:
             return 0
         if command in {"/new", "/clear"}:
@@ -887,10 +1073,10 @@ def _chat_loop(
                 )
             )
             continue
-        if command.split()[0] == "/effort":
+        if head == "/effort":
             _handle_effort(agent, text)
             continue
-        if command.split()[0] == "/model":
+        if head == "/model":
             _handle_model(agent, settings, text)
             continue
         if command == "/help":
@@ -899,10 +1085,19 @@ def _chat_loop(
                 "/model  /effort  /exit"
             )
             print("multiline: end a line with \\ to continue, or paste a block")
+            print(
+                f"image: paste with {_paste_shortcut()}, then Enter "
+                "(needs provider vision)"
+            )
             continue
         if text.startswith("/"):
             print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)
             continue
+        if image is not None:
+            composed = _image_message(agent, image, text)
+            if composed is None:
+                continue
+            text = composed
         try:
             result = agent.run(text)
             _ensure_newline(result)
@@ -961,25 +1156,59 @@ def run(argv: Sequence[str] | None = None) -> int:
     _apply_sandbox_overrides(settings, args)
     env_config = _apply_anthropic_env(settings, args) if args.anthropic_env else None
     shell = detect_shell(settings.get("shell.path"))
-    provider, provider_name, model = create_provider(
-        settings,
-        provider_name=args.provider,
-        model=args.model,
-        thinking=args.thinking or (env_config.thinking if env_config else None),
-    )
+    provider = None
     web_client = None
     vision_client = None
     agent = None
     try:
         store = SessionStore(settings)
-        session, effective_cwd = _load_or_create_session(
-            store,
-            args,
-            settings,
-            cwd,
-            provider_name,
-            model,
+        resumed = None
+        effective_cwd = cwd
+        if args.continue_session or args.session:
+            # Load first so a resumed session can restore the provider and
+            # model it was recorded with instead of sending the history to a
+            # different wire protocol.
+            resumed, effective_cwd = _load_or_create_session(
+                store, args, settings, cwd, "", ""
+            )
+        providers = settings.data.get("providers")
+        recorded_provider = resumed.provider if resumed is not None else ""
+        use_recorded = (
+            resumed is not None
+            and not args.provider
+            and not args.anthropic_env
+            and isinstance(providers, dict)
+            and recorded_provider in providers
         )
+        provider_override = args.provider or (
+            recorded_provider if use_recorded else None
+        )
+        model_override = args.model
+        if (
+            model_override is None
+            and use_recorded
+            and provider_override == recorded_provider
+            and resumed is not None
+            and resumed.model
+        ):
+            model_override = resumed.model
+        provider, provider_name, model = create_provider(
+            settings,
+            provider_name=provider_override,
+            model=model_override,
+            thinking=args.thinking or (env_config.thinking if env_config else None),
+        )
+        if resumed is None:
+            session, effective_cwd = _load_or_create_session(
+                store,
+                args,
+                settings,
+                cwd,
+                provider_name,
+                model,
+            )
+        else:
+            session = resumed
         if not effective_cwd.is_dir():
             raise ConfigError(f"session workspace no longer exists: {effective_cwd}")
         web_client = ProviderWebClient(provider_name, provider.config)
@@ -1029,7 +1258,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             web_client.close()
         if vision_client is not None:
             vision_client.close()
-        provider.close()
+        if provider is not None:
+            provider.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1038,6 +1268,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ncancelled", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        # The reader of a pipe (often `head`) closed it; this is not an error.
+        try:
+            sys.stderr.close()
+        except OSError:
+            pass
+        return 0
     except (MinimalCodeError, OSError, ValueError) as exc:
         print(f"error: {sanitize_terminal_text(str(exc))}", file=sys.stderr)
         return 2

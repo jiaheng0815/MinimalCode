@@ -9,7 +9,7 @@ description = "A configurable coding agent with provider web tools and Responses
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 keywords = ["coding-agent", "cli", "terminal", "openai", "anthropic", "deepseek", "openai-compatible", "multi-provider"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",

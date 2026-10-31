@@ -105,14 +105,21 @@ def build_client(
     transport: httpx2.BaseTransport | None = None,
     trust_env: Any = None,
 ) -> httpx2.Client:
-    """Build one pooled client with the shared timeout and proxy policy."""
+    """Build one pooled client with the shared timeout and proxy policy.
+
+    Redirects are never followed automatically for JSON API calls. A 307/308
+    replays the complete request body (conversation, tool output, image data)
+    at the new origin, and httpx2 only strips ``Authorization`` on a cross
+    origin redirect; ``x-api-key`` and custom credential headers survive.
+    Callers surface a 3xx response as a provider error instead.
+    """
     # The scalar timeout bounds a whole generation; capping the connect phase
     # keeps an unreachable host from spending that entire budget on a SYN.
     return httpx2.Client(
         timeout=httpx2.Timeout(timeout, connect=min(20.0, timeout)),
         headers=headers,
         transport=transport,
-        follow_redirects=True,
+        follow_redirects=False,
         trust_env=resolve_trust_env(
             base_url, transport=transport, configured=trust_env
         ),
@@ -137,6 +144,7 @@ def post_json(
     budget_end = deadline if deadline is not None else time.monotonic() + timeout
     attempts = 0
     last_error: httpx2.HTTPError | None = None
+    status_retried = False
     while attempts < CONNECTION_ATTEMPTS:
         remaining = budget_end - time.monotonic()
         if remaining <= 0:
@@ -149,6 +157,29 @@ def post_json(
                 json=payload,
                 timeout=httpx2.Timeout(remaining, connect=min(20.0, remaining)),
             )
+            if response.status_code in {429, 503} and not status_retried:
+                status_retried = True
+                try:
+                    delay = min(
+                        max(float(response.headers.get("Retry-After", "1")), 0.2),
+                        5.0,
+                    )
+                except ValueError:
+                    delay = 1.0
+                response.close()
+                response = None
+                remaining = budget_end - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(delay, remaining))
+                continue
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location", "")
+                raise ToolError(
+                    f"provider {label} request was redirected to "
+                    f"{location or 'another location'}; refusing to forward "
+                    "credentials and request data"
+                )
             if response.status_code >= 400:
                 detail = response.text[:2000]
                 raise ToolError(

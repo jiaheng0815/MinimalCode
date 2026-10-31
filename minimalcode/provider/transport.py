@@ -24,9 +24,21 @@ class TransportMixin:
     # Attributes supplied by OpenAICompatibleProvider.
     _client: httpx2.Client
     notify: Any
+    timeout_seconds: float
 
     def _endpoint(self) -> str:
         raise NotImplementedError
+
+    def _checked_lines(self, lines):
+        """Yield SSE lines while enforcing the whole-stream deadline."""
+        deadline = getattr(self, "_stream_deadline", None)
+        for line in lines:
+            if deadline is not None and time.monotonic() > deadline:
+                raise ProviderError(
+                    "provider stream exceeded timeout_seconds "
+                    f"({self.timeout_seconds:g}s)"
+                )
+            yield line
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         """POST ``payload`` and return a successful response.
@@ -64,10 +76,21 @@ class TransportMixin:
                     )
                 time.sleep(delay)
                 continue
-            if response.status_code < 400:
+            if 200 <= response.status_code < 300:
+                # The per-read timeout only bounds a single socket read; this
+                # deadline bounds the whole streamed generation.
+                self._stream_deadline = time.monotonic() + self.timeout_seconds
                 return response
 
             status_code = response.status_code
+            if 300 <= status_code < 400:
+                location = response.headers.get("Location", "")
+                response.close()
+                raise ProviderError(
+                    "provider redirected the request to "
+                    f"{location or 'another location'}; refusing to forward "
+                    "credentials and the request body"
+                )
             # Headers must be read before the body is consumed and closed.
             retry_after = response.headers.get("Retry-After", "1")
             try:

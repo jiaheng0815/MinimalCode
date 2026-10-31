@@ -85,18 +85,19 @@ class SearchToolsMixin:
             }
         return self._python_grep(pattern, target, glob, limit)
 
-    def _ignore_globs(self, target: Path) -> tuple[str, ...]:
-        # An explicitly requested ignored path must still be searchable;
-        # otherwise `grep(..., path="build")` silently returns nothing.
+    def _explicit_ignored_target(self, target: Path) -> bool:
+        """Return True when the caller named a normally ignored directory."""
         try:
             relative = target.relative_to(self.cwd)
         except ValueError:
             relative = target
-
         parts = relative.parts[:-1] if target.is_file() else relative.parts
-        if any(part in IGNORED_DIRECTORIES for part in parts):
-            return ()
-        return IGNORED_GLOBS
+        return any(part in IGNORED_DIRECTORIES for part in parts)
+
+    def _ignore_globs(self, target: Path) -> tuple[str, ...]:
+        # An explicitly requested ignored path must still be searchable;
+        # otherwise `grep(..., path="build")` silently returns nothing.
+        return () if self._explicit_ignored_target(target) else IGNORED_GLOBS
 
     def _sandbox_globs(self) -> tuple[str, ...]:
         # The sensitive-file filter is a path policy, not an execution setting,
@@ -106,10 +107,17 @@ class SearchToolsMixin:
         return SENSITIVE_SEARCH_GLOBS
 
     def _can_spawn_argv(self) -> bool:
-        """Return True when the active backend can start a child process."""
+        """Return True when the active backend can start a child process.
+
+        Capabilities describe what a backend *could* do; a selected backend
+        that is not installed must still let file tools fall back to the
+        in-process scanner instead of failing the whole search.
+        """
+        if not self.sandbox.policy.enabled:
+            return True
         return (
-            not self.sandbox.policy.enabled
-            or "argv" in self.sandbox.backend.capabilities
+            "argv" in self.sandbox.backend.capabilities
+            and self.sandbox.backend.available()
         )
 
     def _python_grep(
@@ -126,7 +134,12 @@ class SearchToolsMixin:
         except re.error as exc:
             raise ToolError(f"invalid regular expression: {exc}") from exc
 
-        files = [target] if target.is_file() else list(self._walk_files(target))
+        ignored = () if self._explicit_ignored_target(target) else IGNORED_DIRECTORIES
+        files = (
+            [target]
+            if target.is_file()
+            else list(self._walk_files(target, ignored=ignored))
+        )
         if glob_pattern:
             files = [
                 file_path
@@ -211,18 +224,28 @@ class SearchToolsMixin:
             }
 
         paths: list[str] = []
-        for file_path in self._walk_files(target):
+        ignored = () if self._explicit_ignored_target(target) else IGNORED_DIRECTORIES
+        for file_path in self._walk_files(target, ignored=ignored):
             if self._matches_glob(file_path, target, pattern):
                 paths.append(str(file_path))
-                if len(paths) >= limit:
-                    return {"status": "success", "files": paths, "truncated": True}
-        return {"status": "success", "files": paths, "truncated": False}
+                if len(paths) > limit:
+                    return {
+                        "status": "success",
+                        "files": paths[:limit],
+                        "truncated": True,
+                    }
+        return {"status": "success", "files": paths[:limit], "truncated": False}
 
-    def _walk_files(self, root: Path) -> Iterator[Path]:
+    def _walk_files(
+        self,
+        root: Path,
+        *,
+        ignored: tuple[str, ...] = IGNORED_DIRECTORIES,
+    ) -> Iterator[Path]:
         """Yield readable files under ``root`` while respecting the sandbox."""
-        ignored = set(IGNORED_DIRECTORIES)
+        ignored_names = set(ignored)
         for directory, dirnames, filenames in os.walk(root):
-            dirnames[:] = [name for name in dirnames if name not in ignored]
+            dirnames[:] = [name for name in dirnames if name not in ignored_names]
             for filename in filenames:
                 candidate = Path(directory) / filename
                 # os.walk does not descend into symlinked directories, but a

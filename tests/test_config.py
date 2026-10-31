@@ -145,6 +145,28 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(expand_env("${TEST_PROVIDER_KEY}"), "secret-value")
             self.assertEqual(expand_env("${MISSING_KEY}"), "${MISSING_KEY}")
 
+    def test_environment_values_are_coerced_to_their_configured_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            provider = settings.data["providers"]["deepseek"]
+            provider["stream"] = "${TEST_STREAM}"
+            provider["require_api_key"] = "${TEST_REQUIRE_KEY}"
+            provider["max_tokens"] = "${TEST_MAX_TOKENS}"
+            with patch.dict(
+                os.environ,
+                {
+                    "TEST_STREAM": "false",
+                    "TEST_REQUIRE_KEY": "false",
+                    "TEST_MAX_TOKENS": "4096",
+                },
+            ):
+                _, expanded = settings.provider_config("deepseek")
+            self.assertIs(expanded["stream"], False)
+            self.assertIs(expanded["require_api_key"], False)
+            self.assertEqual(expanded["max_tokens"], 4096)
+
     def test_utf8_bom_settings_file_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
