@@ -112,14 +112,24 @@ for path in spec["files"]:
                             break
                 if "\x00" in line:
                     continue
-                if not regex.search(line):
-                    continue
+                # Match the line content, not its terminator. `$` and `\s` would
+                # otherwise see the newline and report matches ripgrep never
+                # finds (`\s+$`, `[^0-9]$`), and a CRLF line would hide a real
+                # `c$` match.
                 text = line.rstrip("\r\n")
+                if not regex.search(text):
+                    continue
                 if cut or len(text) > spec["max_columns"]:
                     text = text[: spec["max_columns"]] + " [... omitted end of long line]"
                 matches.append(f"{path}:{number}:{text}")
-                if len(matches) >= spec["limit"]:
-                    print(json.dumps({"matches": matches, "truncated": True}))
+                # One match past the limit proves truncation; an exact fit is a
+                # complete result, matching the ripgrep and inline engines.
+                if len(matches) > spec["limit"]:
+                    print(
+                        json.dumps(
+                            {"matches": matches[: spec["limit"]], "truncated": True}
+                        )
+                    )
                     raise SystemExit(0)
     except (OSError, UnicodeError):
         continue
@@ -387,9 +397,11 @@ def inline_python_grep(
                     for number, line in enumerate(handle, start=1):
                         if "\x00" in line:
                             continue
-                        if not regex.search(line):
-                            continue
+                        # Match the content without the terminator so `$` and
+                        # `\s` behave like the ripgrep engine.
                         text = line.rstrip("\r\n")
+                        if not regex.search(text):
+                            continue
                         if len(text) > _MAX_GREP_LINE_CHARS:
                             text = (
                                 text[:_MAX_GREP_LINE_CHARS]

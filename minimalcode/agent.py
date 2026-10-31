@@ -87,6 +87,13 @@ _INCOMPLETE_FINISH_REASONS = {
     "queued",
     "server_error",
 }
+# A compaction replaces the dropped prefix with this many synthetic messages, so
+# a cut has to remove more than that to make the history smaller.
+_COMPACT_HEAD_MESSAGES = 2
+_COMPACTED_SUMMARY_PREFIX = (
+    "[Earlier conversation compacted. Continue from this state.]"
+)
+_COMPACTED_SUMMARY_ACK = "Context received. I will continue from the recorded state."
 
 
 def _clip_activity_output(text: str) -> str:
@@ -201,8 +208,14 @@ def _repair_tool_history(
                 if not isinstance(call, dict):
                     continue
                 call_id = str(call.get("id") or "")
-                function = call.get("function") or {}
-                name = str(function.get("name") or "")
+                function = call.get("function")
+                # A hand-edited session file can carry a non-object `function`;
+                # reading it with `.get` raised AttributeError before any turn ran.
+                name = (
+                    str(function.get("name") or "")
+                    if isinstance(function, dict)
+                    else ""
+                )
                 if call_id:
                     if call_id not in call_names:
                         call_order.append(call_id)
@@ -234,28 +247,63 @@ shows it ran, and do not wrap the answer in a code fence.
 """
 
 
-def _compaction_boundary(messages: list[dict[str, Any]], target: int) -> int | None:
-    """Return an index that keeps ``messages[index:]`` replayable.
+def _is_compacted_head(messages: list[dict[str, Any]]) -> bool:
+    """Return True when the history already starts with a compaction summary.
+
+    Replacing that pair again would summarize the summary and leave an equally
+    long history, which is what used to happen on every turn of a long tool
+    loop.
+    """
+    if len(messages) < _COMPACT_HEAD_MESSAGES:
+        return False
+    first, second = messages[0], messages[1]
+    content = first.get("content")
+    # The summary prefix identifies the pair; the acknowledgement wording is not
+    # matched exactly so a history written by an older version still counts.
+    return (
+        first.get("role") == "user"
+        and isinstance(content, str)
+        and content.startswith(_COMPACTED_SUMMARY_PREFIX)
+        and second.get("role") == "assistant"
+    )
+
+
+def _compaction_boundaries(messages: list[dict[str, Any]], target: int) -> list[int]:
+    """Return replay-safe cut points in preference order.
 
     A cut may only land before a message that does not belong to a tool-call
-    block, otherwise the kept tail starts with an orphan tool result.
+    block, otherwise the kept tail starts with an orphan tool result. The
+    largest usable tail wins, so the search starts at ``target`` and walks
+    backwards to the nearest user message.
+
+    A long tool loop inside one user turn can leave no user message between the
+    previous summary and ``target``. Cutting there would re-summarize the
+    summary without shrinking anything, so the next user message after
+    ``target`` is offered as well: the summary still covers everything that is
+    dropped, including the tool results in between.
+
+    Some session files start mid-turn and have no user message at all; the last
+    candidate is any message outside a tool-call block so compaction can still
+    make progress.
     """
+    boundaries: list[int] = []
     for index in range(target, 0, -1):
         if messages[index].get("role") == "user":
-            return index
-    # Some session files start mid-turn; fall forward to the next user message
-    # so compaction can still make progress instead of silently never running.
+            boundaries.append(index)
+            break
     for index in range(target + 1, len(messages)):
         if messages[index].get("role") == "user":
-            return index
+            boundaries.append(index)
+            break
     for index in range(target, 0, -1):
         if messages[index].get("role") == "tool":
             continue
         previous = messages[index - 1]
         if previous.get("role") == "assistant" and previous.get("tool_calls"):
             continue
-        return index
-    return None
+        boundaries.append(index)
+        break
+    return boundaries
 
 
 class Agent:
@@ -632,11 +680,27 @@ class Agent:
             return False
 
         target = len(messages) - keep
-        cut = _compaction_boundary(messages, target)
+        # Compaction replaces everything before the cut with a summary pair.
+        # Rewriting the pair a previous compaction wrote would summarize the
+        # summary and leave the history the same length, so that cut only counts
+        # when real messages go with it; every other boundary is accepted as
+        # soon as it drops something, because even two large early messages are
+        # worth replacing with a summary.
+        head_is_summary = _is_compacted_head(messages)
+        cut = next(
+            (
+                index
+                for index in _compaction_boundaries(messages, target)
+                if index > _COMPACT_HEAD_MESSAGES or not head_is_summary
+            ),
+            None,
+        )
         if cut is None:
             if not force:
                 return False
-            raise RuntimeError("cannot compact: no safe message boundary found")
+            raise RuntimeError(
+                "cannot compact: no message boundary would shrink the history"
+            )
 
         old_messages = messages[:cut]
         transcript = self._transcript(old_messages)
@@ -666,14 +730,11 @@ class Agent:
         replacement = [
             {
                 "role": "user",
-                "content": (
-                    "[Earlier conversation compacted. Continue from this state.]\n\n"
-                    + summary
-                ),
+                "content": f"{_COMPACTED_SUMMARY_PREFIX}\n\n{summary}",
             },
             {
                 "role": "assistant",
-                "content": "Context received. I will continue from the recorded state.",
+                "content": _COMPACTED_SUMMARY_ACK,
             },
             *messages[cut:],
         ]

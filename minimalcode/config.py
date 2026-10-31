@@ -160,7 +160,7 @@ def _coerce_provider_values(name: str, provider: dict[str, Any]) -> dict[str, An
         block = result.get(block_name)
         if not isinstance(block, dict):
             continue
-        for key in ("enabled",):
+        for key in ("enabled", "trust_env"):
             if key in block:
                 block[key] = _coerce_bool(
                     block[key], f"provider {name!r} {block_name}.{key}"

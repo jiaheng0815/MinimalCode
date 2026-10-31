@@ -168,7 +168,8 @@ class AnthropicProtocolMixin:
                 dict(block)
                 for block in raw_blocks
                 if isinstance(block, dict)
-                and block.get("type")
+                and isinstance(block.get("type"), str)
+                and block["type"]
                 in {"text", "thinking", "redacted_thinking", "tool_use"}
             ]
             # Reasoning is only replayed verbatim when every call it belongs to
@@ -231,6 +232,11 @@ class AnthropicProtocolMixin:
             if not isinstance(message, dict):
                 continue
             role = message.get("role")
+            if not isinstance(role, str):
+                # Session history is a user-editable file; a non-string role
+                # cannot be sent and must not raise TypeError from the set
+                # membership test below.
+                continue
             if role in {"system", "developer"}:
                 text = content_text(message.get("content"))
                 if text:
@@ -664,9 +670,13 @@ class AnthropicProtocolMixin:
                     if on_text is not None:
                         on_text(text)
             elif block_type == "redacted_thinking":
-                data = block.get("data")
-                if isinstance(data, str) and data:
-                    provider_content.append({"type": "redacted_thinking", "data": data})
+                # Named apart from the response body: rebinding ``data`` here
+                # used to break the stop-reason lookup below with AttributeError.
+                redacted = block.get("data")
+                if isinstance(redacted, str) and redacted:
+                    provider_content.append(
+                        {"type": "redacted_thinking", "data": redacted}
+                    )
             elif block_type == "thinking":
                 thinking = content_text(block.get("thinking"))
                 if thinking and on_thinking is not None:

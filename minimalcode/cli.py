@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
+import stat
 import sys
 import time
 from collections.abc import Iterator, Sequence
@@ -140,9 +142,50 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _management_command(argv: Sequence[str]) -> int | None:
-    if not argv:
+_MANAGEMENT_COMMANDS = (
+    "config",
+    "import-pi",
+    "init",
+    "sandbox",
+    "sessions",
+    "shell",
+)
+
+
+def _management_argv(argv: Sequence[str]) -> list[str] | None:
+    """Reorder argv so a management command comes first, or return None.
+
+    ``minimalcode --home DIR sessions`` means the same thing as
+    ``minimalcode sessions --home DIR``. Reading the command word only from the
+    first position sent the word "sessions" to the model instead: a paid turn
+    that also ran tools, for what the user meant as a status read. Only
+    ``--home`` is lifted because every management subcommand accepts it; any
+    other leading option keeps the old behaviour of treating the words as a
+    prompt.
+    """
+    prefix: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--home" and index + 1 < len(argv):
+            prefix.extend(argv[index : index + 2])
+            index += 2
+            continue
+        if token.startswith("--home="):
+            prefix.append(token)
+            index += 1
+            continue
+        break
+    if index >= len(argv) or argv[index] not in _MANAGEMENT_COMMANDS:
         return None
+    return [argv[index], *prefix, *argv[index + 1 :]]
+
+
+def _management_command(argv: Sequence[str]) -> int | None:
+    reordered = _management_argv(argv)
+    if reordered is None:
+        return None
+    argv = reordered
     command = argv[0]
     if command == "init":
         parser = argparse.ArgumentParser(prog="minimalcode init")
@@ -1262,21 +1305,100 @@ def run(argv: Sequence[str] | None = None) -> int:
             provider.close()
 
 
+def _standard_stream_is_pipe(stream: object) -> bool:
+    """Return True when ``stream`` is backed by a pipe."""
+    try:
+        return stat.S_ISFIFO(os.fstat(stream.fileno()).st_mode)
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _reader_closed(exc: OSError) -> bool:
+    """Return True when ``exc`` is a write to a pipe whose reader has gone."""
+    if exc.filename is not None:
+        # A filesystem call failed; only stream writes carry no file name.
+        return False
+    if exc.errno == errno.EPIPE:
+        return True
+    if os.name != "nt" or exc.errno != errno.EINVAL:
+        return False
+    # Windows reports a pipe closed mid-write as ERROR_INVALID_PARAMETER
+    # (EINVAL) instead of ERROR_BROKEN_PIPE, so the errno alone is ambiguous.
+    # Quietly exiting is confined to a standard stream that really is a pipe;
+    # every other EINVAL keeps its error report.
+    return any(_standard_stream_is_pipe(stream) for stream in (sys.stdout, sys.stderr))
+
+
+def _discard_standard_streams() -> None:
+    """Point stdout and stderr at the null device after a pipe broke.
+
+    Surviving ``main`` is not enough: CPython flushes the text streams during
+    shutdown, that flush fails on the same closed pipe, and the process exits
+    with status 120 instead of the code ``main`` returned.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                os.dup2(devnull, stream.fileno())
+            except (AttributeError, OSError, ValueError):
+                continue
+    finally:
+        try:
+            os.close(devnull)
+        except OSError:
+            pass
+
+
+def _flush_standard_streams() -> None:
+    """Flush stdout and stderr, discarding them when the reader has closed."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            _discard_standard_streams()
+            return
+
+
+def _write_error(message: str) -> None:
+    """Write one error line, tolerating a closed or broken stderr."""
+    try:
+        print(f"error: {sanitize_terminal_text(message)}", file=sys.stderr)
+    except (OSError, ValueError):
+        _discard_standard_streams()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _exit_code(argv)
+    finally:
+        # Buffered output may only fail here, when the reader is already gone.
+        # Flushing (and discarding on failure) keeps the interpreter's shutdown
+        # flush from replacing this status with 120. A `finally` also covers
+        # argparse's SystemExit for --help, --version, and usage errors.
+        _flush_standard_streams()
+
+
+def _exit_code(argv: Sequence[str] | None) -> int:
     try:
         return run(argv)
     except KeyboardInterrupt:
-        print("\ncancelled", file=sys.stderr)
-        return 130
-    except BrokenPipeError:
-        # The reader of a pipe (often `head`) closed it; this is not an error.
         try:
-            sys.stderr.close()
-        except OSError:
-            pass
-        return 0
-    except (MinimalCodeError, OSError, ValueError) as exc:
-        print(f"error: {sanitize_terminal_text(str(exc))}", file=sys.stderr)
+            print("\ncancelled", file=sys.stderr)
+        except (OSError, ValueError):
+            _discard_standard_streams()
+        return 130
+    except OSError as exc:
+        # The reader of a pipe (often `head`) closed it; this is not an error.
+        if _reader_closed(exc):
+            return 0
+        _write_error(str(exc))
+        return 2
+    except (MinimalCodeError, ValueError) as exc:
+        _write_error(str(exc))
         return 2
 
 

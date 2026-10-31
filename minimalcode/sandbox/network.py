@@ -64,12 +64,16 @@ _NETWORK_SEQUENCES = (
 )
 _URL_PATTERN = re.compile(r"\b(?:https?|ftps?)://([^\s'\"`/?#]+)", re.IGNORECASE)
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:\\=-]+")
-_SEGMENT_PATTERN = re.compile(r"\|\||&&|[|;&\n\r(){}`]")
+# Control operators that end a command. They are only separators outside quotes:
+# splitting the raw string turned `rg 'nc|netcat'` into two commands and denied
+# an ordinary source search.
+_SEGMENT_CHARS = frozenset("|;&\n\r(){}`")
 # Prefixes that do not change which program runs next: `sudo curl ...` still
 # starts curl, so skipping them keeps the head token meaningful.
 _PREFIX_WORDS = frozenset(
     {
         "!",
+        "busybox",
         "command",
         "do",
         "doas",
@@ -83,6 +87,7 @@ _PREFIX_WORDS = frozenset(
         "sudo",
         "then",
         "time",
+        "toybox",
         "until",
         "while",
     }
@@ -159,11 +164,40 @@ def _is_inline_flag(token: str) -> bool:
     )
 
 
+def _segments(command: str) -> list[str]:
+    """Split a command on unquoted control operators.
+
+    Quoted operators are data: `rg -n 'nc|netcat'` searches for that alternation
+    instead of running netcat, so the split must not create a new command head
+    inside a quoted argument.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in command:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            continue
+        if char in _SEGMENT_CHARS:
+            segments.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    segments.append("".join(current))
+    return segments
+
+
 def _scan_commands(command: str) -> tuple[list[str], list[str]]:
     """Return command-position heads and nested inline command strings."""
     heads: list[str] = []
     inline: list[str] = []
-    for segment in _SEGMENT_PATTERN.split(command):
+    for segment in _segments(command):
         tokens = _TOKEN_PATTERN.findall(segment)
         index = 0
         while index < len(tokens):
@@ -192,16 +226,6 @@ def _scan_commands(command: str) -> tuple[list[str], list[str]]:
     return heads, inline
 
 
-def _command_heads(command: str) -> list[str]:
-    """Return the program names this command string would start.
-
-    Only command positions are inspected. Scanning every token (the earlier
-    behaviour) made `git log --grep=curl` and `rg curl` look like downloads, so
-    the gate refused ordinary source searches for the word "curl".
-    """
-    return _scan_commands(command)[0]
-
-
 def _command_position_text(segment: str) -> str:
     """Return the part of one segment that starts a command."""
     tokens = _TOKEN_PATTERN.findall(_QUOTED_TEXT.sub(" ", segment))
@@ -226,7 +250,7 @@ def _sequence_detected(command: str, depth: int = 0) -> bool:
     """Check network subcommands at command positions, including `sh -c`."""
     if depth > _MAX_NESTED_COMMANDS:
         return False
-    for segment in _SEGMENT_PATTERN.split(command):
+    for segment in _segments(command):
         # ``match`` (not ``search``) keeps `echo git clone` and
         # `rg "pip install"` from looking like a download.
         candidate = _command_position_text(segment)
@@ -237,6 +261,25 @@ def _sequence_detected(command: str, depth: int = 0) -> bool:
     return any(
         _sequence_detected(inner, depth + 1) for inner in _scan_commands(command)[1]
     )
+
+
+def _all_command_heads(command: str, depth: int = 0) -> list[str]:
+    """Return every program name the command starts, including inline shells.
+
+    Only command positions count. Scanning every token (the earlier behaviour)
+    made `git log --grep=curl` and `rg curl` look like downloads, so the gate
+    refused ordinary source searches for the word "curl".
+
+    ``sh -c "sudo curl http://x"`` starts curl, but only the inline command
+    string names it; without descending into it the wrapper hid the real
+    client from the name check.
+    """
+    heads, inline = _scan_commands(command)
+    if depth >= _MAX_NESTED_COMMANDS:
+        return heads
+    for inner in inline:
+        heads.extend(_all_command_heads(inner, depth + 1))
+    return heads
 
 
 def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
@@ -258,7 +301,7 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
         if host and host not in hosts:
             hosts.append(host)
     detected = False
-    for head in _command_heads(command):
+    for head in _all_command_heads(command):
         # Compare bare executable names so `/usr/bin/curl` and `curl.exe`
         # match the same entry.
         token = head.replace("\\", "/").rsplit("/", 1)[-1].lower()

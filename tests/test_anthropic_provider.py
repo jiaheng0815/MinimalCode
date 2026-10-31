@@ -244,6 +244,89 @@ class AnthropicProviderTests(unittest.TestCase):
         )
         self.assertEqual(blocks[0]["data"], "opaque-data")
 
+    def test_redacted_thinking_in_a_non_stream_reply_is_preserved(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "redacted_thinking", "data": "opaque-data"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "read",
+                            "input": {"path": "a.py"},
+                        },
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 3, "output_tokens": 1},
+                },
+            )
+
+        provider = _anthropic_provider(handler)
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+
+        # Reading the block used to rebind the response body, so the stop-reason
+        # and usage lookups below raised AttributeError.
+        self.assertEqual(reply.content, "")
+        self.assertEqual(
+            [block["type"] for block in reply.provider_content],
+            ["redacted_thinking", "tool_use"],
+        )
+        self.assertEqual(reply.provider_content[0]["data"], "opaque-data")
+        self.assertEqual(reply.finish_reason, "tool_calls")
+        self.assertEqual([call.name for call in reply.tool_calls], ["read"])
+        self.assertEqual(reply.usage["prompt_tokens"], 3)
+
+    def test_non_string_history_role_and_block_type_are_skipped(self) -> None:
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            seen.update(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                },
+            )
+
+        provider = _anthropic_provider(handler)
+        try:
+            reply = provider.stream_chat(
+                [
+                    {"role": {"nested": "role"}, "content": "dropped"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "provider_content": [
+                            {"type": ["text"], "text": "dropped"},
+                            {"type": {"nested": "type"}, "text": "dropped"},
+                            {"type": "text", "text": "kept"},
+                        ],
+                    },
+                    {"role": "user", "content": "hi"},
+                ]
+            )
+        finally:
+            provider.close()
+
+        # A hand-edited session file can carry a non-string role or block type;
+        # membership tests on those raised TypeError instead of skipping them.
+        self.assertEqual(reply.content, "ok")
+        messages = seen["messages"]
+        self.assertEqual(
+            [message["role"] for message in messages], ["assistant", "user"]
+        )
+        self.assertEqual(messages[0]["content"], [{"type": "text", "text": "kept"}])
+
     def test_streaming_tool_call_and_thinking_replay(self) -> None:
         requests: list[dict[str, object]] = []
 

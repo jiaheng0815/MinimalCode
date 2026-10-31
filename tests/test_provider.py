@@ -558,6 +558,41 @@ class ProviderTests(unittest.TestCase):
         for item in request_input:
             self.assertIsNotNone(item.get("content"))
 
+    def test_responses_output_with_a_non_string_type_is_ignored(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [
+                        {"type": {"nested": "object"}, "content": "dropped"},
+                        {"type": ["output_text"], "content": "dropped"},
+                        {"type": "message", "content": [{"text": "kept"}]},
+                    ],
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        # Several gateways send a non-string item type. Comparing it against a
+        # set of known types raised TypeError and failed the whole turn.
+        self.assertEqual(reply.content, "kept")
+        self.assertEqual(reply.finish_reason, "stop")
+
     def test_invalid_base_url_is_rejected(self) -> None:
         with self.assertRaisesRegex(ProviderError, "base_url"):
             OpenAICompatibleProvider(

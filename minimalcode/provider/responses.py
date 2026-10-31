@@ -135,6 +135,12 @@ class ResponsesProtocolMixin:
             if not isinstance(item, dict):
                 continue
             item_type = item.get("type")
+            if not isinstance(item_type, str):
+                # Providers and gateways do send non-string types. Comparing one
+                # against a set raises TypeError and would abort the whole turn
+                # instead of ignoring the unusable item, which is what an
+                # unknown type already does.
+                continue
             if item_type == "message":
                 text = content_text(item.get("content"))
                 if text:

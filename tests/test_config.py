@@ -167,6 +167,30 @@ class ConfigTests(unittest.TestCase):
             self.assertIs(expanded["require_api_key"], False)
             self.assertEqual(expanded["max_tokens"], 4096)
 
+    def test_environment_values_are_coerced_inside_web_and_vision_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            provider = settings.data["providers"]["deepseek"]
+            provider["trust_env"] = "${TEST_TRUST_ENV}"
+            provider["web_tools"]["trust_env"] = "${TEST_WEB_TRUST_ENV}"
+            provider["vision"]["trust_env"] = "${TEST_VISION_TRUST_ENV}"
+            with patch.dict(
+                os.environ,
+                {
+                    "TEST_TRUST_ENV": "true",
+                    "TEST_WEB_TRUST_ENV": "false",
+                    "TEST_VISION_TRUST_ENV": "0",
+                },
+            ):
+                _, expanded = settings.provider_config("deepseek")
+            # A string left in any of the three places is silently ignored by
+            # resolve_trust_env, so an expanded placeholder has to become a bool.
+            self.assertIs(expanded["trust_env"], True)
+            self.assertIs(expanded["web_tools"]["trust_env"], False)
+            self.assertIs(expanded["vision"]["trust_env"], False)
+
     def test_utf8_bom_settings_file_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

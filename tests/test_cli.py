@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -11,7 +14,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from minimalcode.cli import _interactive, _read_message, run
+from minimalcode.cli import (
+    _discard_standard_streams,
+    _interactive,
+    _read_message,
+    _reader_closed,
+    _standard_stream_is_pipe,
+    run,
+)
 from minimalcode.config import EFFORT_LEVELS, ensure_config, load_settings
 from minimalcode.provider import ProviderError, ProviderReply
 from minimalcode.session import SessionStore
@@ -1099,6 +1109,148 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(stub.prompts, ["first \nsecond"])
+
+    def test_management_command_after_a_home_option(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = run(["--home", str(home), "config", "path"])
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                stdout.getvalue().strip(), str(home.resolve() / "settings.json")
+            )
+
+            # The word "config" used to become a prompt (a paid model turn that
+            # also ran tools), so the only substitute for a management command
+            # was a full model request.
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(run([f"--home={home}", "sessions"]), 0)
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_other_leading_options_still_make_a_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = FakeCliProvider()
+            stdout = io.StringIO()
+            with (
+                patch(
+                    "minimalcode.provider.create_provider",
+                    return_value=(provider, "fake", "fake-model"),
+                ),
+                redirect_stdout(stdout),
+            ):
+                code = run(
+                    [
+                        "--json",
+                        "--no-session",
+                        "--home",
+                        str(home),
+                        "--cwd",
+                        str(workspace),
+                        "sessions",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            prompt = next(
+                message["content"]
+                for message in provider.messages
+                if message["role"] == "user"
+            )
+            self.assertEqual(prompt, "sessions")
+
+    def test_closed_stdout_pipe_exits_zero_without_noise(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            command = [
+                sys.executable,
+                "-m",
+                "minimalcode",
+                "--home",
+                str(home),
+                "config",
+                "show",
+            ]
+            baseline = subprocess.run(
+                command, capture_output=True, check=False, cwd=str(repo_root)
+            )
+            self.assertEqual(baseline.returncode, 0)
+            # The output has to exceed the 8 KiB stream buffer, otherwise the
+            # broken pipe would only be noticed by the shutdown flush.
+            self.assertGreater(len(baseline.stdout), 8192)
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(repo_root),
+            )
+            try:
+                assert process.stdout is not None
+                process.stdout.close()
+                assert process.stderr is not None
+                stderr = process.stderr.read()
+                code = process.wait(timeout=120)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=30)
+                if process.stderr is not None:
+                    process.stderr.close()
+
+        # Windows reports this as EINVAL rather than EPIPE. The old handler
+        # printed `error: [Errno 22] Invalid argument` and exited 2, then the
+        # shutdown flush failed again and replaced the status with 120.
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, b"")
+
+    def test_reader_closed_recognizes_a_broken_pipe(self) -> None:
+        self.assertTrue(_reader_closed(OSError(errno.EPIPE, "broken pipe")))
+        self.assertFalse(_reader_closed(OSError(errno.ENOENT, "missing", "file.txt")))
+        self.assertFalse(_reader_closed(OSError(errno.EINVAL, "bad", "C:/x<y")))
+
+    @unittest.skipUnless(
+        os.name == "nt", "Windows reports a closed pipe as EINVAL, not EPIPE"
+    )
+    def test_reader_closed_accepts_windows_einval_only_for_a_pipe(self) -> None:
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(write_fd, "w", encoding="utf-8")
+        try:
+            self.assertTrue(_standard_stream_is_pipe(stream))
+            with patch.object(sys, "stdout", stream):
+                self.assertTrue(_reader_closed(OSError(errno.EINVAL, "invalid")))
+            with (
+                patch.object(sys, "stdout", io.StringIO()),
+                patch.object(sys, "stderr", io.StringIO()),
+            ):
+                self.assertFalse(_reader_closed(OSError(errno.EINVAL, "invalid")))
+        finally:
+            stream.close()
+            os.close(read_fd)
+
+    def test_discard_standard_streams_redirects_a_broken_pipe(self) -> None:
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(write_fd, "w", encoding="utf-8")
+        try:
+            os.close(read_fd)
+            with (
+                patch.object(sys, "stdout", stream),
+                patch.object(sys, "stderr", stream),
+            ):
+                _discard_standard_streams()
+            # The descriptor now points at the null device, so neither the
+            # explicit write nor the interpreter's final flush can fail.
+            stream.write("discarded\n")
+            stream.flush()
+        finally:
+            stream.close()
 
 
 if __name__ == "__main__":

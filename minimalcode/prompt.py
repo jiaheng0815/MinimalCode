@@ -23,6 +23,7 @@ Shell：{shell}
 OS：{platform}
 """
 
+
 def _read_limited(path: Path, limit: int, *, directory: Path) -> str:
     if limit <= 0:
         return ""

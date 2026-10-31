@@ -235,6 +235,19 @@ class NetworkPolicyTests(SandboxTestBase):
             with self.subTest(command=command):
                 self.assertIsNone(policy.network_denial(command))
 
+    def test_quoted_alternations_are_not_split_into_commands(self) -> None:
+        # Splitting the raw string made the token after a quoted `|` a command
+        # head, so searching for a client's name was denied as network use.
+        policy = self._tools().sandbox.policy
+        for command in (
+            "rg -n 'nc|netcat' minimalcode",
+            "grep -E 'curl|wget' docs/configuration.md",
+            "git log --grep 'ping|dig'",
+            'rg "socat|telnet" src',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command))
+
     def test_network_commands_behind_shells_and_pipes_are_still_detected(
         self,
     ) -> None:
@@ -252,6 +265,9 @@ class NetworkPolicyTests(SandboxTestBase):
             "env -i curl https://example.com",
             "nice -n 5 curl https://example.com",
             "if true; then curl https://example.com; fi",
+            # A wrapper inside an inline shell must not hide the real client.
+            'sh -c "sudo curl https://example.com"',
+            "busybox wget https://example.com",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(policy.network_denial(command))

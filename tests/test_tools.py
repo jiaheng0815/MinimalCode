@@ -10,7 +10,7 @@ from unittest.mock import patch
 from minimalcode.config import load_settings
 from minimalcode.shell import detect_shell
 from minimalcode.tools import ToolError, ToolRuntime
-from minimalcode.tools.search import run_python_grep
+from minimalcode.tools.search import inline_python_grep, run_python_grep
 
 
 class ToolTests(unittest.TestCase):
@@ -327,6 +327,65 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(any("UPPER" in line for line in insensitive["matches"]))
         self.assertTrue(any("UPPER" in line for line in sensitive["matches"]))
         self.assertFalse(any("lower" in line for line in sensitive["matches"]))
+
+    def test_python_grep_matches_line_content_without_the_terminator(self) -> None:
+        # Both fallback engines fed the raw line (including "\n") to the regex,
+        # so `\s+$` matched every line and a CRLF `needle$` matched none.
+        self.tools.write("lines.txt", "needle\nneedle \nplain\n")
+        (self.workspace / "crlf.txt").write_bytes(b"needle\r\nother\r\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            whitespace = self.tools.grep(r"\s+$", path="lines.txt")
+            anchored = self.tools.grep("needle$", path="crlf.txt")
+            inline = inline_python_grep(
+                pattern=r"\s+$",
+                files=[self.workspace / "lines.txt"],
+                limit=10,
+                max_bytes=1000,
+            )
+        self.assertEqual(
+            [line.rsplit(":", 1)[-1] for line in whitespace["matches"]], ["needle "]
+        )
+        self.assertEqual(
+            [line.rsplit(":", 1)[-1] for line in inline["matches"]], ["needle "]
+        )
+        self.assertEqual(len(anchored["matches"]), 1)
+
+    def test_python_grep_exact_limit_is_not_truncated(self) -> None:
+        self.tools.write("limits.txt", "needle 1\nneedle 2\nneedle 3\n")
+        target = self.workspace / "limits.txt"
+        exact = run_python_grep(
+            pattern="needle",
+            files=[target],
+            limit=3,
+            max_bytes=1000,
+            cwd=self.workspace,
+        )
+        over = run_python_grep(
+            pattern="needle",
+            files=[target],
+            limit=2,
+            max_bytes=1000,
+            cwd=self.workspace,
+        )
+        # A result that fits exactly is complete; only an extra match proves it
+        # was cut, which is how the ripgrep and inline engines behave.
+        self.assertEqual(len(exact["matches"]), 3)
+        self.assertFalse(exact["truncated"])
+        self.assertTrue(over["truncated"])
+
+    def test_python_find_matches_zero_directories_for_a_recursive_glob(self) -> None:
+        # fnmatch needs at least one directory for `**/`, while ripgrep treats
+        # it as "zero or more", so a file directly under `pkg` was skipped.
+        self.tools.write("pkg/config.py", "needle = 1\n")
+        self.tools.write("pkg/tools/files.py", "needle = 2\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            found = self.tools.find("pkg/**/*.py")
+            grepped = self.tools.grep("needle", glob="pkg/**/*.py")
+        found_names = {
+            path.replace("\\", "/").rsplit("/", 1)[-1] for path in found["files"]
+        }
+        self.assertEqual(found_names, {"config.py", "files.py"})
+        self.assertEqual(len(grepped["matches"]), 2)
 
     def test_explicit_ignored_directory_is_searchable(self) -> None:
         self.tools.write("build/generated.py", "needle = 1\n")

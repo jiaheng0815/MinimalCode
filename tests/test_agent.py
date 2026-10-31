@@ -695,6 +695,168 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[0]["role"], "user")
             self.assertNotEqual(session.messages[2]["role"], "tool")
 
+    def test_repair_tolerates_a_non_object_function(self) -> None:
+        from minimalcode.agent import _repair_tool_history
+
+        messages = [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "a", "function": "read"},
+                    {"id": "b", "function": {"name": "read"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "b", "name": "read", "content": "b"},
+        ]
+        repaired, changed = _repair_tool_history(messages)
+        self.assertTrue(changed)
+        self.assertEqual(
+            [item.get("tool_call_id") for item in repaired if item["role"] == "tool"],
+            ["a", "b"],
+        )
+
+    def test_compaction_makes_progress_after_a_long_tool_loop(self) -> None:
+        """A tool loop with no user boundary must not re-summarize the summary."""
+
+        class RecordingCompactProvider(FakeProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transcripts: list[str] = []
+
+            def complete_text(self, messages):
+                self.transcripts.append(str(messages[-1]["content"]))
+                return "fresh summary"
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["context"]["keep_messages"] = 4
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace, provider="fake", model="fake-model", save=False
+            )
+            # The state after an earlier compaction, followed by one long tool
+            # loop: the nearest user message before the boundary is the summary
+            # itself, so cutting there would summarize the summary again.
+            session.append_message(
+                {
+                    "role": "user",
+                    "content": (
+                        "[Earlier conversation compacted. Continue from this "
+                        "state.]\n\nprevious summary"
+                    ),
+                }
+            )
+            session.append_message(
+                {"role": "assistant", "content": "Context received."}
+            )
+            session.append_message({"role": "user", "content": "run the tests"})
+            for index in range(6):
+                session.append_message(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"c{index}",
+                                "function": {"name": "read", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                )
+                session.append_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"c{index}",
+                        "name": "read",
+                        "content": f"result {index}",
+                    }
+                )
+            provider = RecordingCompactProvider()
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            before = len(session.messages)
+            self.assertTrue(agent._compact(force=False))
+
+            # The cut moved past the boundary that would not shrink anything,
+            # and the transcript covers every message that was dropped.
+            self.assertLess(len(session.messages), before - 1)
+            self.assertEqual(session.messages[0]["role"], "user")
+            self.assertIn("result 3", provider.transcripts[0])
+            self.assertNotIn("result 5", provider.transcripts[0])
+
+    def test_compaction_summarizes_large_early_messages(self) -> None:
+        """Two big messages are worth replacing with a summary on their own."""
+        transcripts: list[str] = []
+
+        class RecordingCompactProvider(FakeProvider):
+            def complete_text(self, messages):
+                transcripts.append(str(messages[-1]["content"]))
+                return "fresh summary"
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["context"]["keep_messages"] = 4
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace, provider="fake", model="fake-model", save=False
+            )
+            session.append_message({"role": "user", "content": "open the first issue"})
+            session.append_message({"role": "assistant", "content": "opened it"})
+            for index in range(3):
+                session.append_message(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"d{index}",
+                                "function": {"name": "read", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                )
+                session.append_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"d{index}",
+                        "name": "read",
+                        "content": f"output {index}",
+                    }
+                )
+            agent = Agent(
+                settings=settings,
+                provider=RecordingCompactProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            # The only boundary drops the first user message and its answer,
+            # which is still worth summarizing even though the head pair that
+            # replaces them keeps the message count unchanged.
+            self.assertTrue(agent._compact(force=False))
+            self.assertEqual(len(transcripts), 1)
+            self.assertIn("open the first issue", transcripts[0])
+            self.assertEqual(session.messages[0]["role"], "user")
+
     def test_should_compact_prefers_reported_prompt_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

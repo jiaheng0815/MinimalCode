@@ -116,6 +116,30 @@ class WebToolTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["title"], "Recovered")
         sleep.assert_called_once()
 
+    def test_rate_limit_without_time_left_reports_the_status(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(429, headers={"Retry-After": "1"}, json={})
+
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(handler),
+        )
+        # 100.0 places the request inside the deadline; 200.0 is past it, so the
+        # single status retry can no longer be scheduled.
+        clock = mock.Mock(side_effect=[100.0, 100.0, 200.0])
+        try:
+            with (
+                mock.patch("minimalcode.httpclient.time.monotonic", clock),
+                self.assertRaises(ToolError) as context,
+            ):
+                client.search("minimalcode")
+        finally:
+            client.close()
+
+        self.assertIn("HTTP 429", str(context.exception))
+        self.assertNotIn("None", str(context.exception))
+
     def test_search_stops_after_the_connection_retry_budget(self) -> None:
         attempts = 0
 

@@ -167,19 +167,33 @@ class SearchToolsMixin:
         )
 
     @staticmethod
-    def _matches_glob(file_path: Path, root: Path, glob_pattern: str) -> bool:
+    def _glob_variants(glob_pattern: str) -> tuple[str, ...]:
+        """Return the pattern plus the form with every ``**/`` collapsed.
+
+        ripgrep reads ``**/`` as "zero or more directories", while ``fnmatch``
+        needs at least one, so `src/**/*.py` used to skip `src/config.py`
+        entirely and report a complete result.
+        """
+        collapsed = glob_pattern.replace("**/", "")
+        if collapsed == glob_pattern:
+            return (glob_pattern,)
+        return (glob_pattern, collapsed)
+
+    @classmethod
+    def _matches_glob(cls, file_path: Path, root: Path, glob_pattern: str) -> bool:
         """Match a ripgrep-style glob against the file name and relative path."""
-        if fnmatch.fnmatch(file_path.name, glob_pattern):
-            return True
         try:
             relative = file_path.relative_to(root).as_posix()
         except ValueError:
             relative = file_path.as_posix()
-        if fnmatch.fnmatch(relative, glob_pattern):
-            return True
-        # `**/` is optional in ripgrep globs, required by fnmatch.
-        if glob_pattern.startswith("**/"):
-            return fnmatch.fnmatch(relative, glob_pattern[3:])
+        for pattern in cls._glob_variants(glob_pattern):
+            if fnmatch.fnmatch(file_path.name, pattern):
+                return True
+            if fnmatch.fnmatch(relative, pattern):
+                return True
+            # `**/` is optional in ripgrep globs, required by fnmatch.
+            if pattern.startswith("**/") and fnmatch.fnmatch(relative, pattern[3:]):
+                return True
         return False
 
     def find(

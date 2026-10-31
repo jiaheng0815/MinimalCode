@@ -159,6 +159,7 @@ def post_json(
             )
             if response.status_code in {429, 503} and not status_retried:
                 status_retried = True
+                status_code = response.status_code
                 try:
                     delay = min(
                         max(float(response.headers.get("Retry-After", "1")), 0.2),
@@ -170,7 +171,13 @@ def post_json(
                 response = None
                 remaining = budget_end - time.monotonic()
                 if remaining <= 0:
-                    break
+                    # The single status retry needs time to run; without it the
+                    # final message would report a connection error that never
+                    # happened ("after 1 attempts: None") and drop the status.
+                    raise ToolError(
+                        f"provider {label} request failed with HTTP {status_code} "
+                        "and no time was left to retry"
+                    )
                 time.sleep(min(delay, remaining))
                 continue
             if 300 <= response.status_code < 400:
