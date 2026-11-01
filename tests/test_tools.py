@@ -338,6 +338,34 @@ class ToolTests(unittest.TestCase):
         result = self.tools.edit("duplicate.txt", "same", "other", replace_all=True)
         self.assertEqual(result["replacements"], 2)
 
+    def test_read_reports_the_detected_line_ending(self) -> None:
+        (self.workspace / "lf.txt").write_bytes(b"one\ntwo\n")
+        (self.workspace / "crlf.txt").write_bytes(b"one\r\ntwo\r\n")
+        (self.workspace / "none.txt").write_bytes(b"one")
+        self.assertEqual(self.tools.read("lf.txt")["line_ending"], "LF")
+        self.assertEqual(self.tools.read("crlf.txt")["line_ending"], "CRLF")
+        self.assertEqual(self.tools.read("none.txt")["line_ending"], "none")
+
+    def test_write_preserves_an_existing_crlf_style(self) -> None:
+        target = self.workspace / "style.txt"
+        target.write_bytes(b"old = 1\r\n")
+        result = self.tools.write("style.txt", "new = 1\nnext = 2\n")
+        self.assertEqual(result["line_ending"], "CRLF")
+        self.assertEqual(target.read_bytes(), b"new = 1\r\nnext = 2\r\n")
+
+    def test_write_preserves_an_existing_lf_style(self) -> None:
+        target = self.workspace / "style.txt"
+        target.write_bytes(b"old = 1\n")
+        self.tools.write("style.txt", "new = 1\r\nnext = 2\r\n")
+        self.assertEqual(target.read_bytes(), b"new = 1\nnext = 2\n")
+
+    def test_write_keeps_explicit_line_endings_for_a_new_file(self) -> None:
+        result = self.tools.write("new.txt", "one\r\ntwo\r\n")
+        self.assertEqual(result["line_ending"], "CRLF")
+        self.assertEqual((self.workspace / "new.txt").read_bytes(), b"one\r\ntwo\r\n")
+        self.tools.write("new-lf.txt", "one\ntwo\n")
+        self.assertEqual((self.workspace / "new-lf.txt").read_bytes(), b"one\ntwo\n")
+
     def test_edit_preserves_unrelated_line_endings(self) -> None:
         target = self.workspace / "mixed.txt"
         target.write_bytes(b"a\r\nb\nc\r\n")

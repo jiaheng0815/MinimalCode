@@ -51,6 +51,7 @@ class _TextScan:
     end: int
     last_line: int
     truncated: bool
+    newline: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,17 +85,34 @@ def _source_preview(text: str, line: int | None) -> str:
     return f"\n  {line:>5} | {source}"
 
 
-def _detect_newline(text: str) -> str:
-    """Return the file's dominant physical line ending."""
+def _detect_newline_optional(text: str) -> str | None:
     if "\r\n" in text:
         return "\r\n"
     if "\r" in text and "\n" not in text:
         return "\r"
-    return "\n"
+    if "\n" in text:
+        return "\n"
+    return None
 
 
-def _line_ending_name(newline: str) -> str:
-    return {"\r\n": "CRLF", "\r": "CR", "\n": "LF"}.get(newline, "LF")
+def _detect_newline(text: str) -> str:
+    """Return the file's dominant physical line ending."""
+    return _detect_newline_optional(text) or "\n"
+
+
+def _line_ending_name(newline: str | None) -> str:
+    return {"\r\n": "CRLF", "\r": "CR", "\n": "LF"}.get(newline, "none")
+
+
+def _detect_newline_bytes(data: bytes) -> str | None:
+    """Detect a physical line ending without decoding the whole file."""
+    if b"\r\n" in data:
+        return "\r\n"
+    if b"\r" in data and b"\n" not in data:
+        return "\r"
+    if b"\n" in data:
+        return "\n"
+    return None
 
 
 def _normalize_newlines(text: str, newline: str) -> str:
@@ -292,6 +310,7 @@ class FileToolsMixin:
             if "\ufffd" in "".join(scan.chunks):
                 warnings.append(_NOT_UTF8_WARNING)
 
+        line_ending = _detect_newline_bytes(sample) or scan.newline
         if scan.start is None:
             if start > max(1, scan.last_line):
                 raise ToolError(f"start_line {start} is beyond the end of the file")
@@ -301,6 +320,7 @@ class FileToolsMixin:
                 "content": "",
                 "start_line": start,
                 "end_line": 0,
+                "line_ending": _line_ending_name(line_ending),
                 "truncated": scan.truncated,
                 "eof": True,
             }
@@ -311,6 +331,7 @@ class FileToolsMixin:
                 "start_line": scan.start,
                 "end_line": scan.end,
                 "content": "".join(scan.chunks),
+                "line_ending": _line_ending_name(line_ending),
                 "truncated": scan.truncated,
             }
         if warnings:
@@ -346,6 +367,7 @@ class FileToolsMixin:
         actual_end = 0
         truncated = False
         last_line = 0
+        detected_newline: str | None = None
         pending = ""
         # Two extra characters make an exactly-at-the-limit physical line,
         # including its terminator, readable as a complete line instead of
@@ -371,6 +393,8 @@ class FileToolsMixin:
                         pending = following
                 number += 1
                 last_line = number
+                if detected_newline is None:
+                    detected_newline = _detect_newline_optional(line)
                 if "\x00" in line:
                     raise ToolError("binary files are not supported by read")
                 line_cut = len(line) >= read_limit and not line.endswith(("\n", "\r"))
@@ -430,6 +454,7 @@ class FileToolsMixin:
             end=actual_end,
             last_line=last_line,
             truncated=truncated,
+            newline=detected_newline,
         )
 
     @staticmethod
@@ -670,19 +695,10 @@ class FileToolsMixin:
         """Create or fully replace a UTF-8 text file."""
         if not isinstance(content, str):
             raise ToolError("content must be a string")
-        try:
-            encoded = content.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ToolError(f"content is not valid UTF-8 text: {exc}") from exc
-        if b"\x00" in encoded:
+        if "\x00" in content:
             # `read` rejects NUL bytes as binary, so accepting them here would
             # create a file the agent can write but never read back.
             raise ToolError("binary files are not supported by write")
-        if len(encoded) > self.max_file_bytes:
-            raise ToolError(
-                f"content is too large for write: {len(encoded)} bytes exceeds "
-                f"tools.max_file_bytes ({self.max_file_bytes})"
-            )
         target = self._path(path, operation="write")
         if target.exists() and target.is_dir():
             raise ToolError(f"path is a directory: {target}")
@@ -691,11 +707,29 @@ class FileToolsMixin:
         except OSError as exc:
             raise ToolError(f"cannot create parent directory: {exc}") from exc
         existed = target.exists()
+        original_bytes = target.read_bytes() if existed else None
+        newline = (
+            _detect_newline_bytes(original_bytes)
+            if original_bytes is not None
+            else _detect_newline_optional(content)
+        )
+        if newline is not None:
+            # Keep the file's physical style instead of letting a model's LF
+            # payload churn every line of a CRLF checkout.
+            content = _normalize_newlines(content, newline)
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(f"content is not valid UTF-8 text: {exc}") from exc
+        if len(encoded) > self.max_file_bytes:
+            raise ToolError(
+                f"content is too large for write: {len(encoded)} bytes exceeds "
+                f"tools.max_file_bytes ({self.max_file_bytes})"
+            )
         # Never carry setuid/setgid bits onto rewritten content: the kernel
         # clears them on a normal write, and restoring them would hand the new
         # bytes the old privilege.
         mode = target.stat().st_mode & 0o777 if existed else None
-        original_bytes = target.read_bytes() if existed else None
         before: list[_Diagnostic] = []
         if existed:
             before, _ = self._python_diagnostics(target)
@@ -712,6 +746,7 @@ class FileToolsMixin:
             "path": str(target),
             "bytes": len(encoded),
             "created": not existed,
+            "line_ending": _line_ending_name(newline),
         }
         if warnings:
             result["warnings"] = warnings
