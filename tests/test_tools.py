@@ -208,6 +208,53 @@ class ToolTests(unittest.TestCase):
         self.assertIn("closest available range", message)
         self.assertIn("two = 2", message)
 
+    def test_read_range_requires_and_returns_an_explicit_window(self) -> None:
+        self.tools.write("range.txt", "one\ntwo\nthree\nfour\n")
+        result = self.tools.dispatch(
+            "read_range", {"path": "range.txt", "start_line": 2, "end_line": 3}
+        )
+        self.assertEqual(result["start_line"], 2)
+        self.assertEqual(result["end_line"], 3)
+        self.assertEqual(result["line_count"], 2)
+        self.assertIn("two", result["content"])
+        self.assertIn("three", result["content"])
+        self.assertNotIn("four", result["content"])
+        with self.assertRaisesRegex(ToolError, "greater than or equal"):
+            self.tools.read_range("range.txt", 3, 2)
+
+    def test_append_file_creates_and_extends_without_tail_guessing(self) -> None:
+        created = self.tools.dispatch(
+            "append_file", {"path": "notes.txt", "content": "one\n"}
+        )
+        self.assertTrue(created["created"])
+        self.tools.append_file("notes.txt", "two\n")
+        self.assertEqual(
+            (self.workspace / "notes.txt").read_text(encoding="utf-8"),
+            "one\ntwo\n",
+        )
+        self.tools.append_file("notes.txt", "three")
+        self.assertEqual(
+            (self.workspace / "notes.txt").read_text(encoding="utf-8"),
+            "one\ntwo\nthree",
+        )
+
+    def test_append_file_preserves_crlf_and_adds_a_separator(self) -> None:
+        target = self.workspace / "crlf.txt"
+        target.write_bytes(b"one\r\n")
+        self.tools.append_file("crlf.txt", "two\n")
+        self.assertEqual(target.read_bytes(), b"one\r\ntwo\r\n")
+        target.write_bytes(b"no-terminator")
+        self.tools.append_file("crlf.txt", "next")
+        self.assertEqual(target.read_bytes(), b"no-terminator\nnext")
+
+    def test_append_file_rolls_back_invalid_python(self) -> None:
+        self.tools.write("append.py", "value = 1\n")
+        target = self.workspace / "append.py"
+        with self.assertRaises(ToolError) as context:
+            self.tools.append_file("append.py", "def broken(:\n")
+        self.assertIn("rolled back", str(context.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), "value = 1\n")
+
     def test_mixing_line_numbers_with_old_text_is_rejected(self) -> None:
         self.tools.write("mixed.py", "one = 1\n")
         with self.assertRaisesRegex(ToolError, "not both"):
@@ -318,6 +365,17 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o755)
         self.tools.write("run.sh", "#!/bin/sh\necho newer\n")
         self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o755)
+
+    def test_read_range_and_append_file_are_advertised_and_gated(self) -> None:
+        from minimalcode.tools import available_tool_schemas
+        from minimalcode.tools.schemas import READ_ONLY_TOOLS, TOOL_NAMES
+
+        advertised = {schema["function"]["name"] for schema in available_tool_schemas()}
+        self.assertIn("read_range", advertised)
+        self.assertIn("append_file", advertised)
+        self.assertIn("read_range", READ_ONLY_TOOLS)
+        self.assertNotIn("append_file", READ_ONLY_TOOLS)
+        self.assertTrue({"read_range", "append_file"} <= TOOL_NAMES)
 
     def test_dispatch_reports_invalid_arguments(self) -> None:
         with self.assertRaises(ToolError) as context:

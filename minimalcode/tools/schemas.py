@@ -17,7 +17,9 @@ from ..web import ProviderWebClient
 TOOL_NAMES = frozenset(
     {
         "read",
+        "read_range",
         "write",
+        "append_file",
         "edit",
         "shell",
         "grep",
@@ -33,7 +35,15 @@ TOOL_NAMES = frozenset(
 # of `--read-only`, and the only tools that may run concurrently: a batch of
 # reads has no ordering dependency, while `write` followed by `shell` does.
 READ_ONLY_TOOLS = frozenset(
-    {"read", "grep", "find", "read_image", "web_search", "web_fetch"}
+    {
+        "read",
+        "read_range",
+        "grep",
+        "find",
+        "read_image",
+        "web_search",
+        "web_fetch",
+    }
 )
 
 # The always-available focused tools. Order is stable because providers and
@@ -59,6 +69,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "read_range",
+            "description": (
+                "Read an explicit line range with line numbers. Use it to inspect "
+                "the exact region before a line-number edit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
+                },
+                "required": ["path", "start_line", "end_line"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write",
             "description": "Create a file or overwrite it with complete UTF-8 text.",
             "parameters": {
@@ -68,6 +98,29 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "content": {
                         "type": "string",
                         "description": "Complete file content",
+                    },
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_file",
+            "description": (
+                "Append UTF-8 text at EOF, creating the file when missing. Use it "
+                "instead of an edit that guesses the file tail; the existing line "
+                "ending style is preserved."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "content": {
+                        "type": "string",
+                        "description": "Text to append at the end of the file",
                     },
                 },
                 "required": ["path", "content"],

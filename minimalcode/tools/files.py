@@ -317,6 +317,12 @@ class FileToolsMixin:
             result["warnings"] = warnings
         return result
 
+    def read_range(self, path: str, start_line: int, end_line: int) -> dict[str, Any]:
+        """Read an explicit range; both bounds are required by the schema."""
+        result = self.read(path, start_line, end_line)
+        result["line_count"] = max(0, result["end_line"] - result["start_line"] + 1)
+        return result
+
     def _scan_lines(
         self,
         target: Path,
@@ -706,6 +712,89 @@ class FileToolsMixin:
             "path": str(target),
             "bytes": len(encoded),
             "created": not existed,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    def append_file(self, path: str, content: str) -> dict[str, Any]:
+        """Append UTF-8 text at EOF, preserving the existing line ending."""
+        if not isinstance(content, str):
+            raise ToolError("content must be a string")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(f"content is not valid UTF-8 text: {exc}") from exc
+        if b"\x00" in encoded:
+            raise ToolError("binary files are not supported by append_file")
+        target = self._path(path, operation="write")
+        if target.exists() and target.is_dir():
+            raise ToolError(f"path is a directory: {target}")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ToolError(f"cannot create parent directory: {exc}") from exc
+        existed = target.exists()
+        if existed and target.stat().st_size > self.max_file_bytes:
+            raise ToolError("file is too large for append_file")
+        original_bytes = target.read_bytes() if existed else None
+        if original_bytes is None:
+            original_text = ""
+            newline = _detect_newline(content)
+        else:
+            try:
+                original_text = original_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ToolError(
+                    f"file is not valid UTF-8 text: {target}: {exc}"
+                ) from exc
+            if "\x00" in original_text:
+                raise ToolError("binary files are not supported by append_file")
+            newline = (
+                _detect_newline(original_text)
+                if original_text
+                else _detect_newline(content)
+            )
+        separator = ""
+        if (
+            original_text
+            and content
+            and not original_text.endswith(("\r", "\n"))
+            and not content.startswith(("\r", "\n"))
+        ):
+            # Appending to a file without a final terminator must not glue the
+            # first new line onto the old last line.
+            separator = newline
+        appended = separator + _normalize_newlines(content, newline)
+        updated = original_text + appended
+        try:
+            updated_bytes = updated.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolError(f"appended content is not valid UTF-8 text: {exc}") from exc
+        if len(updated_bytes) > self.max_file_bytes:
+            raise ToolError(
+                f"appended file is too large: {len(updated_bytes)} bytes exceeds "
+                f"tools.max_file_bytes ({self.max_file_bytes})"
+            )
+        mode = target.stat().st_mode & 0o777 if existed else None
+        before: list[_Diagnostic] = []
+        if existed:
+            before, _ = self._python_diagnostics(target)
+        self._write_atomic(target, updated, mode=mode)
+        warnings = self._validate_python_write(
+            target,
+            before,
+            updated,
+            original_bytes=original_bytes,
+            original_mode=mode,
+        )
+        result: dict[str, Any] = {
+            "status": "success",
+            "path": str(target),
+            "created": not existed,
+            "appended_bytes": len(appended.encode("utf-8")),
+            "bytes": len(updated_bytes),
+            "line_ending": _line_ending_name(newline),
         }
         if warnings:
             result["warnings"] = warnings

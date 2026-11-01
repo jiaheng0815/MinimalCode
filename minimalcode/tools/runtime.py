@@ -150,7 +150,9 @@ class ToolRuntime(
         """
         handlers = {
             "read": self.read,
+            "read_range": self.read_range,
             "write": self.write,
+            "append_file": self.append_file,
             "edit": self.edit,
             "shell": self.shell,
             "subagent": self.subagent,
@@ -189,7 +191,14 @@ class ToolRuntime(
             detail = clip(str(arguments.get("command", "")))
         elif name == "subagent":
             detail = clip(str(arguments.get("task", "")))
-        elif name in {"read", "write", "edit", "read_image"}:
+        elif name in {
+            "read",
+            "read_range",
+            "write",
+            "append_file",
+            "edit",
+            "read_image",
+        }:
             detail = clip(str(arguments.get("path", "")))
         elif name == "grep":
             detail = (
