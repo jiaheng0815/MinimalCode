@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from minimalcode.config import ConfigError, load_settings
-from minimalcode.shell import detect_shell
+from minimalcode.shell import ShellSpec, detect_shell
 from minimalcode.tools import ToolError, ToolRuntime
 from minimalcode.tools.search import (
     inline_python_grep,
@@ -693,6 +693,21 @@ class ToolTests(unittest.TestCase):
         result = self.tools.shell(command, timeout=30)
         self.assertEqual(result["status"], "success", result)
         self.assertIn("tool-shell", str(result["stdout"]))
+
+    def test_powershell_shell_rejects_bash_heredocs_before_running(self) -> None:
+        powershell = ShellSpec(
+            kind="pwsh7",
+            executable="pwsh",
+            label="PowerShell 7",
+            is_windows=os.name == "nt",
+        )
+        runtime = ToolRuntime(self.settings, self.workspace, powershell)
+        with self.assertRaises(ToolError) as context:
+            runtime.shell("python - <<'PY'\nprint(1)\nPY\n")
+        message = str(context.exception)
+        self.assertIn("does not support bash heredocs", message)
+        self.assertIn("append_file", message)
+        self.assertIn("here-string", message)
 
     def test_shell_rejects_nan_timeout(self) -> None:
         with self.assertRaisesRegex(ToolError, "timeout"):

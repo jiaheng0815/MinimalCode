@@ -15,6 +15,7 @@ from minimalcode.shell import (
     _PROBE_CACHE,
     ShellSpec,
     detect_shell,
+    powershell_heredoc_delimiter,
     probe_shell,
     run_shell,
     select_shell,
@@ -37,6 +38,22 @@ class ShellTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "success", result)
         self.assertIn("hello", str(result["stdout"]))
+
+    def test_detects_bash_heredocs_without_flagging_shift_expressions(self) -> None:
+        self.assertEqual(powershell_heredoc_delimiter("cat <<EOF\nhello\nEOF\n"), "EOF")
+        self.assertEqual(
+            powershell_heredoc_delimiter("python - <<'PY'\nprint(1)\nPY"),
+            "PY",
+        )
+        self.assertEqual(
+            powershell_heredoc_delimiter("cat <<-EOF\n\thello\n\tEOF\n"),
+            "EOF",
+        )
+        self.assertIsNone(powershell_heredoc_delimiter("$x = 1 << 2"))
+        self.assertIsNone(powershell_heredoc_delimiter('echo "a << b"'))
+        self.assertIsNone(
+            powershell_heredoc_delimiter("@'\nhello\n'@\nWrite-Output hi")
+        )
 
     def test_invalid_timeout_returns_an_error(self) -> None:
         shell = detect_shell()

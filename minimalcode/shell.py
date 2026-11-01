@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -14,11 +15,17 @@ from .sandbox import SandboxRunner, truncate_text
 __all__ = [
     "ShellSpec",
     "detect_shell",
+    "powershell_heredoc_delimiter",
     "probe_shell",
     "run_shell",
     "select_shell",
     "truncate_text",
 ]
+
+# Bash heredoc starts with ``<<WORD`` or ``<<-WORD``. A PowerShell bit shift
+# such as ``$x << 2`` cannot match because the delimiter must be a word, and a
+# quoted ``"a << b"`` only matches when a later line is exactly ``b``.
+_HEREDOC_RE = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\1")
 
 # A shell that exists on disk is not necessarily a shell that can start: a
 # pwsh build without libicu, or one whose .NET runtime cannot reserve memory,
@@ -186,6 +193,23 @@ def select_shell(
     if unusable:
         message = f"{message}: {'; '.join(unusable)}"
     raise ShellError(message)
+
+
+def powershell_heredoc_delimiter(command: str) -> str | None:
+    """Return the bash heredoc delimiter that PowerShell cannot execute.
+
+    Detection requires the closing delimiter on a later line, which keeps a
+    quoted ``"a << b"`` or a Python shift expression from being rejected. The
+    caller decides whether the active shell is PowerShell; bash/zsh heredocs
+    remain valid there.
+    """
+    lines = command.splitlines()
+    for index, line in enumerate(lines):
+        for match in _HEREDOC_RE.finditer(line):
+            delimiter = match.group(2)
+            if any(candidate.strip() == delimiter for candidate in lines[index + 1 :]):
+                return delimiter
+    return None
 
 
 def prefix_command(shell: ShellSpec, command: str) -> list[str]:

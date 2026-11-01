@@ -7,7 +7,9 @@ from typing import Any
 
 from ..errors import ToolError
 from ..provider.anthropic_env import ANTHROPIC_ENV_PROVIDER
-from ..shell import run_shell
+from ..shell import powershell_heredoc_delimiter, run_shell
+
+_POWERSHELL_KINDS = frozenset({"pwsh7", "windows_powershell"})
 from ..subagent import PREAMBLE as SUBAGENT_PREAMBLE
 from ..subagent import build_command as build_subagent_command
 from ..subagent import child_env as subagent_env
@@ -50,6 +52,15 @@ class ProcessToolsMixin:
         """Run one command in the configured shell and workspace."""
         if not isinstance(command, str):
             raise ToolError("command must be a string")
+        if self.shell_spec.kind in _POWERSHELL_KINDS:
+            delimiter = powershell_heredoc_delimiter(command)
+            if delimiter is not None:
+                raise ToolError(
+                    f"{self.shell_spec.label} does not support bash heredocs "
+                    f"(<<{delimiter}). Write the payload with write/append_file "
+                    "and run the file, use a PowerShell here-string (@'...'@), "
+                    "or pass stdin; the same command will fail again."
+                )
         workdir = self._path(cwd, operation="execute")
         if not workdir.is_dir():
             raise ToolError(f"working directory not found: {workdir}")
