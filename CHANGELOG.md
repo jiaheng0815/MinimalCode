@@ -1,5 +1,45 @@
 # 更新日志
 
+## 1.3.2 - 2026-11-01
+
+### 修复
+
+- 搜索：启用 ripgrep 时，敏感文件过滤用的是一份独立 glob 列表，规则比权威的 `is_sensitive_path` 窄：大小写敏感、缺少 `.env-` 前缀规则，导致 `read` 明确拒绝的 `.env-prod`、`KEY.PEM`、`Secrets` 仍会出现在 `grep` / `find` 结果里，同一份策略对读写和批量搜索给出相反结论。现在 `rg` 的每条输出都再经过一次路径策略过滤，截断标记与半行片段也不会再混进结果。
+- 搜索：沙箱开启时，超过输出上限的搜索结果会按“首尾保留”截断，随后又被逐行解析，于是一行 `... <truncated N chars> ...` 和没有 `path:line:` 前缀的片段会作为“匹配”返回；Python 回退的 JSON 信封被截断时更会直接报 `search returned an invalid result`。搜索路径现在按上限多读一条、过滤非匹配行，Python 回退的输出预算按结果数放大。
+- 搜索：Python 回退的 glob 用 `fnmatch`，`*` 会跨越 `/`，Windows 上还大小写不敏感：`find("src/*.py")` 会返回 `src/deep/nested.py`，`find("*.py")` 会匹配 `A.PY`，与 ripgrep 路径结果不一致。现在按 ripgrep 语义翻译 glob（`*` 不跨目录、`**/` 可匹配零层、大小写敏感），格式错误的字符组按字面量处理而不是抛异常。
+- 搜索：`rg` 会读取 `RIPGREP_CONFIG_PATH` 指向的配置文件，其中的选项可以重新纳入被排除的敏感文件或改变 `--no-follow` 等行为；现在两处调用都带 `--no-config`。
+- 文件：`write` 接受 NUL 字节并写成成功，随后 `read` 却以“binary files are not supported by read”拒绝同一个文件；现在 `write` 直接拒绝含 NUL 的内容。
+- 文件：`edit` 以 `errors="strict"` 读取文件，非 UTF-8 文件抛出原始 `UnicodeDecodeError` 而不是工具错误；现在报 `file is not valid UTF-8 text`，且含 NUL 的文件按二进制拒绝。
+- 协议：Chat / Responses 的 `normalize_usage` 只捕获 `TypeError` / `ValueError`，`JSON` 里的非有限数（`Infinity`、`1e400`）会抛 `OverflowError` 穿出 provider 层，交互会话带 traceback 退出；现在按“用量不可用”处理。空的 `usage` 对象也不再被当成“本轮零消耗”而清零已上报的用量。
+- 协议：`Retry-After` 为 `nan` 时 `time.sleep` 抛 `ValueError`，以非 `ProviderError` 逃出请求层；现在非有限值回落到 1 秒。`web_tools` / `vision` 的 429/503 重试把剩余预算睡完后报 `failed after N attempts: None` 的问题也一并修正（上一版只修了预算已耗尽的分支）。
+- 协议：SSE 正文以 UTF-8 BOM 开头时，三套解析器都会把第一个 `data:` 行当成未知字段丢弃；单事件流因此报“empty stream”，多事件流则丢掉首段正文或首个工具调用的 `id` / `name`。现在每个事件行都先去掉 BOM。
+- 协议：非流式 Responses 请求被网关用 SSE 回答时，正文只认最后一个 `response.completed` 的 `output`：`output` 缺失会让已经打印的正文整轮失败，`output: []` 会返回空内容，SSE 里拼好的工具调用则被完全丢弃。现在以已流出的 delta 为准，并从事件里恢复工具调用、`finish_reason` 与 `usage`。
+- 协议：Chat 流式解析在服务器复用 `index` 却给出新 `id` 时，会把两个工具调用合并成一个，`id` / `name` 被覆盖、参数被串接；现在视为新的调用。
+- 协议：Responses 的会话历史条目不是对象、或 `role` 不是字符串时（手改过的 JSONL），载荷构造抛 `AttributeError`；现在跳过这类条目。Chat 侧的同类条目也只在 `role` 是字符串时才发送。
+- 协议：`base_url` 带查询串（Azure OpenAI 的 `api-version`）时，端点拼接把路径加在 `?` 之后；现在路径与查询串分别拼接。非流式响应体的读取也纳入 `timeout_seconds` 的整体截止时间，此前只受单个 socket 读超时约束。
+- Agent / CLI：恢复会话时，若会话记录的 provider 不在当前 `settings.json` 里（典型来源是 `--anthropic-env` 会话），会静默回退到默认 provider，把一套协议的对话历史发给另一套协议；现在直接报错并提示用 `--provider` 或 `--anthropic-env` 指定。
+- CLI：`/compact` 与 `/new` 只捕获部分异常，会话文件写入失败（磁盘满、权限不足）会结束整个 REPL；现在报告错误并继续当前会话。`/new` 失败时保留原会话。
+- Agent：最后一轮恰好是轮次上限、同时 provider 因 `length` / `content_filter` 等原因提前停止时，错误信息只报“Reached max turns”，真正的停止原因被降为后缀，已生成答案的预览也不再打印；现在优先报告 provider 的停止原因。
+- Agent：压缩与 `/summary` 请求的 token 用量完全不计入统计，`--json` 的 `usage` / `session_usage` 和 `[usage]` 行长期少算一整段上下文的消耗；现在计入总量，但不影响主对话的压缩阈值。`[usage]` 行也不再在本轮用量为零时回退显示整个会话的累计值。
+- Agent：`subagent` 并发执行时，`thread.start()` 失败（线程或内存压力）会以 `RuntimeError` 结束整轮，已启动的 worker 其结果无人接收；现在该槽位按工具错误返回，其余调用照常执行。
+- 会话：`--session <id>` 只在当前工作区目录下查找，而 `minimalcode sessions` 会列出所有工作区的会话，于是列出来的 ID 常常“session not found”；现在先查当前工作区，再查整个会话目录。
+- 渲染：一个推理块的全部内容都被 sanitizer 当作未完成的转义序列挂起时，`ThinkingRenderer.finish()` 提前返回而不清空状态，pending 会带进下一块推理，把整块内容吞掉或吃掉首字符；现在每个块结束都重置。孤立的 ESC 后紧跟换行或空格时，兜底逻辑会连同后一个字符一起删除，导致两行粘连；八位 C1 控制序列（`0x9B`、`0x9D` 等）此前只删引导字节、把 `31m`、`0;title` 之类的载荷当正文打印，现在整段消费。
+- Shell：Windows 上 `shutil.which("bash")` 常命中 `C:\Windows\System32\bash.exe`（WSL 启动器），选中后命令实际在 Linux 命名空间里执行，Windows 路径和解释器全部失效；现在探测与显式 `shell.path` 都会识别并跳过它。`pwsh-preview` / `powershell-preview` 也按对应的 shell 类型处理，不再落到 `sh` 语义。
+- 沙箱：`_Capture` 在超时分支可能与读取线程并发写入，快照可能拿到首尾不一致的中间态；现在读写串行化。POSIX 上从非主线程启动子进程时会跳过 `preexec_fn`（子 agent 并发路径），避免 fork 后死锁。
+- 其它：`web_search` 对嵌套列表和对象不设上限，一条结果就能把整个响应塞进上下文；现在每层最多保留 32 项。macOS 剪贴板读取失败（Apple Events 被拒、脚本错误）被当成“没有图片”静默忽略；现在区分“无图片”和“读取失败”。`import-pi` 在供应商已存在且未加 `--overwrite` 时报“no compatible Pi providers found”；现在说明是已导入并提示 `--overwrite`。`localhost.` 与 `0.0.0.0` 未被识别为环回地址，会走环境代理；现在与 `127.0.0.1` 一致。
+
+### 变更
+
+- 版本号升级到 1.3.2。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema，升级不需要改代码。
+- 可观察的行为变化：`grep` / `find` 现在隐藏全部敏感路径（此前开启 ripgrep 时 `.env-prod`、`KEY.PEM`、`Secrets` 会漏出），同时不再受 `RIPGREP_CONFIG_PATH` 影响；`find` / `grep` 的 glob 按 ripgrep 语义匹配，`*` 不再跨目录、Windows 上不再忽略大小写；`write` 拒绝 NUL 字节；恢复会话时若记录的 provider 不在配置里会报错而不是换供应商；Windows 不再自动选用 WSL 的 `bash` 启动器；压缩与总结的用量计入统计。
+
+### 测试
+
+- 新增回归测试：非有限 usage 与非有限 `Retry-After`、BOM 开头的 SSE（三套协议）、Responses 非流式 SSE 的正文与工具调用、复用 `index` 的工具调用、空 usage 不清零、`responses` 输入过滤、带查询串的端点、非流式响应体的截止时间。
+- 新增回归测试：ripgrep 结果经过路径策略过滤（敏感文件与截断标记）、`--no-config`、glob 不跨目录与大小写敏感、`write` 拒绝 NUL、`edit` 报告非 UTF-8、429 重试耗尽预算后的状态码。
+- 新增回归测试：跨工作区的会话 ID 解析、未配置 provider 的会话被拒绝、压缩用量入账、最后一轮提前停止的原因优先级、空工具调用列表的 `null` 内容修复。
+- 新增回归测试：推理块全挂起后重置、孤立 ESC 不吞换行、C1 控制序列、嵌套 web 结果上限、macOS 剪贴板失败、重复导入 `import-pi`、`localhost.` / `0.0.0.0` 的环回判定。
+
 ## 1.3.1 - 2026-10-31
 
 ### 修复

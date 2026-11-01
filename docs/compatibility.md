@@ -1,8 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.3.1. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, and 1.3.1 added
-no further breaking import changes (`minimalcode.httpclient` and
+Applies to MinimalCode 1.3.2. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, and 1.3.2
+added no further breaking import changes (`minimalcode.httpclient` and
 `minimalcode.clipboard` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
@@ -15,6 +15,44 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.3.2 changed
+
+A defect-fix release: no public name, CLI flag, configuration key, JSON field,
+session format, or tool schema was removed, and no import path moved.
+
+Observable behavior changes, all corrections of a wrong result:
+
+- `grep` / `find` hide every sensitive path. With ripgrep installed, the
+  exclusion globs were narrower than the authoritative policy, so `.env-prod`,
+  `KEY.PEM`, and `Secrets` came back from searches that `read` refused.
+  Output lines are now re-checked against `SandboxRunner.is_allowed`, and both
+  engines pass `--no-config` to ripgrep so `RIPGREP_CONFIG_PATH` cannot widen
+  the file set or re-enable following symlinks.
+- Glob matching now follows ripgrep in both engines: `*` does not cross `/`
+  (`find("src/*.py")` no longer returns `src/deep/nested.py`) and matching is
+  case-sensitive on Windows (`A.PY` no longer matches `*.py`).
+- `write` rejects content containing a NUL byte instead of creating a file that
+  `read` classifies as binary.
+- Resuming a session whose recorded provider is not in `settings.json` is an
+  error. It used to fall back to the default provider, sending a history
+  recorded for one wire protocol to another.
+- On Windows the WSL launcher (`C:\Windows\System32\bash.exe`) is no longer
+  selected as the native shell.
+- Compaction and `/summary` requests are counted in `usage` / `session_usage`
+  and in the `[usage]` line.
+
+The remaining fixes only change the outcome of failing cases: non-finite
+`usage` numbers and a non-finite `Retry-After` no longer escape as
+`OverflowError` / `ValueError`, an SSE body starting with a BOM keeps its first
+event, a non-streaming Responses request answered with SSE keeps its text and
+tool calls, a reused tool-call `index` starts a new call, an endpoint with a
+query string keeps it, non-streaming bodies respect `timeout_seconds`, a failed
+session write no longer ends the REPL, `subagent` worker-thread exhaustion is a
+tool error, a session ID from another workspace resolves, an in-flight
+truncated search result cannot masquerade as a match, a fully held reasoning
+block resets its sanitizer, an isolated ESC no longer joins lines, and C1
+control sequences are consumed instead of printed.
 
 ## What 1.3.1 changed
 

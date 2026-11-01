@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.3.1.
+Applies to MinimalCode 1.3.2.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -24,7 +24,7 @@ Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspa
 
 `--session <path>` only accepts files ending in `.jsonl`; any other file is rejected before a message is appended instead of having JSONL written into it. A workspace recorded in a session's `meta` event is used only when the file lives under the sessions directory, so an arbitrary JSONL cannot point every tool outside the workspace.
 
-Usage written to the session may be estimated. When a provider omits the usage object, the agent derives token counts from character width (CJK and emoji count as about one token per character, other text as four characters per token) and marks the summary `(estimated)`; `--json` exposes the same fact as `usage_estimated`.
+Usage written to the session may be estimated. When a provider omits the usage object, the agent derives token counts from character width (CJK and emoji count as about one token per character, other text as four characters per token) and marks the summary `(estimated)`; `--json` exposes the same fact as `usage_estimated`. Compaction and `/summary` requests are counted too, so the totals cover the whole run rather than only the conversation turns.
 
 ## Shell
 
@@ -43,7 +43,11 @@ next one instead of failing every command. The probe costs one shell start
 (roughly 0.2 s for pwsh) per process and is cached per executable. A
 `shell.path` override is probed too and reports the failure instead of silently
 switching shells. When no candidate starts, the `ShellError` raised by
-`minimalcode shell` lists every probe failure.
+`minimalcode shell` lists every probe failure. On Windows, `System32\bash.exe`
+(the WSL launcher) is not accepted as the native bash candidate: it looks like
+bash but runs the command inside a Linux namespace with different paths and
+interpreters. `pwsh-preview` / `powershell-preview` map to their PowerShell
+kind instead of falling back to `sh` semantics.
 
 ## Tools
 
@@ -61,11 +65,20 @@ layer adds policy, timeout, output, and resource controls.
 `grep` and `find` skip ignored directories (`.git`, `node_modules`, `build`,
 `dist`, caches, virtualenvs) in both the `ripgrep` path and the Python fallback.
 The Python fallback uses ripgrep-compatible smart-case matching, runs the regex
-in a timeout-bounded child process, and truncates long result lines. An explicit
-`path` pointing at an ignored directory is still searched. Neither path parses
-`.gitignore`; install `ripgrep` if ignore-file semantics are required. A
-configured `max_results` above a tool's hard cap (2000 for `grep`, 5000 for
-`find`) is clamped to that cap.
+in a timeout-bounded child process, and truncates long result lines. Glob
+matching follows ripgrep in both engines: `*` does not cross `/`, `**/` matches
+zero or more directories, and matching is case-sensitive. Every result path is
+re-checked against the sandbox policy, so a sensitive file cannot appear in
+search output even when the exclusion globs do not cover its spelling, and both
+engines pass `--no-config` to `ripgrep` so `RIPGREP_CONFIG_PATH` cannot widen
+the file set. An explicit `path` pointing at an ignored directory is still
+searched. Neither path parses `.gitignore`; install `ripgrep` if ignore-file
+semantics are required. A configured `max_results` above a tool's hard cap
+(2000 for `grep`, 5000 for `find`) is clamped to that cap.
+
+`read`, `write`, and `edit` operate on UTF-8 text. Content containing a NUL byte
+is treated as binary and rejected by all three, and `edit` reports a non-UTF-8
+file as a tool error instead of a codec exception.
 
 Shell commands stream stdout and stderr through bounded in-memory captures instead
 of unbounded temporary files, so a command that times out while a background
@@ -105,7 +118,9 @@ their resolved symlinks, whether or not the execution layer is enabled. Symlinks
 are resolved before the check, so a link that points outside the workspace is
 refused. Sensitive names are blocked in both
 directions and excluded from bulk searches; `.env.example` and similar templates
-remain readable.
+remain readable. Search results are re-checked against the same policy, so a
+sensitive path cannot appear in `grep` / `find` output even when its spelling
+(such as an upper-case `.PEM` suffix) is not covered by the exclusion globs.
 
 `network_policy`, the command timeout/output caps, and the resource limits only
 apply while the execution layer is enabled:
@@ -249,7 +264,7 @@ back on the next turn. Finished answers do not retain them.
 | `require_api_key` | no | Defaults to true when `api_key_env` is set |
 | `context_window` | no | Model context size, default `128000` |
 | `max_tokens` | no | Anthropic output cap, default `8192`; required by the official API |
-| `timeout_seconds` | no | HTTP read timeout, default `120` |
+| `timeout_seconds` | no | Whole-generation deadline and HTTP read timeout, default `120` |
 | `stream` | no | SSE streaming, default `true` |
 | `include_usage` | no | Send `stream_options`, default `true` (Chat only) |
 | `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
@@ -267,9 +282,13 @@ Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) 
 Requests that fail before a response is received (`ConnectError`, `ConnectTimeout`,
 and `RemoteProtocolError` such as `Server disconnected without sending a
 response.`) are retried 10 times with an exponential backoff from 0.5 s up to
-8 s. A stream that already delivered data is not retried, so a partial answer is
+8 s. `timeout_seconds` bounds the whole generation: streamed lines are checked
+against it, and a non-streaming body is read under the same deadline, so a
+server that trickles a byte at a time cannot hold a request open indefinitely.
+A stream that already delivered data is not retried, so a partial answer is
 never printed twice or billed twice; HTTP 429/503 keeps its single `Retry-After`
-retry. Retry notices go to the tool activity stream, so `--quiet` and `--json`
+retry with the delay clamped to 0.2–5 s (a non-numeric or non-finite header falls
+back to 1 s). Retry notices go to the tool activity stream, so `--quiet` and `--json`
 stay silent.
 
 Proxies: environment and system proxy settings apply to remote `base_url`
