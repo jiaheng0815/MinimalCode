@@ -173,10 +173,72 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(empty["content"], "")
         self.assertEqual(empty["end_line"], 0)
 
+    def test_line_edit_replaces_the_requested_range(self) -> None:
+        self.tools.write("lines.py", "one = 1\ntwo = 2\nthree = 3\n")
+        result = self.tools.edit(
+            "lines.py", start_line=2, end_line=2, new_text="TWO = 20"
+        )
+        self.assertEqual(result["mode"], "lines")
+        self.assertEqual(result["lines_removed"], 1)
+        self.assertEqual(
+            (self.workspace / "lines.py").read_text(encoding="utf-8"),
+            "one = 1\nTWO = 20\nthree = 3\n",
+        )
+
+    def test_line_edit_can_insert_before_a_line(self) -> None:
+        self.tools.write("insert.py", "one = 1\nthree = 3\n")
+        self.tools.edit("insert.py", start_line=2, end_line=1, new_text="two = 2")
+        self.assertEqual(
+            (self.workspace / "insert.py").read_text(encoding="utf-8"),
+            "one = 1\ntwo = 2\nthree = 3\n",
+        )
+
+    def test_line_edit_preserves_crlf_and_patch_line_endings(self) -> None:
+        target = self.workspace / "crlf.py"
+        target.write_bytes(b"one = 1\r\ntwo = 2\r\n")
+        self.tools.edit("crlf.py", start_line=2, end_line=2, new_text="TWO = 2")
+        self.assertEqual(target.read_bytes(), b"one = 1\r\nTWO = 2\r\n")
+
+    def test_line_edit_out_of_range_reports_the_nearest_lines(self) -> None:
+        self.tools.write("short.py", "one = 1\ntwo = 2\n")
+        with self.assertRaises(ToolError) as context:
+            self.tools.edit("short.py", start_line=9, end_line=10, new_text="x = 1")
+        message = str(context.exception)
+        self.assertIn("beyond EOF", message)
+        self.assertIn("closest available range", message)
+        self.assertIn("two = 2", message)
+
+    def test_mixing_line_numbers_with_old_text_is_rejected(self) -> None:
+        self.tools.write("mixed.py", "one = 1\n")
+        with self.assertRaisesRegex(ToolError, "not both"):
+            self.tools.edit(
+                "mixed.py",
+                start_line=1,
+                end_line=1,
+                old_text="one = 1",
+                new_text="two = 2",
+            )
+
+    def test_missing_exact_text_reports_the_closest_region_and_diff(self) -> None:
+        self.tools.write("closest.py", "def target():\n    return 1\n")
+        with self.assertRaises(ToolError) as context:
+            self.tools.edit(
+                "closest.py",
+                old_text="def targt():\n    return 1",
+                new_text="def target():\n    return 2",
+            )
+        message = str(context.exception)
+        self.assertIn("Most similar region", message)
+        self.assertIn("lines 1-2", message)
+        self.assertIn("--- old_text", message)
+        self.assertIn("-def targt():", message)
+        self.assertIn("+def target():", message)
+
     def test_ambiguous_edit_fails(self) -> None:
         self.tools.write("duplicate.txt", "same\nsame\n")
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as context:
             self.tools.edit("duplicate.txt", "same", "other")
+        self.assertIn("first at lines 1, 2", str(context.exception))
         result = self.tools.edit("duplicate.txt", "same", "other", replace_all=True)
         self.assertEqual(result["replacements"], 2)
 

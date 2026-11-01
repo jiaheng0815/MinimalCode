@@ -79,22 +79,44 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "edit",
-            "description": "Replace exact text in a file. Fails if the match is ambiguous.",
+            "description": (
+                "Replace a line range with a patch block. Read the target lines "
+                "first, then pass start_line/end_line and new_text; use the "
+                "exact old_text fallback only when line numbers are unreliable. "
+                "end_line = start_line - 1 inserts before start_line."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path"},
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "First line to replace (from a fresh read)",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Last line to replace; start_line - 1 inserts instead"
+                        ),
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement patch block",
+                    },
                     "old_text": {
                         "type": "string",
-                        "description": "Exact text to replace",
+                        "description": (
+                            "Exact-text fallback; do not pass with line numbers"
+                        ),
                     },
-                    "new_text": {"type": "string", "description": "Replacement text"},
                     "replace_all": {
                         "type": "boolean",
-                        "description": "Replace every exact match instead of requiring one",
+                        "description": "Exact-text fallback only: replace every match",
                     },
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path", "new_text"],
                 "additionalProperties": False,
             },
         },

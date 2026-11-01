@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import tempfile
@@ -16,6 +17,14 @@ from .search import _MAX_READ_LINE_CHARS, drain_physical_line
 # ``os.umask`` is process-global; serialize the read-and-restore window so a
 # concurrently created directory cannot inherit a zero umask.
 _UMASK_LOCK = threading.Lock()
+
+# Failure feedback has to stay useful without turning a retry into another
+# large prompt: a closest-match diff is capped at this many lines.
+_MAX_DIAGNOSTIC_DIFF_LINES = 40
+# Scoring every possible window is quadratic on a large file. Exact line hits
+# are always scored; the remaining evenly spaced windows keep a typo-only match
+# bounded on multi-megabyte inputs.
+_MAX_SIMILARITY_WINDOWS = 4000
 
 # Reported only when the requested range really is not valid UTF-8, so a plain
 # read stays silent about encoding.
@@ -34,6 +43,135 @@ class _TextScan:
     end: int
     last_line: int
     truncated: bool
+
+
+def _detect_newline(text: str) -> str:
+    """Return the file's dominant physical line ending."""
+    if "\r\n" in text:
+        return "\r\n"
+    if "\r" in text and "\n" not in text:
+        return "\r"
+    return "\n"
+
+
+def _line_ending_name(newline: str) -> str:
+    return {"\r\n": "CRLF", "\r": "CR", "\n": "LF"}.get(newline, "LF")
+
+
+def _normalize_newlines(text: str, newline: str) -> str:
+    """Rewrite every physical line ending to ``newline``."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\n", newline)
+
+
+def _line_number_at(text: str, offset: int) -> int:
+    return len(re.findall(r"\r\n|\r|\n", text[:offset])) + 1
+
+
+def _clip_diagnostic(lines: list[str]) -> str:
+    """Join a diff without letting a wrong-file match flood the next request."""
+    if len(lines) > _MAX_DIAGNOSTIC_DIFF_LINES:
+        head = _MAX_DIAGNOSTIC_DIFF_LINES - 4
+        tail = 3
+        omitted = len(lines) - head - tail
+        lines = [
+            *lines[:head],
+            f"... ({omitted} diff lines omitted) ...",
+            *lines[-tail:],
+        ]
+    return "\n".join(lines)
+
+
+def _closest_fragment(original: str, needle: str) -> tuple[int, int, float, str] | None:
+    """Locate the region most similar to ``needle`` and render its diff.
+
+    Returns ``(start_line, end_line, similarity, diff)`` with 1-based inclusive
+    line numbers. ``difflib`` is only used after an exact match already failed,
+    and the candidate count is bounded so this stays a repair aid rather than a
+    second full-file scan.
+    """
+    needle_lines = _normalize_newlines(needle, "\n").splitlines()
+    if not needle_lines:
+        return None
+    file_lines = _normalize_newlines(original, "\n").splitlines()
+    if not file_lines:
+        return None
+    count = len(needle_lines)
+    last_start = max(0, len(file_lines) - count)
+    starts: set[int] = set()
+    positions: dict[str, list[int]] = {}
+    for index, line in enumerate(file_lines):
+        positions.setdefault(line, []).append(index)
+    for offset, line in enumerate(needle_lines):
+        for index in positions.get(line, ())[:50]:
+            starts.add(min(max(0, index - offset), last_start))
+    step = max(1, len(file_lines) // _MAX_SIMILARITY_WINDOWS)
+    for index in range(0, last_start + 1, step):
+        starts.add(index)
+    best_start = 0
+    best_ratio = -1.0
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    for start in sorted(starts):
+        window = file_lines[start : start + count]
+        if not window:
+            continue
+        matcher.set_seqs(needle_lines, window)
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_start = start
+    context_start = max(0, best_start - 1)
+    context_end = min(len(file_lines), best_start + count + 1)
+    actual = file_lines[context_start:context_end]
+    diff = list(
+        difflib.unified_diff(
+            needle_lines,
+            actual,
+            fromfile="old_text",
+            tofile=f"file lines {context_start + 1}-{context_end}",
+            n=0,
+            lineterm="",
+        )
+    )
+    if not diff:
+        # Identical line content can still reach here when the caller included
+        # a trailing empty line that splitlines() dropped. Show real context so
+        # the retry is not blind.
+        diff = [f"{context_start + 1}: {line}" for line in actual]
+    return (
+        best_start + 1,
+        min(len(file_lines), best_start + count),
+        max(0.0, best_ratio),
+        _clip_diagnostic(diff),
+    )
+
+
+def _not_found_message(target: Path, original: str, old_text: str) -> str:
+    message = f"old_text was not found in {target}."
+    fragment = _closest_fragment(original, old_text)
+    if fragment is None:
+        return message + " The file has no text to compare against."
+    start, end, ratio, diff = fragment
+    return (
+        f"{message}\nMost similar region: lines {start}-{end} "
+        f"({ratio:.0%} similar):\n{diff}"
+    )
+
+
+def _range_hint(lines: list[str], start: int, end: int) -> str:
+    """Describe the valid line range nearest to an out-of-bounds request."""
+    total = len(lines)
+    if total == 0:
+        return "the file is empty; write or append content instead"
+    nearest_start = min(max(1, start), total)
+    nearest_end = min(max(nearest_start, end), total)
+    preview = "".join(
+        f"{number:>6}\t{lines[number - 1]}"
+        for number in range(nearest_start, nearest_end + 1)
+    )
+    if preview and not preview.endswith(("\n", "\r")):
+        preview += "\n"
+    return f"closest available range is lines {nearest_start}-{nearest_end}:\n{preview}"
 
 
 class FileToolsMixin:
@@ -321,26 +459,12 @@ class FileToolsMixin:
             "created": not existed,
         }
 
-    def edit(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        replace_all: bool = False,
-    ) -> dict[str, Any]:
-        """Replace exact text while preserving each region's line endings."""
-        if not isinstance(old_text, str) or not old_text:
-            raise ToolError("old_text must be a non-empty string")
-        if not isinstance(new_text, str):
-            raise ToolError("new_text must be a string")
-        if not isinstance(replace_all, bool):
-            raise ToolError("replace_all must be a boolean")
-        target = self._path(path, operation="write")
+    def _read_for_edit(self, target: Path) -> tuple[str, str]:
+        """Read an editable UTF-8 file and its dominant line ending."""
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
         if target.stat().st_size > self.max_file_bytes:
             raise ToolError("file is too large for edit")
-
         with target.open("r", encoding="utf-8", errors="strict", newline="") as handle:
             try:
                 original = handle.read()
@@ -350,62 +474,154 @@ class FileToolsMixin:
                 ) from exc
         if "\x00" in original:
             raise ToolError("binary files are not supported by edit")
-        if "\r\n" in original:
-            default_newline = "\r\n"
-        elif "\r" in original and "\n" not in original:
-            default_newline = "\r"
-        else:
-            default_newline = "\n"
+        return original, _detect_newline(original)
 
-        # Normalize the search text's newlines, then match any physical ending
-        # in the file. This lets an LF snippet edit a CRLF file.
-        needle = old_text.replace("\r\n", "\n").replace("\r", "\n")
-        pattern = re.compile(
-            r"(?:\r\n|\r|\n)".join(re.escape(part) for part in needle.split("\n"))
-        )
-        # Do not materialize every match: a one-character needle in a
-        # multi-megabyte file would allocate millions of match objects even
-        # when only the first occurrence is replaced.
-        first = pattern.search(original)
-        if first is None:
-            raise ToolError("old_text was not found")
-        second = pattern.search(original, first.end())
-        if second is not None and not replace_all:
-            raise ToolError(
-                "old_text occurs more than once; make it unique or set replace_all"
-            )
+    def edit(
+        self,
+        path: str,
+        old_text: str | None = None,
+        new_text: str | None = None,
+        replace_all: bool = False,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        """Replace a line range with a patch block, or fall back to exact text.
 
-        # Replace only the matched spans so untouched lines keep their own endings.
-        normalized_new = new_text.replace("\r\n", "\n").replace("\r", "\n")
+        Line mode (``start_line``/``end_line`` plus ``new_text``) is the primary
+        interface: it cannot silently match a second occurrence elsewhere in
+        the file. Exact ``old_text`` remains available for files whose line
+        numbers are not meaningful, and its failure now carries the closest
+        region and a diff instead of a bare ``not found``.
+        """
+        if not isinstance(new_text, str):
+            raise ToolError("new_text must be a string")
+        if not isinstance(replace_all, bool):
+            raise ToolError("replace_all must be a boolean")
+        for name, value in (("start_line", start_line), ("end_line", end_line)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ToolError(f"{name} must be an integer or null")
+        target = self._path(path, operation="write")
+        original, default_newline = self._read_for_edit(target)
 
-        def replacement_for(span: str) -> str:
-            if "\r\n" in span:
-                span_newline = "\r\n"
-            elif "\r" in span:
-                span_newline = "\r"
-            elif "\n" in span:
-                span_newline = "\n"
-            else:
-                span_newline = default_newline
-            return normalized_new.replace("\n", span_newline)
-
-        if replace_all:
-            pieces: list[str] = []
-            last = 0
-            count = 0
-            for count, match in enumerate(pattern.finditer(original), start=1):
-                pieces.append(original[last : match.start()])
-                pieces.append(replacement_for(match.group(0)))
-                last = match.end()
-            pieces.append(original[last:])
-            updated = "".join(pieces)
-        else:
+        line_mode = start_line is not None or end_line is not None
+        if line_mode:
+            if old_text is not None:
+                raise ToolError(
+                    "provide either start_line/end_line or old_text, not both"
+                )
+            if replace_all:
+                raise ToolError("replace_all only applies to exact-text edits")
+            if start_line is None:
+                raise ToolError("start_line is required when end_line is set")
+            if end_line is None:
+                raise ToolError("end_line is required when start_line is set")
+            lines = original.splitlines(keepends=True)
+            # ``end_line == start_line - 1`` is an empty range: insert before
+            # start_line. This gives the model a safe way to add a line without
+            # guessing adjacent text.
+            if end_line < start_line - 1:
+                raise ToolError(
+                    f"end_line {end_line} must be at least start_line - 1 "
+                    f"({start_line - 1})"
+                )
+            if start_line < 1:
+                raise ToolError("start_line must be at least 1")
+            if start_line > len(lines) + 1:
+                raise ToolError(
+                    f"start_line {start_line} is beyond EOF: file has "
+                    f"{len(lines)} lines; {_range_hint(lines, start_line, end_line)}"
+                )
+            if end_line > len(lines):
+                raise ToolError(
+                    f"end_line {end_line} is beyond EOF: file has {len(lines)} "
+                    f"lines; {_range_hint(lines, start_line, end_line)}"
+                )
+            start_index = start_line - 1
+            end_index = end_line
+            span = "".join(lines[start_index:end_index])
+            span_newline = _detect_newline(span) if span else default_newline
+            replacement = _normalize_newlines(new_text, span_newline)
+            if replacement:
+                region_has_terminator = span.endswith(("\r", "\n"))
+                following_exists = end_index < len(lines)
+                if (
+                    region_has_terminator or following_exists
+                ) and not replacement.endswith(("\r", "\n")):
+                    # A patch block is line-oriented. Without this, replacing
+                    # line 7 of a 20-line file would glue line 8 onto it.
+                    replacement += span_newline
             updated = (
-                original[: first.start()]
-                + replacement_for(first.group(0))
-                + original[first.end() :]
+                "".join(lines[:start_index]) + replacement + "".join(lines[end_index:])
             )
-            count = 1
+            lines_removed = end_index - start_index
+            lines_added = len(replacement.splitlines())
+        else:
+            if not isinstance(old_text, str) or not old_text:
+                raise ToolError(
+                    "old_text must be a non-empty string when start_line/end_line "
+                    "are omitted"
+                )
+            # Normalize the search text's newlines, then match any physical
+            # ending in the file. This lets an LF snippet edit a CRLF file.
+            needle = old_text.replace("\r\n", "\n").replace("\r", "\n")
+            pattern = re.compile(
+                r"(?:\r\n|\r|\n)".join(re.escape(part) for part in needle.split("\n"))
+            )
+            # Do not materialize every match: a one-character needle in a
+            # multi-megabyte file would allocate millions of match objects even
+            # when only the first occurrence is replaced.
+            first = pattern.search(original)
+            if first is None:
+                raise ToolError(_not_found_message(target, original, old_text))
+            second = pattern.search(original, first.end())
+            if second is not None and not replace_all:
+                locations = [
+                    _line_number_at(original, match.start())
+                    for match in (first, second, pattern.search(original, second.end()))
+                    if match is not None
+                ]
+                raise ToolError(
+                    f"old_text occurs more than once (first at lines "
+                    f"{', '.join(str(line) for line in locations)}); make it "
+                    "unique, use start_line/end_line, or set replace_all"
+                )
+
+            # Replace only the matched spans so untouched lines keep their own
+            # endings.
+            normalized_new = _normalize_newlines(new_text, "\n")
+
+            def replacement_for(span: str) -> str:
+                if "\r\n" in span:
+                    span_newline = "\r\n"
+                elif "\r" in span:
+                    span_newline = "\r"
+                elif "\n" in span:
+                    span_newline = "\n"
+                else:
+                    span_newline = default_newline
+                return normalized_new.replace("\n", span_newline)
+
+            if replace_all:
+                pieces: list[str] = []
+                last = 0
+                count = 0
+                for count, match in enumerate(pattern.finditer(original), start=1):
+                    pieces.append(original[last : match.start()])
+                    pieces.append(replacement_for(match.group(0)))
+                    last = match.end()
+                pieces.append(original[last:])
+                updated = "".join(pieces)
+            else:
+                updated = (
+                    original[: first.start()]
+                    + replacement_for(first.group(0))
+                    + original[first.end() :]
+                )
+                count = 1
+            lines_removed = len(first.group(0).splitlines())
+            lines_added = len(new_text.splitlines())
         try:
             encoded = updated.encode("utf-8")
         except UnicodeEncodeError as exc:
@@ -416,8 +632,18 @@ class FileToolsMixin:
                 f"tools.max_file_bytes ({self.max_file_bytes})"
             )
         self._write_atomic(target, updated, mode=target.stat().st_mode & 0o777)
-        return {
+        result: dict[str, Any] = {
             "status": "success",
             "path": str(target),
-            "replacements": count if replace_all else 1,
+            "mode": "lines" if line_mode else "exact",
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
+            "bytes": len(encoded),
+            "line_ending": _line_ending_name(default_newline),
         }
+        if line_mode:
+            result["start_line"] = start_line
+            result["end_line"] = end_line
+        else:
+            result["replacements"] = count if replace_all else 1
+        return result
