@@ -158,8 +158,14 @@ apply while the execution layer is enabled:
   `sandbox-exec`, `docker`) remove network access. The `local` baseline has no
   network namespace, so it rejects commands that look like network clients
   (`curl`, `wget`, `ssh`, `git clone`, `pip install`, package managers, ...).
+  Nested `sh -c` / `pwsh -Command` strings are inspected with their separators
+  intact, PowerShell `-EncodedCommand` payloads are decoded (an undecodable one
+  fails closed), and `cmd` caret escapes are folded before inspection.
 - `allowlist`: named hosts are checked against `allowed_hosts`; commands whose
   target host cannot be determined are refused. At least one host is required.
+  `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
+  `--socks5*`, `-x`) contribute their targets, so an allowed URL cannot be
+  redirected to another host.
 - `allow`: no network restriction.
 
 Backends are probed at execution time, which only happens when the layer is
@@ -174,8 +180,10 @@ with the rest of the filesystem read-only. `firejail` adds a private temp
 directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies
 network traffic for `deny`. `docker` runs `sh -lc` in the configured image with
 the workspace mounted and no host environment; it refuses argv-based search
-children, so `grep`/`find` fall back to the in-process Python scanner. The
-`docker` backend is POSIX-host only (Docker Desktop cannot consume the
+children, so `grep`/`find` use the Python scanner: in-process with a deadline
+alarm on the main thread, or a trusted host child interpreter when that guard is
+unavailable (a worker thread or Windows). The `docker` backend is POSIX-host
+only (Docker Desktop cannot consume the
 `C:\ws:C:\ws` mount this backend builds) and runs the container as the invoking
 `uid:gid`, so workspace files do not end up owned by root.
 
