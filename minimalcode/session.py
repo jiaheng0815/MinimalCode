@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -13,6 +14,11 @@ from typing import Any
 
 from . import __version__
 from .config import Settings
+
+# A compact event carries the whole replacement history, so appending one to a
+# file that already holds that history doubles the file. Past this size the
+# rewrite pays for itself; below it the append-only file is left alone.
+_PRUNE_MIN_BYTES = 64 * 1024
 
 
 def _utc_now() -> str:
@@ -88,19 +94,102 @@ class Session:
     ) -> None:
         previous = self.messages
         self.messages = list(messages)
+        state = {
+            "type": "compact",
+            "summary": summary,
+            "dropped_messages": dropped_messages,
+            "messages": self.messages,
+            "at": _utc_now(),
+        }
+        size_before = self._size()
         try:
-            self.append_event(
-                {
-                    "type": "compact",
-                    "summary": summary,
-                    "dropped_messages": dropped_messages,
-                    "messages": self.messages,
-                    "at": _utc_now(),
-                }
-            )
+            # The append is what makes the new state durable; the rewrite below
+            # only reclaims the history this event just superseded.
+            self.append_event(state)
         except (OSError, TypeError, ValueError):
             self.messages = previous
             raise
+        self._prune_bloat(state, size_before=size_before)
+
+    def _size(self) -> int | None:
+        if self.path is None:
+            return None
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return None
+
+    def _prune_bloat(self, state: dict[str, Any], *, size_before: int | None) -> bool:
+        """Rewrite the file to ``meta + state`` when appending duplicated it.
+
+        A compact event carries the whole replacement history, so a session that
+        compacts twice stores the same messages twice and `--continue` replays
+        all of it. The rewrite is atomic (temp file, fsync, ``os.replace``), so
+        a crash leaves the append-only file untouched, and it is skipped unless
+        the file is clearly larger than the state it would keep. The size delta
+        also acts as a weak concurrency check: if another process appended
+        between the write and the stat, the file is left alone.
+        """
+        if self.path is None or size_before is None:
+            return False
+        state_bytes = len((_compact_json(state) + "\n").encode("utf-8"))
+        size_after = self._size()
+        if size_after is None:
+            return False
+        if size_after - size_before != state_bytes:
+            return False
+        if size_after < _PRUNE_MIN_BYTES or size_after < 2 * state_bytes:
+            return False
+        header = self._header_line()
+        if header is None:
+            # `SessionStore.latest` identifies a session by its first line, so a
+            # file without a meta header keeps its original shape.
+            return False
+        return self._rewrite(header + _compact_json(state) + "\n")
+
+    def _header_line(self) -> str | None:
+        """Return the session's meta line, or None when it has none."""
+        if self.path is None:
+            return None
+        try:
+            with self.path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+                line = handle.readline()
+        except OSError:
+            return None
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(event, dict) or event.get("type") != "meta":
+            return None
+        return line if line.endswith("\n") else line + "\n"
+
+    def _rewrite(self, text: str) -> bool:
+        """Atomically replace the session file with ``text``."""
+        if self.path is None:
+            return False
+        try:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.", dir=self.path.parent
+            )
+        except OSError:
+            return False
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(temp_path, 0o600)
+            except OSError:
+                pass
+            os.replace(temp_path, self.path)
+        except OSError:
+            return False
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return True
 
     def append_usage(self, usage: dict[str, int]) -> None:
         """Record token usage without aborting the turn when the write fails.

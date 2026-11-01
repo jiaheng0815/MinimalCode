@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from minimalcode.config import load_settings
+from minimalcode.config import ConfigError, load_settings
 from minimalcode.shell import detect_shell
 from minimalcode.tools import ToolError, ToolRuntime
 from minimalcode.tools.search import inline_python_grep, run_python_grep
@@ -110,6 +110,53 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(
             (self.workspace / "small.txt").read_text(encoding="utf-8"), "x"
         )
+
+    def test_read_reports_non_utf8_instead_of_silently_replacing(self) -> None:
+        # A GBK file decoded with errors="replace" looked like a clean read of
+        # U+FFFD characters, and only `edit` later refused the same file.
+        target = self.workspace / "gbk.txt"
+        target.write_bytes("中文\n".encode("gbk"))
+        result = self.tools.read("gbk.txt")
+        self.assertIn("warnings", result)
+        self.assertIn("\ufffd", result["content"])
+        with self.assertRaisesRegex(ToolError, "not valid UTF-8"):
+            self.tools.edit("gbk.txt", "\ufffd", "x")
+
+    def test_read_strips_a_utf8_bom_without_a_warning(self) -> None:
+        (self.workspace / "bom.txt").write_bytes(b"\xef\xbb\xbffirst\nsecond\n")
+        result = self.tools.read("bom.txt")
+        self.assertNotIn("\ufeff", result["content"])
+        self.assertIn("first", result["content"])
+        self.assertNotIn("warnings", result)
+
+    def test_read_only_and_allowlist_gate_dispatch(self) -> None:
+        self.settings.data["tools"]["allow"] = ["read", "grep"]
+        restricted = ToolRuntime(self.settings, self.workspace, detect_shell())
+        self.assertEqual(restricted.allowed_tools, frozenset({"read", "grep"}))
+        with self.assertRaisesRegex(ToolError, "disabled by tools.allow"):
+            restricted.dispatch("write", {"path": "x.txt", "content": "x"})
+        self.tools.write("readable.txt", "content\n")
+        read = restricted.dispatch("read", {"path": "readable.txt"})
+        self.assertIn("content", read["content"])
+
+        read_only = ToolRuntime(
+            self.settings, self.workspace, detect_shell(), read_only=True
+        )
+        self.assertEqual(read_only.allowed_tools, frozenset({"read", "grep"}))
+        with self.assertRaisesRegex(ToolError, "disabled by --read-only"):
+            read_only.dispatch("shell", {"command": "echo hi"})
+        self.assertFalse((self.workspace / "x.txt").exists())
+
+    def test_unknown_tool_in_allowlist_is_a_config_error(self) -> None:
+        self.settings.data["tools"]["allow"] = ["raed"]
+        with self.assertRaisesRegex(ConfigError, "unknown tools: raed"):
+            ToolRuntime(self.settings, self.workspace, detect_shell())
+
+    def test_read_only_with_an_unusable_allowlist_is_a_config_error(self) -> None:
+        # Every name is allowed, but none of them survive --read-only.
+        self.settings.data["tools"]["allow"] = ["write"]
+        with self.assertRaisesRegex(ConfigError, "no tools are enabled"):
+            ToolRuntime(self.settings, self.workspace, detect_shell(), read_only=True)
 
     def test_read_start_beyond_eof_is_reported(self) -> None:
         self.tools.write("short.txt", "one\ntwo\n")

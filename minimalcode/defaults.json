@@ -12,10 +12,12 @@
     "max_output_chars": 60000
   },
   "tools": {
+    "allow": null,
     "allow_outside_workspace": false,
     "max_file_chars": 160000,
     "max_file_bytes": 5000000,
-    "max_results": 200
+    "max_results": 200,
+    "max_parallel": 4
   },
   "sandbox": {
     "enabled": false,

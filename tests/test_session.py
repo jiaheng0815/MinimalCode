@@ -59,6 +59,66 @@ class SessionTests(unittest.TestCase):
             self.assertIsNone(session.path)
             self.assertEqual(len(session.messages), 1)
 
+    def test_compaction_rewrites_a_bloated_session_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            filler = "x" * 40_000
+            for index in range(6):
+                session.append_message({"role": "user", "content": f"{filler}{index}"})
+            size_before = session.path.stat().st_size
+
+            session.replace_messages(
+                [{"role": "user", "content": filler}],
+                summary="everything so far",
+                dropped_messages=6,
+            )
+
+            size_after = session.path.stat().st_size
+            # The compact event carries the whole replacement history, so
+            # appending it to a file that already holds that history doubles
+            # the file and `--continue` replays both copies.
+            self.assertLess(size_after, size_before / 2)
+            loaded = store.load(session.path)
+            self.assertEqual(loaded.session_id, session.session_id)
+            self.assertEqual(loaded.messages, [{"role": "user", "content": filler}])
+            latest = store.latest(workspace)
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest.session_id, session.session_id)
+
+    def test_small_session_compaction_stays_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            session.append_message({"role": "user", "content": "first"})
+            session.append_message({"role": "assistant", "content": "second"})
+            session.replace_messages(
+                [{"role": "user", "content": "summary"}],
+                summary="summary",
+                dropped_messages=2,
+            )
+            lines = session.path.read_text(encoding="utf-8").splitlines()
+        # meta, two messages, compact: below the rewrite threshold the file
+        # keeps its append-only shape.
+        self.assertEqual(
+            [json.loads(line)["type"] for line in lines],
+            [
+                "meta",
+                "message",
+                "message",
+                "compact",
+            ],
+        )
+
     def test_latest_uses_modification_time_not_filename(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -72,6 +72,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-turns", type=int)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help=(
+            "Keep the read-only tools (read, grep, find, read_image, web_search, "
+            "web_fetch) and refuse every tool that can change the workspace"
+        ),
+    )
     parser.add_argument("--cwd", help="Workspace directory")
     parser.add_argument("--home", help="Config directory (default ~/.MinimalCode)")
     parser.add_argument(
@@ -484,6 +492,7 @@ def _print_banner(
     session: Session,
     *,
     vision_enabled: bool = False,
+    read_only: bool = False,
 ) -> None:
     print(
         sanitize_terminal_text(
@@ -494,6 +503,8 @@ def _print_banner(
     print(f"cwd: {sanitize_terminal_text(str(cwd))}")
     if session.path:
         print(f"session: {sanitize_terminal_text(str(session.path))}")
+    if read_only:
+        print("read-only: write, edit, shell, and subagent are disabled")
     print("Type /help for commands. End a line with \\ to continue, or paste text.")
     if vision_enabled:
         print(f"Paste an image with {_paste_shortcut()}, then press Enter.")
@@ -666,6 +677,7 @@ def _switch_runtime(
             provider_name=name,
             model=resolved_model,
             thinking=provider.thinking,
+            read_only=getattr(agent.tools, "read_only", False),
         )
         old_provider = agent.provider
         old_tools = agent.tools
@@ -1019,6 +1031,7 @@ def _interactive(
         agent.session.cwd,
         agent.session,
         vision_enabled=_vision_enabled(agent),
+        read_only=getattr(agent.tools, "read_only", False),
     )
     with _bracketed_paste():
         return _chat_loop(agent, args, settings, store)
@@ -1083,6 +1096,7 @@ def _chat_loop(
                         provider_name=agent.provider.name,
                         model=agent.provider.model,
                         thinking=agent.provider.thinking,
+                        read_only=getattr(agent.tools, "read_only", False),
                     ),
                 )
             except (MinimalCodeError, OSError, ValueError) as exc:
@@ -1292,6 +1306,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             provider_name=provider_name,
             model=model,
             thinking=provider.thinking,
+            read_only=args.read_only,
         )
         agent = Agent(
             settings=settings,

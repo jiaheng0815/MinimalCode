@@ -887,6 +887,78 @@ class AnthropicProviderTests(unittest.TestCase):
         for message in seen["messages"]:
             self.assertNotIn("provider_content", message)
 
+    def test_prompt_cache_marks_one_breakpoint_on_the_static_prefix(self) -> None:
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "inspect"},
+        ]
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "read", "parameters": {"type": "object"}},
+            },
+            {
+                "type": "function",
+                "function": {"name": "write", "parameters": {"type": "object"}},
+            },
+        ]
+
+        plain = _anthropic_provider(handler)
+        try:
+            plain.stream_chat(messages, tools=tools)
+        finally:
+            plain.close()
+        body = seen["body"]
+        self.assertEqual(body["system"], "system prompt")
+        self.assertNotIn("cache_control", body["tools"][0])
+        self.assertNotIn("cache_control", body["tools"][-1])
+
+        provider = _anthropic_provider(handler, prompt_cache=True)
+        try:
+            provider.stream_chat(messages, tools=tools)
+        finally:
+            provider.close()
+        cached = seen["body"]
+        # The breakpoint belongs on the last tool: Anthropic caches everything
+        # before it, which is the system text plus the tool list. A second
+        # breakpoint on the system block would write the same bytes twice.
+        self.assertEqual(cached["system"], "system prompt")
+        self.assertNotIn("cache_control", cached["tools"][0])
+        self.assertEqual(cached["tools"][-1]["cache_control"], {"type": "ephemeral"})
+
+        provider = _anthropic_provider(handler, prompt_cache=True)
+        try:
+            provider.stream_chat(messages)
+        finally:
+            provider.close()
+        # Without tools the system block is the whole static prefix.
+        self.assertEqual(
+            seen["body"]["system"],
+            [
+                {
+                    "type": "text",
+                    "text": "system prompt",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

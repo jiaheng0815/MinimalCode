@@ -20,6 +20,7 @@ from .provider import OpenAICompatibleProvider, ProviderError, ToolCall
 from .session import Session
 from .shell import ShellSpec
 from .tools import ToolError, ToolRuntime, available_tool_schemas, tool_result_text
+from .tools.schemas import READ_ONLY_TOOLS
 
 
 def _is_wide_character(char: str) -> bool:
@@ -331,7 +332,10 @@ class Agent:
         self.session = session
         self.tools = tool_runtime
         self.tool_schemas = available_tool_schemas(
-            self.tools.web_client, self.tools.vision_client, self.tools.subagent_enabled
+            self.tools.web_client,
+            self.tools.vision_client,
+            self.tools.subagent_enabled,
+            allowed=self._allowed_tools(),
         )
         self.shell = shell
         configured_turns = (
@@ -552,72 +556,92 @@ class Agent:
         self._activity(self.tools.activity(name, arguments))
         return self._run_tool(name, arguments)
 
+    def _allowed_tools(
+        self, tool_runtime: ToolRuntime | None = None
+    ) -> frozenset[str] | None:
+        """Return the tool names the runtime accepts, or None when unrestricted."""
+        allowed = getattr(tool_runtime or self.tools, "allowed_tools", None)
+        return allowed if isinstance(allowed, frozenset) else None
+
     def _execute_tool_calls(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
-        """Run one turn's tool calls, overlapping adjacent subagent calls.
+        """Run one turn's tool calls, overlapping adjacent independent calls.
 
         A subagent is a separate process that shares no in-memory state with
-        the parent, so a run of adjacent ``subagent`` calls can execute at the
-        same time. Every other tool keeps request order: a ``write`` followed
-        by a command that reads the file depends on the earlier call finishing,
-        so a subagent group never overlaps a neighbouring tool.
+        the parent, and the read-only tools cannot change the workspace, so a
+        run of adjacent calls from either set executes at the same time and
+        still reports results in request order. Everything else keeps strict
+        order: a ``write`` followed by a command that reads the file depends on
+        the earlier call finishing, so an independent group never overlaps a
+        neighbouring tool. Mixing a read with a write would also let the read
+        observe a half-written file.
         """
         results: list[dict[str, Any]] = []
         index = 0
         while index < len(calls):
             name = calls[index].name
-            if name != "subagent":
+            end = index + 1
+            limit = 1
+            if name == "subagent":
+                while end < len(calls) and calls[end].name == "subagent":
+                    end += 1
+                limit = self.tools.subagent_max_parallel
+            elif name in READ_ONLY_TOOLS:
+                while end < len(calls) and calls[end].name in READ_ONLY_TOOLS:
+                    end += 1
+                limit = self.tools.max_parallel
+            if limit <= 1 or end - index == 1:
                 results.append(self._execute_tool(name, calls[index].arguments))
-                index += 1
-                continue
-            end = index
-            while end < len(calls) and calls[end].name == "subagent":
-                end += 1
-            results.extend(self._execute_subagents(calls[index:end]))
+            else:
+                results.extend(self._execute_group(calls[index:end], limit))
             index = end
         return results
 
-    def _execute_subagents(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
-        """Run one run of adjacent subagent calls concurrently, in call order."""
+    def _execute_group(self, calls: list[ToolCall], limit: int) -> list[dict[str, Any]]:
+        """Run one independent group concurrently, in call order.
+
+        Activity lines are still written from this thread before the workers
+        start, so the terminal shows requests in the order the model made them.
+        """
         # Every slot gets an answer up front: a worker that dies before writing
         # its result must not turn into a KeyError that aborts the turn.
         outcomes: dict[int, dict[str, Any]] = {
-            index: {"status": "error", "message": "subagent result was not recorded"}
+            index: {"status": "error", "message": "tool result was not recorded"}
             for index in range(len(calls))
         }
-        runnable: list[tuple[int, dict[str, Any]]] = []
+        runnable: list[tuple[int, str, dict[str, Any]]] = []
         for index, call in enumerate(calls):
             try:
                 arguments = self._parse_tool_arguments(call.arguments)
             except ToolError as exc:
                 # A malformed call is answered at once so it cannot block the
-                # valid subagents requested in the same turn.
+                # valid calls requested in the same turn.
                 outcomes[index] = {"status": "error", "message": str(exc)}
                 continue
             self._activity(self.tools.activity(call.name, arguments))
-            runnable.append((index, arguments))
+            runnable.append((index, call.name, arguments))
         if runnable:
             # The semaphore, not the thread count, is the concurrency limit:
             # one thread per call keeps Ctrl-C free to abandon the join below.
-            slots = threading.BoundedSemaphore(self.tools.subagent_max_parallel)
+            slots = threading.BoundedSemaphore(max(1, limit))
             lock = threading.Lock()
 
-            def run(index: int, arguments: dict[str, Any]) -> None:
+            def run(index: int, name: str, arguments: dict[str, Any]) -> None:
                 with slots:
-                    result = self._run_tool("subagent", arguments)
+                    result = self._run_tool(name, arguments)
                 with lock:
                     outcomes[index] = result
 
             threads = [
                 threading.Thread(
                     target=run,
-                    args=(index, arguments),
-                    name=f"subagent-{index}",
+                    args=(index, name, arguments),
+                    name=f"{name}-{index}",
                     daemon=True,
                 )
-                for index, arguments in runnable
+                for index, name, arguments in runnable
             ]
             started: list[threading.Thread] = []
-            for thread, (index, _arguments) in zip(threads, runnable):
+            for thread, (index, _name, _arguments) in zip(threads, runnable):
                 try:
                     thread.start()
                 except RuntimeError as exc:
@@ -625,7 +649,7 @@ class Agent:
                     # without an answer; report it as that call's tool failure.
                     outcomes[index] = {
                         "status": "error",
-                        "message": f"cannot start subagent worker: {exc}",
+                        "message": f"cannot start tool worker: {exc}",
                     }
                     continue
                 started.append(thread)
@@ -963,6 +987,7 @@ class Agent:
             tool_runtime.web_client,
             tool_runtime.vision_client,
             tool_runtime.subagent_enabled,
+            allowed=self._allowed_tools(tool_runtime),
         )
         self.session = session
         self.tools = tool_runtime
@@ -990,6 +1015,7 @@ class Agent:
             tool_runtime.web_client,
             tool_runtime.vision_client,
             tool_runtime.subagent_enabled,
+            allowed=self._allowed_tools(tool_runtime),
         )
         if hasattr(provider, "notify"):
             provider.notify = self._activity
@@ -1026,5 +1052,7 @@ class Agent:
             "context_window": self.provider.context_window,
             "usage": dict(self.total_usage),
             "usage_estimated": self.estimated_turns > 0,
+            "read_only": getattr(self.tools, "read_only", False),
+            "tools": sorted(self._allowed_tools() or ()),
             "sandbox": summary() if callable(summary) else {"enabled": False},
         }

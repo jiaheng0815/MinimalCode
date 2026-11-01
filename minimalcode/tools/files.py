@@ -5,11 +5,30 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..errors import ToolError
 from .search import _MAX_READ_LINE_CHARS, drain_physical_line
+
+# Reported only when the requested range really is not valid UTF-8, so a plain
+# read stays silent about encoding.
+_NOT_UTF8_WARNING = (
+    "this range is not valid UTF-8; undecodable bytes were replaced with U+FFFD "
+    "and edit refuses this file"
+)
+
+
+@dataclass(slots=True)
+class _TextScan:
+    """One pass over the requested line range of a text file."""
+
+    chunks: list[str]
+    start: int | None
+    end: int
+    last_line: int
+    truncated: bool
 
 
 class FileToolsMixin:
@@ -49,15 +68,82 @@ class FileToolsMixin:
         if b"\x00" in sample:
             raise ToolError("binary files are not supported by read")
 
+        line_limit = min(self.max_file_chars + 1, _MAX_READ_LINE_CHARS)
+        warnings: list[str] = []
+        try:
+            scan = self._scan_lines(
+                target,
+                start=start,
+                stop=stop,
+                line_limit=line_limit,
+                errors="strict",
+            )
+        except UnicodeDecodeError:
+            # Decoding with ``replace`` used to hide this: the caller saw a
+            # clean read made of U+FFFD characters, and only ``edit`` later
+            # refused the same file. Read it again lossily so the content is
+            # still visible, and say that the bytes were not UTF-8.
+            scan = self._scan_lines(
+                target,
+                start=start,
+                stop=stop,
+                line_limit=line_limit,
+                errors="replace",
+            )
+            warnings.append(_NOT_UTF8_WARNING)
+
+        if scan.start is None:
+            if start > max(1, scan.last_line):
+                raise ToolError(f"start_line {start} is beyond the end of the file")
+            result: dict[str, Any] = {
+                "status": "success",
+                "path": str(target),
+                "content": "",
+                "start_line": start,
+                "end_line": 0,
+                "truncated": scan.truncated,
+                "eof": True,
+            }
+        else:
+            result = {
+                "status": "success",
+                "path": str(target),
+                "start_line": scan.start,
+                "end_line": scan.end,
+                "content": "".join(scan.chunks),
+                "truncated": scan.truncated,
+            }
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
+    def _scan_lines(
+        self,
+        target: Path,
+        *,
+        start: int,
+        stop: int | None,
+        line_limit: int,
+        errors: str,
+    ) -> _TextScan:
+        """Collect one line range, decoding with the caller's error policy.
+
+        A strict pass is what makes a non-UTF-8 file visible: with
+        ``errors="replace"`` the decode never fails, so the caller could not
+        tell a clean file from one whose bytes were silently substituted.
+        ``utf-8-sig`` also drops a leading BOM instead of showing it as part of
+        line 1.
+        """
         chunks: list[str] = []
         used = 0
-        actual_start = None
+        actual_start: int | None = None
         actual_end = 0
         truncated = False
         last_line = 0
         pending = ""
-        line_limit = min(self.max_file_chars + 1, _MAX_READ_LINE_CHARS)
-        with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        with target.open(
+            "r", encoding="utf-8-sig", errors=errors, newline=""
+        ) as handle:
             number = 0
             while True:
                 line = pending + handle.readline(line_limit)
@@ -108,27 +194,13 @@ class FileToolsMixin:
                 actual_end = number
                 if line_cut:
                     break
-
-        if actual_start is None:
-            if start > max(1, last_line):
-                raise ToolError(f"start_line {start} is beyond the end of the file")
-            return {
-                "status": "success",
-                "path": str(target),
-                "content": "",
-                "start_line": start,
-                "end_line": 0,
-                "truncated": truncated,
-                "eof": True,
-            }
-        return {
-            "status": "success",
-            "path": str(target),
-            "start_line": actual_start,
-            "end_line": actual_end,
-            "content": "".join(chunks),
-            "truncated": truncated,
-        }
+        return _TextScan(
+            chunks=chunks,
+            start=actual_start,
+            end=actual_end,
+            last_line=last_line,
+            truncated=truncated,
+        )
 
     @staticmethod
     def _write_atomic(target: Path, text: str, *, mode: int | None = None) -> None:

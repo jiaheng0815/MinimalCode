@@ -341,6 +341,25 @@ class AnthropicProtocolMixin:
         budget = max(1024, min(budget, self.max_tokens - 1))
         return {"type": "enabled", "budget_tokens": budget}
 
+    def _anthropic_prompt_cache(self) -> bool:
+        """Return True when this provider opts into Anthropic prompt caching.
+
+        The block is opt-in: a gateway that speaks the Messages protocol but
+        rejects ``cache_control`` would otherwise fail every request, and the
+        field is only useful on Claude models that price cache reads lower.
+        """
+        return bool(self.config.get("prompt_cache"))
+
+    @staticmethod
+    def _anthropic_system(
+        system_parts: list[str], *, cache: bool
+    ) -> str | list[dict[str, Any]]:
+        """Join the system prompt, optionally as one cacheable text block."""
+        text = "\n\n".join(system_parts)
+        if not cache:
+            return text
+        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
     def _anthropic_payload(
         self,
         messages: list[dict[str, Any]],
@@ -356,10 +375,20 @@ class AnthropicProtocolMixin:
             "messages": converted,
             "stream": self.stream_enabled,
         }
-        if system_parts:
-            payload["system"] = "\n\n".join(system_parts)
+        cache = self._anthropic_prompt_cache()
         converted_tools = self._anthropic_tools(tools)
+        # One breakpoint covers the whole static prefix. Anthropic caches the
+        # request up to the last marked block, so marking the last tool caches
+        # the tool list and the system text together; with no tools the system
+        # block is the prefix. Marking both would write two cache entries for
+        # the same bytes on every turn.
+        if system_parts:
+            payload["system"] = self._anthropic_system(
+                system_parts, cache=cache and not converted_tools
+            )
         if converted_tools:
+            if cache:
+                converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
             payload["tools"] = converted_tools
         if self.send_reasoning_effort:
             thinking = self._anthropic_thinking()

@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.3.2.
+Applies to MinimalCode 1.4.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -21,6 +21,14 @@ Built-in defaults are data, not Python literals: they live in
 `session.save` controls automatic JSONL session storage. `--no-session` disables it for one invocation.
 
 Sessions are grouped under `~/.MinimalCode/sessions/` by a deterministic workspace key. The JSONL file records messages, usage, and compaction boundaries.
+
+Compaction appends a `compact` event that carries the whole replacement history,
+so appending one to a file that already holds that history stores the same
+messages twice. When the file is at least twice the size of the state being kept
+and at least 64 KiB, it is rewritten atomically (temp file, `fsync`,
+`os.replace`) to `meta` plus that one event; a crash leaves the append-only file
+untouched, and a size mismatch caused by another writer skips the rewrite. Small
+sessions stay append-only.
 
 `--session <path>` only accepts files ending in `.jsonl`; any other file is rejected before a message is appended instead of having JSONL written into it. A workspace recorded in a session's `meta` event is used only when the file lives under the sessions directory, so an arbitrary JSONL cannot point every tool outside the workspace.
 
@@ -53,10 +61,21 @@ kind instead of falling back to `sh` semantics.
 
 | Key | Default | Meaning |
 |---|---:|---|
+| `allow` | `null` | Allowlist of tool names; `null` enables every tool the provider supports |
 | `allow_outside_workspace` | `false` | Allow file tools outside the workspace |
 | `max_file_chars` | `160000` | Maximum characters returned by one `read` call |
 | `max_file_bytes` | `5000000` | Maximum size accepted by `write` and `edit` |
 | `max_results` | `200` | Default `grep`/`find` result limit |
+| `max_parallel` | `4` | Concurrency for adjacent read-only tool calls |
+
+`tools.allow` names are checked against the dispatcher's tool set when the runtime
+is built, and an unknown name is a configuration error rather than a silent
+no-op: intersecting with a typo would otherwise leave the agent with no usable
+tools. `--read-only` intersects the same set with the read-only tools (`read`,
+`grep`, `find`, `read_image`, `web_search`, `web_fetch`), so the flag and the
+file compose in one direction only. Disabled tools are dropped from the request's
+`tools` array and refused by `dispatch`, which also covers a replayed session or
+a provider that ignores the schema list.
 
 The `shell` tool runs through `SandboxRunner`. With the execution layer disabled
 (the default) commands run with the current user's permissions; enabling the
@@ -78,7 +97,17 @@ semantics are required. A configured `max_results` above a tool's hard cap
 
 `read`, `write`, and `edit` operate on UTF-8 text. Content containing a NUL byte
 is treated as binary and rejected by all three, and `edit` reports a non-UTF-8
-file as a tool error instead of a codec exception.
+file as a tool error instead of a codec exception. `read` decodes with a leading
+UTF-8 BOM removed, and scans the requested range strictly first: if the bytes are
+not valid UTF-8 it reads them again with replacement characters and adds a
+`warnings` entry saying so, because `edit` refuses that same file. A valid file
+is decoded once and carries no extra field.
+
+Adjacent read-only calls in one model turn run concurrently, bounded by
+`tools.max_parallel`, and their results are still written back in request order.
+A read-only call next to `write`, `edit`, `shell`, or `subagent` stays on the
+main thread: the write's file replacement could otherwise land between a read's
+path check and its open.
 
 Shell commands stream stdout and stderr through bounded in-memory captures instead
 of unbounded temporary files, so a command that times out while a background
@@ -230,7 +259,7 @@ neighbouring tool call.
 | `keep_messages` | `12` | Minimum recent messages retained after compaction; a cut inside one long tool turn retains fewer so the history still shrinks |
 | `max_instruction_chars` | `60000` | Combined budget for `SYSTEM.md`, global `AGENTS.md`, and project instruction files |
 
-Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading.
+Compaction is lossy in the active context but the original JSONL history remains on disk until a later compaction record supersedes it for loading. A compaction that leaves the file far larger than the state it replaces rewrites the file (see Session).
 
 Instruction files are re-read at the start of every run: global `AGENTS.md`, then `AGENTS.md` / `CLAUDE.md` from the workspace and its parents, with missing files skipped. Within one run the system prompt is built once, so a file a tool rewrites mid-turn takes effect on the next run. `/summary` uses this to persist a session summary into the workspace `AGENTS.md` between its summary markers.
 
@@ -268,6 +297,7 @@ back on the next turn. Finished answers do not retain them.
 | `stream` | no | SSE streaming, default `true` |
 | `include_usage` | no | Send `stream_options`, default `true` (Chat only) |
 | `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
+| `prompt_cache` | no | Anthropic only: mark the static prefix for prompt caching, default `false` |
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
 | `trust_env` | no | Apply environment/system proxies; loopback `base_url` values default to `false` |
@@ -278,6 +308,14 @@ Values containing `${VAR}` placeholders are expanded later, so they are checked
 again when that provider becomes active.
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
+
+`prompt_cache: true` on an `anthropic_messages` provider marks one cache
+breakpoint on the last tool definition, which covers the system prompt and the
+tool list together; without tools the system block is marked instead. One
+breakpoint avoids writing two cache entries for the same bytes on every turn. It
+is opt-in because a gateway that speaks the Messages protocol but rejects
+`cache_control` would fail every request. Cache reads are reported in
+`cached_tokens`, and cached input counts as prompt tokens in the usage totals.
 
 Requests that fail before a response is received (`ConnectError`, `ConnectTimeout`,
 and `RemoteProtocolError` such as `Server disconnected without sending a

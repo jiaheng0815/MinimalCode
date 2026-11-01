@@ -468,6 +468,155 @@ class AgentTests(unittest.TestCase):
         # between the two calls keeps the request order observable.
         self.assertEqual(events, ["subagent:a", "shell:step", "subagent:b"])
 
+    def test_adjacent_read_only_calls_run_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            tools.write("a.txt", "alpha\n")
+            tools.write("b.txt", "beta\n")
+            provider = DelegatingProvider(
+                [
+                    ToolCall(
+                        id="call_a",
+                        name="read",
+                        arguments=json.dumps({"path": "a.txt"}),
+                    ),
+                    ToolCall(
+                        id="call_b",
+                        name="read",
+                        arguments=json.dumps({"path": "b.txt"}),
+                    ),
+                ]
+            )
+            barrier = threading.Barrier(2, timeout=10)
+            plain_read = tools.read
+
+            def fake_read(
+                path: str, start_line: int = 1, end_line: int | None = None
+            ) -> dict[str, object]:
+                # Both reads must be in flight at once; a sequential loop leaves
+                # the first one here until the barrier times out.
+                barrier.wait()
+                return plain_read(path, start_line, end_line)
+
+            tools.read = fake_read
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("read both")
+        self.assertTrue(result.completed)
+        tool_messages = [
+            message for message in session.messages if message["role"] == "tool"
+        ]
+        self.assertEqual(
+            [message["tool_call_id"] for message in tool_messages],
+            ["call_a", "call_b"],
+        )
+        self.assertIn("alpha", tool_messages[0]["content"])
+        self.assertIn("beta", tool_messages[1]["content"])
+
+    def test_a_write_between_reads_keeps_them_sequential(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            tools.write("a.txt", "alpha\n")
+            provider = DelegatingProvider(
+                [
+                    ToolCall(
+                        id="call_a",
+                        name="read",
+                        arguments=json.dumps({"path": "a.txt"}),
+                    ),
+                    ToolCall(
+                        id="call_write",
+                        name="write",
+                        arguments=json.dumps({"path": "c.txt", "content": "c\n"}),
+                    ),
+                    ToolCall(
+                        id="call_b",
+                        name="read",
+                        arguments=json.dumps({"path": "a.txt"}),
+                    ),
+                ]
+            )
+            events: list[str] = []
+            plain_read = tools.read
+
+            def fake_read(
+                path: str, start_line: int = 1, end_line: int | None = None
+            ) -> dict[str, object]:
+                events.append(f"{path}:{threading.current_thread().name}")
+                return plain_read(path, start_line, end_line)
+
+            tools.read = fake_read
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("read around a write")
+        self.assertTrue(result.completed)
+        # A read next to a write must not be moved to a worker: the write could
+        # otherwise land between the read's path check and its open.
+        self.assertEqual(events, [f"a.txt:{threading.main_thread().name}"] * 2)
+
+    def test_disabled_tools_are_not_advertised(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["tools"]["allow"] = ["read", "grep"]
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+        names = {schema["function"]["name"] for schema in agent.tool_schemas}
+        self.assertEqual(names, {"read", "grep"})
+        self.assertEqual(sorted(agent.tools.allowed_tools), ["grep", "read"])
+
     def test_switch_runtime_and_new_session_reset_model_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

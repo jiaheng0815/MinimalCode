@@ -80,6 +80,68 @@ class _ProviderHandler(BaseHTTPRequestHandler):
 
 
 class EndToEndTests(unittest.TestCase):
+    def test_read_only_refuses_a_write_call(self) -> None:
+        _ProviderHandler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                home = root / ".MinimalCode"
+                workspace = root / "workspace"
+                workspace.mkdir()
+                ensure_config(home)
+                settings = load_settings(home, require_file=True)
+                data = settings.data
+                port = server.server_address[1]
+                data["provider"] = "local"
+                data["model"] = "test-model"
+                data["providers"] = {
+                    "local": {
+                        "protocol": "openai_chat",
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key_env": None,
+                        "context_window": 4096,
+                    }
+                }
+                write_settings(data, home)
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    code = run(
+                        [
+                            "--json",
+                            "--no-session",
+                            "--read-only",
+                            "--home",
+                            str(home),
+                            "--cwd",
+                            str(workspace),
+                            "create a file",
+                        ]
+                    )
+                self.assertEqual(code, 0)
+                # The tool is not advertised, and the call is still refused when
+                # the provider asks for it anyway.
+                advertised = {
+                    tool["function"]["name"]
+                    for tool in _ProviderHandler.requests[0]["tools"]
+                }
+                self.assertIn("read", advertised)
+                self.assertNotIn("write", advertised)
+                self.assertFalse((workspace / "created.txt").exists())
+                refused = [
+                    message
+                    for message in _ProviderHandler.requests[1]["messages"]
+                    if message.get("role") == "tool"
+                ]
+                self.assertIn("disabled by --read-only", refused[0]["content"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_local_provider_tool_loop(self) -> None:
         _ProviderHandler.requests = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)

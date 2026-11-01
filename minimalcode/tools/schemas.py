@@ -11,6 +11,31 @@ from typing import Any
 from ..vision import ProviderVisionClient
 from ..web import ProviderWebClient
 
+# Every name the dispatcher accepts. `tools.allow`, `--read-only`, and the
+# advertised schemas are all expressed against this set so that a tool cannot
+# be offered to the model without the dispatcher accepting it, or the reverse.
+TOOL_NAMES = frozenset(
+    {
+        "read",
+        "write",
+        "edit",
+        "shell",
+        "grep",
+        "find",
+        "subagent",
+        "read_image",
+        "web_search",
+        "web_fetch",
+    }
+)
+
+# Tools that cannot change the workspace or start a process. They are the whole
+# of `--read-only`, and the only tools that may run concurrently: a batch of
+# reads has no ordering dependency, while `write` followed by `shell` does.
+READ_ONLY_TOOLS = frozenset(
+    {"read", "grep", "find", "read_image", "web_search", "web_fetch"}
+)
+
 # The always-available focused tools. Order is stable because providers and
 # prompt caches can key off the serialized schema list.
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -296,17 +321,23 @@ def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
     vision_client: ProviderVisionClient | None = None,
     subagent: bool = False,
+    *,
+    allowed: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return the schemas enabled by the active clients and depth limit.
 
     Keeping this decision in one place ensures the advertised tool set and the
-    dispatcher's accepted names stay in sync.
+    dispatcher's accepted names stay in sync. ``allowed`` carries the
+    ``tools.allow`` / ``--read-only`` restriction so a disabled tool is never
+    advertised: a schema the model can see but not call only wastes a turn.
     """
     schemas = list(TOOL_SCHEMAS)
     if subagent:
         schemas.append(SUBAGENT_SCHEMA)
     if vision_client is not None and vision_client.enabled:
         schemas.append(READ_IMAGE_SCHEMA)
-    if web_client is None or not web_client.enabled:
+    if web_client is not None and web_client.enabled:
+        schemas.extend(_web_schemas(web_client))
+    if allowed is None:
         return schemas
-    return [*schemas, *_web_schemas(web_client)]
+    return [schema for schema in schemas if schema["function"]["name"] in allowed]

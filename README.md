@@ -4,19 +4,21 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.3.2`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.4.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
 - **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。Windows 上会跳过 `C:\Windows\System32\bash.exe`（WSL 启动器），它看起来像 bash，但会把命令送进 Linux 命名空间。
 - **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
-- **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。
+- **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
+- **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。同一轮里相邻的只读工具会并发执行（上限 `tools.max_parallel`，默认 4），结果仍按请求顺序写回；只读调用旁边出现 `write` / `shell` / `subagent` 时保持严格顺序。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
-- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。
+- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。压缩后如果文件比保留的状态大一倍以上（且超过 64 KiB），会原子重写成「meta + 压缩状态」，避免把同一段历史存两遍；小会话保持纯追加。
 - **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`。
+- **编码可见**：`read` 用严格 UTF-8 先扫一遍请求范围，遇到非 UTF-8 字节时改用替换解码返回内容，并在 `warnings` 里说明 `edit` 会拒绝该文件；UTF-8 BOM 会被去掉，不再出现在第一行。
 - **会话总结**：`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
-- **协议**：OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，其他兼容供应商只需配置。
+- **协议**：OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
 - **多供应商切换**：内置 36 个供应商预设（33 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
@@ -40,6 +42,10 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.3.2 升级到 1.4.0
+
+1.4.0 没有删除任何公开名字、CLI 参数、配置键、JSON 字段或工具 schema，升级不需要改代码。新增的是五个可选项：`--read-only`、`tools.allow`、`tools.max_parallel`（相邻只读工具并发数）、供应商的 `prompt_cache`，以及压缩后重写会话文件。可观察的行为变化只有三处，且都是修正错误行为：`read` 遇到非 UTF-8 内容时会在结果里带 `warnings` 字段（此前只返回 U+FFFD 且没有任何提示），UTF-8 BOM 不再显示为第一行的 `\ufeff`；被 `tools.allow` / `--read-only` 禁用的工具既不出现在工具定义里，直接调用也会返回错误；压缩后的大会话文件会被原子重写为「meta + 压缩状态」，此前同一段历史在文件里保存两份并整段重放。`read` 的常规结果多出一个只在出错时出现的 `warnings` 键，`/status` 多出 `read_only` 与 `tools` 两个字段。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.3.1 升级到 1.3.2
 
@@ -120,6 +126,7 @@ minimalcode [prompt ...] [options]
 | `-m`, `--model <id>` | 覆盖模型 |
 | `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
 | `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
+| `--read-only` | 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`，拒绝任何可能改动工作区的工具 |
 | `--cwd <dir>` | 指定工作区 |
 | `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
 | `--sandbox`, `--no-sandbox` | 开启/关闭沙箱执行层（默认关闭，等价于默认 `--no-sandbox`）。无论开关，文件工具的工作区与敏感文件边界都生效 |
@@ -182,7 +189,7 @@ JSON 输出字段：
 
 | 工具 | 作用 | 主要参数 |
 |---|---|---|
-| `read` | 按行范围读取 UTF-8 文本，输出带行号 | `path`、`start_line`、`end_line` |
+| `read` | 按行范围读取 UTF-8 文本，输出带行号；非 UTF-8 内容会带 `warnings` 提示 | `path`、`start_line`、`end_line` |
 | `write` | 创建或整体覆盖文件 | `path`、`content` |
 | `edit` | 精确文本替换，匹配不唯一时失败 | `path`、`old_text`、`new_text`、`replace_all` |
 | `shell` | 在配置的 shell 中执行命令 | `command`、`timeout`、`cwd` |
@@ -195,7 +202,9 @@ JSON 输出字段：
 
 `web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
 
-`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
+`tools.allow` 给出允许的工具名列表（例如 `["read", "grep", "find"]`），`--read-only` 是它的一种预设。两者取交集，且被禁用的工具不会出现在请求的 `tools` 里；即使模型仍然发起调用（恢复的旧会话、忽略 schema 的供应商），`dispatch` 也会返回形如 `tool 'write' is disabled by --read-only` 的错误。只读模式下列表以外的工具一律不可用，包括 `subagent`（它会启动一个能写文件的子进程）。
+
+`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
 
 ### 图像理解
 
@@ -232,6 +241,7 @@ JSON 输出字段：
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾 `exit $LASTEXITCODE` 保留子进程真实退出码。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
 - **网络重试**：请求在拿到响应之前失败（`ConnectError`、`ConnectTimeout`，以及 `Server disconnected without sending a response.` 这类 `RemoteProtocolError`）会自动重试 10 次，退避从 0.5 秒翻倍到最多 8 秒；已经开始返回数据的流式中断不重试，避免重复输出或重复计费。HTTP 429/503 仍按 `Retry-After` 重试一次。
 - **输出裁剪**：工具结果按首尾保留截断，超长输出中间以 `... <truncated N chars> ...` 标记，既保留开头上下文也保留结尾错误信息。
+- **编码与并发**：`read` 先用 `errors="strict"` 扫描请求范围，只有真正遇到非 UTF-8 字节时才退回替换解码并写 `warnings`，因此正常文件不多读一遍、也不会把有损内容当成干净内容。同一轮的只读调用走同一个分组器：结果按调用顺序回填，`[read]` 等活动行仍在主线程打印；`write` / `edit` / `shell` / `subagent` 不参与并发，紧挨着它们的只读调用也留在主线程。
 
 ## 配置
 
@@ -277,6 +287,7 @@ JSON 输出字段：
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
 - `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。
 - `max_tokens` 仅 Anthropic Messages 使用，默认 `8192`。官方 Anthropic API 要求该字段；`thinking` 的 `budget_tokens` 会按 `thinking` 等级映射，并保证小于 `max_tokens`。
+- `prompt_cache: true` 只对 Anthropic Messages 生效：给 system 提示与工具定义打一个 `cache_control` 缓存断点，长工具循环里这段静态前缀按缓存读取计费。默认关闭，因为部分兼容端点不接受该字段。
 - 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可。
 - 代理：供应商、`web_tools`、`vision` 默认沿用环境变量与系统代理设置。`base_url` 指向环回地址（`127.0.0.1`、`::1`、`localhost`）时自动忽略代理，否则本机运行的 Ollama、vLLM 或测试服务器会被 Clash 之类的代理劫走；需要强制时可在对应配置块里写 `"trust_env": true|false`。显式传入自建 transport 时默认不读环境代理，避免代理映射覆盖注入的连接。
 
@@ -357,7 +368,7 @@ $env:DEEPSEEK_API_KEY = "your-key"
 minimalcode --provider deepseek-anthropic "运行测试并总结"
 ```
 
-端点从 `base_url` 推导：`https://api.deepseek.com/anthropic` 会请求 `/anthropic/v1/messages`；`base_url` 已以 `/v1` 结尾时只补 `/messages`，已经是完整 `/messages` 地址时原样使用。鉴权发送 `x-api-key`，并附带 `anthropic-version: 2023-06-01`（自定义 `headers` 中的同名字段优先）。工具定义会转换为 Anthropic 的 `name` / `description` / `input_schema`，连续的工具结果会合并到同一条 user 消息，且 `tool_result` 块放在文本之前。思考模式下通过工具调用继续对话时，assistant 的 thinking 块（含 signature）会保存在会话中并原样回传，以保证 Anthropic 的多轮工具调用可以继续。
+端点从 `base_url` 推导：`https://api.deepseek.com/anthropic` 会请求 `/anthropic/v1/messages`；`base_url` 已以 `/v1` 结尾时只补 `/messages`，已经是完整 `/messages` 地址时原样使用。鉴权发送 `x-api-key`，并附带 `anthropic-version: 2023-06-01`（自定义 `headers` 中的同名字段优先）。工具定义会转换为 Anthropic 的 `name` / `description` / `input_schema`，连续的工具结果会合并到同一条 user 消息，且 `tool_result` 块放在文本之前。思考模式下通过工具调用继续对话时，assistant 的 thinking 块（含 signature）会保存在会话中并原样回传，以保证 Anthropic 的多轮工具调用可以继续。需要复用系统提示与工具定义的缓存时，在该供应商里加上 `"prompt_cache": true`；内置预设默认不开，避免端点不支持 `cache_control` 时整轮请求失败。
 
 ### 从 Claude Code 环境变量启动
 
@@ -525,7 +536,7 @@ minimalcode/
 - 原生 Gemini 协议适配。
 - RPC/SDK 集成。
 - 扩展、Skills 和主题系统。
-- 更细粒度的工具权限。
+- 按路径/按命令的更细粒度工具权限（当前只有按工具名的白名单）。
 
 ## 许可证
 

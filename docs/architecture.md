@@ -34,8 +34,8 @@ CLI
 | `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
-| `session.py` | Append-only JSONL history and project-scoped discovery |
-| `agent.py` | Tool loop, parallel subagent dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
+| `session.py` | Append-only JSONL history, project-scoped discovery, post-compaction rewrite |
+| `agent.py` | Tool loop, concurrent subagent and read-only dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap |
 
@@ -49,8 +49,8 @@ Private helpers are imported from the submodule that defines and uses them.
 
 | Module | Responsibility |
 |---|---|
-| `runtime.py` | `ToolRuntime`: shared settings, path resolver, dispatcher, activity text |
-| `schemas.py` | Provider-facing tool declarations and enablement rules |
+| `runtime.py` | `ToolRuntime`: shared settings, path resolver, dispatcher, allowlist gate, activity text |
+| `schemas.py` | Provider-facing tool declarations, the canonical tool-name set, and enablement rules |
 | `files.py` | `read`, `write`, atomic write, line-ending-preserving `edit` |
 | `search.py` | Bounded `rg`/Python search processes, smart-case, output parsing |
 | `search_tools.py` | `grep` and `find`, ignore globs, sandbox glob exclusions |
@@ -119,10 +119,12 @@ The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 - Loopback endpoints ignore environment proxies; an injected transport is never shadowed by proxy mounts.
 - Token estimates weight CJK and emoji characters at roughly one token each instead of `len / 4`, and estimated usage is marked as such.
 - Tool schemas are static; the system prompt is built once per agent rather than once per turn.
+- Adjacent read-only tool calls share one bounded thread group, so a turn that reads several files pays one round of latency instead of one per call; the dispatcher, not the schema list, is the enforcement point for `tools.allow` and `--read-only`. The in-process regex fallback skips its `SIGALRM` guard off the main thread (it already did for subagent workers); when the backend can spawn argv children, `grep` uses the timeout-bounded child process instead.
+- `read` decodes strictly first, so a file that is valid UTF-8 is scanned once; only a non-UTF-8 range is read a second time to return the lossy content alongside a warning.
 - `rg` is used when available; a timeout-bounded Python fallback keeps commands working without it.
 - Shell and search output is captured through bounded head/tail buffers, so a noisy command cannot exhaust memory or disk.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
 - Untrusted model, tool, and error text is stripped of terminal control sequences before display.
 - Interactive input is read line by line: bracketed paste keeps a pasted block in one message, buffered input (`msvcrt.kbhit` on Windows, `select` elsewhere) joins the lines of a terminal that does not support it, and a trailing `\` continues the message. Non-interactive prompts and piped stdin are untouched.
-- Session writes are append-only; configuration is the only atomically rewritten file.
+- Session writes are append-only, with one exception: a compaction that would leave the file more than twice the size of the state it keeps rewrites it atomically (temp file, `fsync`, `os.replace`), and configuration is otherwise the only atomically rewritten file.
 - The renderer treats incomplete inline markers as active styles, emits text without waiting for a newline, and keeps redirected and JSON output as raw Markdown.

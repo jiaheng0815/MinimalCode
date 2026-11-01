@@ -142,7 +142,13 @@ def _coerce_provider_values(name: str, provider: dict[str, Any]) -> dict[str, An
     numeric placeholders work at all.
     """
     result = provider
-    for key in ("stream", "include_usage", "send_reasoning_effort", "require_api_key"):
+    for key in (
+        "stream",
+        "include_usage",
+        "send_reasoning_effort",
+        "require_api_key",
+        "prompt_cache",
+    ):
         if key in result:
             result[key] = _coerce_bool(result[key], f"provider {name!r} {key}")
     if "trust_env" in result:
@@ -245,6 +251,20 @@ def _validate(data: dict[str, Any], path: Path) -> None:
     tools = data["tools"]
     if not isinstance(tools.get("allow_outside_workspace"), bool):
         raise ConfigError(f"{path}: tools.allow_outside_workspace must be a boolean")
+    allow = tools.get("allow")
+    if allow is not None:
+        _validate_string_list(allow, path, "tools.allow")
+        if not allow:
+            # An empty allowlist would leave an agent with no tools at all;
+            # the runtime rejects it too, but a config error names the file.
+            raise ConfigError(f"{path}: tools.allow must not be empty")
+    _validate_integer(
+        tools.get("max_parallel"),
+        path,
+        "tools.max_parallel",
+        minimum=1,
+        maximum=32,
+    )
     _validate_integer(
         tools.get("max_file_chars"),
         path,
@@ -377,7 +397,13 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
     ):
         raise ConfigError(f"{path}: provider {name!r} model must be a string")
 
-    for key in ("stream", "include_usage", "send_reasoning_effort", "require_api_key"):
+    for key in (
+        "stream",
+        "include_usage",
+        "send_reasoning_effort",
+        "require_api_key",
+        "prompt_cache",
+    ):
         if (
             key in provider
             and not _has_env_placeholder(provider[key])

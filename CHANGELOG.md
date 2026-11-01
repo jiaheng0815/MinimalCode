@@ -1,5 +1,32 @@
 # 更新日志
 
+## 1.4.0 - 2026-11-01
+
+### 新增
+
+- 只读模式与工具白名单：`--read-only` 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`；`tools.allow` 直接列出允许的工具名，两者取交集。被禁用的工具既不进入请求的 `tools` 数组，`ToolRuntime.dispatch` 也会拒绝调用（`tool 'write' is disabled by --read-only`），因此恢复的旧会话或忽略 schema 的供应商都绕不过去。`tools.allow` 里的未知名字按配置错误处理——与拼写错误取交集只会留下一个什么也做不了的 agent。`/status` 增加 `read_only` 与 `tools`。
+- 相邻只读工具并发：同一轮里相邻的 `read` / `grep` / `find` / `read_image` / `web_search` / `web_fetch` 用同一个信号量并发执行（`tools.max_parallel`，默认 4），结果仍按请求顺序写回会话，活动行仍在主线程按请求顺序打印。与 `write` / `edit` / `shell` / `subagent` 相邻的只读调用保持串行，避免读到写了一半的文件。
+- Anthropic prompt 缓存：供应商配置 `"prompt_cache": true` 时，在最后一个工具定义上打一个 `cache_control: {"type": "ephemeral"}` 断点，覆盖 system 提示与工具定义这一段静态前缀；没有工具时改标记 system 文本块。只打一个断点是为了避免同一段字节每轮写两份缓存。默认关闭，因为并非所有 Messages 兼容端点都接受该字段。缓存读取已经出现在 `usage.cached_tokens` 中。
+- 会话压缩后重写：`compact` 事件本身携带完整的替换历史，追加到一个已经保存过该历史的文件里会把同一段内容存两遍。现在当文件至少是要保留状态的两倍大且超过 64 KiB 时，原子重写为「`meta` + 该事件」；大小增量与预期不符（例如另一个进程也在追加）时跳过。小会话保持纯追加。
+
+### 修复
+
+- 文件：`read` 此前静默用 `errors="replace"` 解码，非 UTF-8 文件（例如 GBK 或 UTF-16 文本）看起来是一次干净读取，随后 `edit` 却对同一个文件报 “not valid UTF-8 text”。现在先按严格 UTF-8 扫描请求范围，只有真的遇到非 UTF-8 字节时才退回替换解码，并在结果的 `warnings` 里说明内容有损、`edit` 会拒绝该文件；合法文件仍是单次扫描、不带该字段。UTF-8 BOM 现在会被去掉，不再作为第一行的 `\ufeff` 显示。
+
+### 变更
+
+- 版本号升级到 1.4.0。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 可观察的行为变化：`read` 对非 UTF-8 范围返回 `warnings` 并去掉 BOM；被白名单或 `--read-only` 禁用的工具不再出现在工具定义里、调用时报错；压缩后的大会话文件被重写成「meta + 压缩状态」；`/status` 多出 `read_only` 与 `tools` 两个字段。
+- `tools.allow` 使用 `null`（默认）表示不限制；`--read-only` 与它的交集为空时按配置错误拒绝启动。
+
+### 文档
+
+- README 增加白名单/只读模式、只读并发、prompt 缓存、编码可见与会话重写说明，补充 `--read-only` 与 1.3.2 → 1.4.0 升级指南；`docs/configuration.md` 增加 `tools.allow`、`tools.max_parallel`、`prompt_cache` 与重写规则；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.4.0 的公开面。
+
+### 测试
+
+- 新增回归测试：`read` 对非 UTF-8 内容的 `warnings` 与 BOM 处理、`tools.allow` / `--read-only` 的 dispatch 拒绝与未知工具名、只读工具组并发执行（barrier）、读写混合时保持串行、被禁用工具不出现在工具定义里、`--read-only` 的端到端拒绝、Anthropic 缓存的单断点与默认关闭、压缩后重写与小会话保持追加、`prompt_cache` 的 `${ENV}` 布尔转换与非法配置。
+
 ## 1.3.2 - 2026-11-01
 
 ### 修复

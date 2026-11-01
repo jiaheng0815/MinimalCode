@@ -167,6 +167,19 @@ class ConfigTests(unittest.TestCase):
             self.assertIs(expanded["require_api_key"], False)
             self.assertEqual(expanded["max_tokens"], 4096)
 
+    def test_prompt_cache_placeholder_is_coerced_to_a_bool(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            provider = settings.data["providers"]["deepseek"]
+            provider["prompt_cache"] = "${TEST_PROMPT_CACHE}"
+            with patch.dict(os.environ, {"TEST_PROMPT_CACHE": "true"}):
+                _, expanded = settings.provider_config("deepseek")
+            # A leftover "true" string would be truthy for the wrong reason and
+            # invisible to the `is True` check the payload code makes.
+            self.assertIs(expanded["prompt_cache"], True)
+
     def test_environment_values_are_coerced_inside_web_and_vision_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
@@ -266,6 +279,7 @@ class ConfigTests(unittest.TestCase):
             ("max_tokens", 0),
             ("timeout_seconds", 0),
             ("stream", "yes"),
+            ("prompt_cache", "yes"),
             ("headers", "not-an-object"),
         )
         for key, value in cases:
@@ -290,6 +304,9 @@ class ConfigTests(unittest.TestCase):
                 (("shell", "timeout_seconds"), "120"),
                 (("tools", "allow_outside_workspace"), "false"),
                 (("tools", "max_results"), True),
+                (("tools", "allow"), "read"),
+                (("tools", "allow"), []),
+                (("tools", "max_parallel"), 0),
                 (("context", "compact_at"), 1.5),
                 (("context", "keep_messages"), 2),
                 (("session", "save"), "yes"),

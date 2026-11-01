@@ -1,8 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.3.2. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, and 1.3.2
-added no further breaking import changes (`minimalcode.httpclient` and
+Applies to MinimalCode 1.4.0. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2, and
+1.4.0 added no further breaking import changes (`minimalcode.httpclient` and
 `minimalcode.clipboard` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
@@ -15,6 +15,25 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.4.0 changed
+
+Additive: no public `__all__` name, CLI flag, configuration key, JSON output
+field, or session format was removed, and no import path moved. New surfaces:
+
+- `--read-only`, plus the `tools.allow` and `tools.max_parallel` keys.
+- Provider key `prompt_cache` for `anthropic_messages`.
+- `ToolRuntime(read_only=...)`, and `available_tool_schemas(..., allowed=...)`.
+- `/status` gains `read_only` and `tools`.
+
+Behavior changes, all corrections:
+
+- `read` on a non-UTF-8 range now returns lossy content plus a `warnings` entry
+  instead of U+FFFD with no signal; a leading UTF-8 BOM is stripped.
+- Adjacent read-only tool calls in one turn run concurrently; results keep
+  request order.
+- A compaction that would leave the session file more than twice the state it
+  keeps rewrites the file to `meta` plus the compact event.
 
 ## What 1.3.2 changed
 
