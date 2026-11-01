@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import difflib
+import importlib.util
 import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +48,37 @@ class _TextScan:
     end: int
     last_line: int
     truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Diagnostic:
+    """One validation finding, keyed without its line so edits can move it."""
+
+    validator: str
+    line: int | None
+    code: str | None
+    message: str
+
+    @property
+    def key(self) -> tuple[str, str | None, str]:
+        return (self.validator, self.code, self.message)
+
+
+_PYTHON_SUFFIXES = frozenset({".py", ".pyi"})
+_MAX_REPORTED_DIAGNOSTICS = 8
+_VALIDATION_TIMEOUT_SECONDS = 30
+
+
+def _source_preview(text: str, line: int | None) -> str:
+    if line is None:
+        return ""
+    lines = text.splitlines()
+    if line < 1 or line > len(lines):
+        return ""
+    source = lines[line - 1].rstrip()
+    if len(source) > 200:
+        source = source[:197] + "..."
+    return f"\n  {line:>5} | {source}"
 
 
 def _detect_newline(text: str) -> str:
@@ -372,7 +408,9 @@ class FileToolsMixin:
         )
 
     @staticmethod
-    def _write_atomic(target: Path, text: str, *, mode: int | None = None) -> None:
+    def _write_atomic(
+        target: Path, content: str | bytes, *, mode: int | None = None
+    ) -> None:
         """Write a sibling temp file, fsync it, then replace the target.
 
         The rename keeps readers from observing a half-written file, and the
@@ -393,10 +431,16 @@ class FileToolsMixin:
             raise ToolError(f"cannot write {target}: {exc}") from exc
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
+            if isinstance(content, bytes):
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            else:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
             if mode is None:
                 with _UMASK_LOCK:
                     current_umask = os.umask(0)
@@ -421,6 +465,181 @@ class FileToolsMixin:
         finally:
             # A failed write or replace must not leave a hidden temp file.
             temp_path.unlink(missing_ok=True)
+
+    def _ruff_invocation(self) -> list[str] | None:
+        """Return a ruff command once, or None when ruff is unavailable."""
+        if hasattr(self, "_ruff_command_cache"):
+            return self._ruff_command_cache
+        executable = shutil.which("ruff")
+        if executable:
+            command = [executable]
+        elif importlib.util.find_spec("ruff") is not None:
+            command = [sys.executable, "-m", "ruff"]
+        else:
+            command = None
+        self._ruff_command_cache = command
+        return command
+
+    @staticmethod
+    def _run_validator(
+        argv: list[str], target: Path
+    ) -> subprocess.CompletedProcess[str] | _Diagnostic:
+        try:
+            return subprocess.run(
+                argv,
+                cwd=str(target.parent),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_VALIDATION_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return _Diagnostic(
+                "validation",
+                None,
+                "timeout",
+                f"did not finish within {_VALIDATION_TIMEOUT_SECONDS:g} seconds",
+            )
+        except (OSError, ValueError) as exc:
+            return _Diagnostic("validation", None, "unavailable", str(exc))
+
+    def _py_compile_diagnostics(self, target: Path) -> list[_Diagnostic]:
+        """Compile ``target`` without leaving a __pycache__ in the workspace."""
+        with tempfile.TemporaryDirectory(prefix="minimalcode-pycache-") as cache:
+            env = os.environ.copy()
+            env["PYTHONPYCACHEPREFIX"] = cache
+            try:
+                completed = subprocess.run(
+                    [sys.executable, "-m", "py_compile", str(target)],
+                    cwd=str(target.parent),
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_VALIDATION_TIMEOUT_SECONDS,
+                    env=env,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return [
+                    _Diagnostic(
+                        "py_compile",
+                        None,
+                        "timeout",
+                        f"did not finish within {_VALIDATION_TIMEOUT_SECONDS:g}s",
+                    )
+                ]
+            except (OSError, ValueError) as exc:
+                return [_Diagnostic("py_compile", None, "unavailable", str(exc))]
+        if completed.returncode == 0:
+            return []
+        detail = (completed.stderr or completed.stdout or "").strip()
+        line_match = re.search(r"\bline (\d+)\b", detail)
+        line = int(line_match.group(1)) if line_match else None
+        lines = [part.strip() for part in detail.splitlines() if part.strip()]
+        message = lines[-1] if lines else f"exit code {completed.returncode}"
+        code = message.split(":", 1)[0] if ":" in message else None
+        return [
+            _Diagnostic(
+                "py_compile",
+                line,
+                code,
+                message[:400],
+            )
+        ]
+
+    def _ruff_diagnostics(self, target: Path) -> tuple[list[_Diagnostic], list[str]]:
+        command = self._ruff_invocation()
+        if command is None:
+            return [], ["ruff is not installed; ruff check was skipped"]
+        completed = self._run_validator(
+            [*command, "check", "--output-format=concise", "--no-cache", str(target)],
+            target,
+        )
+        if isinstance(completed, _Diagnostic):
+            return [completed], []
+        if completed.returncode == 0:
+            return [], []
+        output = (completed.stdout or "") + (completed.stderr or "")
+        diagnostics: list[_Diagnostic] = []
+        pattern = re.compile(r"^(.*):(\d+):(\d+): ([A-Z]+[0-9]+) (.*)$")
+        for raw in output.splitlines():
+            match = pattern.match(raw.strip())
+            if match is None:
+                continue
+            diagnostics.append(
+                _Diagnostic(
+                    "ruff",
+                    int(match.group(2)),
+                    match.group(4),
+                    match.group(5)[:400],
+                )
+            )
+        if diagnostics:
+            return diagnostics, []
+        detail = " ".join(output.split())[:400]
+        return (
+            [
+                _Diagnostic(
+                    "ruff",
+                    None,
+                    "exit",
+                    detail or f"exit code {completed.returncode}",
+                )
+            ],
+            [],
+        )
+
+    def _python_diagnostics(self, target: Path) -> tuple[list[_Diagnostic], list[str]]:
+        if target.suffix.lower() not in _PYTHON_SUFFIXES:
+            return [], []
+        diagnostics = self._py_compile_diagnostics(target)
+        ruff, warnings = self._ruff_diagnostics(target)
+        return [*diagnostics, *ruff], warnings
+
+    def _validate_python_write(
+        self,
+        target: Path,
+        before: list[_Diagnostic],
+        attempted_text: str,
+        *,
+        original_bytes: bytes | None,
+        original_mode: int | None,
+    ) -> list[str]:
+        """Validate Python output, roll it back, and report new diagnostics."""
+        if target.suffix.lower() not in _PYTHON_SUFFIXES:
+            return []
+        after, warnings = self._python_diagnostics(target)
+        remaining = Counter(diagnostic.key for diagnostic in after)
+        remaining.subtract(Counter(diagnostic.key for diagnostic in before))
+        new_keys = {key for key, count in remaining.items() if count > 0}
+        if not new_keys:
+            return warnings
+        if original_bytes is None:
+            target.unlink(missing_ok=True)
+        else:
+            self._write_atomic(target, original_bytes, mode=original_mode)
+        reported = [diagnostic for diagnostic in after if diagnostic.key in new_keys]
+        lines = [f"validation failed for {target}; the change was rolled back."]
+        for diagnostic in reported[:_MAX_REPORTED_DIAGNOSTICS]:
+            location = (
+                f"{target}:{diagnostic.line}"
+                if diagnostic.line is not None
+                else str(target)
+            )
+            code = f" [{diagnostic.code}]" if diagnostic.code else ""
+            lines.append(
+                f"{location}: {diagnostic.validator}{code}: {diagnostic.message}"
+                + _source_preview(attempted_text, diagnostic.line)
+            )
+        omitted = len(reported) - _MAX_REPORTED_DIAGNOSTICS
+        if omitted > 0:
+            lines.append(f"... {omitted} more diagnostics omitted")
+        raise ToolError("\n".join(lines))
 
     def write(self, path: str, content: str) -> dict[str, Any]:
         """Create or fully replace a UTF-8 text file."""
@@ -451,13 +670,27 @@ class FileToolsMixin:
         # clears them on a normal write, and restoring them would hand the new
         # bytes the old privilege.
         mode = target.stat().st_mode & 0o777 if existed else None
+        original_bytes = target.read_bytes() if existed else None
+        before: list[_Diagnostic] = []
+        if existed:
+            before, _ = self._python_diagnostics(target)
         self._write_atomic(target, content, mode=mode)
-        return {
+        warnings = self._validate_python_write(
+            target,
+            before,
+            content,
+            original_bytes=original_bytes,
+            original_mode=mode,
+        )
+        result: dict[str, Any] = {
             "status": "success",
             "path": str(target),
             "bytes": len(encoded),
             "created": not existed,
         }
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     def _read_for_edit(self, target: Path) -> tuple[str, str]:
         """Read an editable UTF-8 file and its dominant line ending."""
@@ -631,7 +864,17 @@ class FileToolsMixin:
                 f"edited file is too large: {len(encoded)} bytes exceeds "
                 f"tools.max_file_bytes ({self.max_file_bytes})"
             )
-        self._write_atomic(target, updated, mode=target.stat().st_mode & 0o777)
+        mode = target.stat().st_mode & 0o777
+        original_bytes = original.encode("utf-8")
+        before, _ = self._python_diagnostics(target)
+        self._write_atomic(target, updated, mode=mode)
+        warnings = self._validate_python_write(
+            target,
+            before,
+            updated,
+            original_bytes=original_bytes,
+            original_mode=mode,
+        )
         result: dict[str, Any] = {
             "status": "success",
             "path": str(target),
@@ -646,4 +889,6 @@ class FileToolsMixin:
             result["end_line"] = end_line
         else:
             result["replacements"] = count if replace_all else 1
+        if warnings:
+            result["warnings"] = warnings
         return result

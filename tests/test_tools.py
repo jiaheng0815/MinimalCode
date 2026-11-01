@@ -33,17 +33,17 @@ class ToolTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_write_read_and_edit(self) -> None:
-        written = self.tools.write("src/example.py", "first\nsecond\n")
+        written = self.tools.write("src/example.py", "first = 1\nsecond = 2\n")
         self.assertTrue(written["created"])
         read = self.tools.read("src/example.py", 2, 2)
         self.assertIn("second", read["content"])
         self.assertNotIn("first", read["content"])
 
-        edited = self.tools.edit("src/example.py", "second", "changed")
+        edited = self.tools.edit("src/example.py", "second = 2", "changed = 3")
         self.assertEqual(edited["replacements"], 1)
         self.assertEqual(
             (self.workspace / "src" / "example.py").read_text(encoding="utf-8"),
-            "first\nchanged\n",
+            "first = 1\nchanged = 3\n",
         )
 
     def test_read_large_file_from_requested_line(self) -> None:
@@ -233,6 +233,47 @@ class ToolTests(unittest.TestCase):
         self.assertIn("--- old_text", message)
         self.assertIn("-def targt():", message)
         self.assertIn("+def target():", message)
+
+    def test_write_rolls_back_a_new_python_syntax_error(self) -> None:
+        with self.assertRaises(ToolError) as context:
+            self.tools.write("broken.py", "def broken(:\n")
+        message = str(context.exception)
+        self.assertIn("rolled back", message)
+        self.assertIn("py_compile", message)
+        self.assertRegex(message, r"broken\.py:1")
+        self.assertIn("def broken(:", message)
+        self.assertFalse((self.workspace / "broken.py").exists())
+
+    def test_edit_rolls_back_a_python_syntax_error(self) -> None:
+        self.tools.write("safe.py", "value = 1\n")
+        target = self.workspace / "safe.py"
+        with self.assertRaises(ToolError) as context:
+            self.tools.edit(
+                "safe.py", start_line=1, end_line=1, new_text="def broken(:"
+            )
+        message = str(context.exception)
+        self.assertIn("rolled back", message)
+        self.assertRegex(message, r"safe\.py:1")
+        self.assertEqual(target.read_text(encoding="utf-8"), "value = 1\n")
+
+    def test_ruff_rejects_new_lint_errors_and_restores_the_file(self) -> None:
+        if self.tools._ruff_invocation() is None:
+            self.skipTest("ruff is not installed")
+        with self.assertRaises(ToolError) as context:
+            self.tools.write("lint.py", "import os\n")
+        self.assertIn("F401", str(context.exception))
+        self.assertFalse((self.workspace / "lint.py").exists())
+
+    def test_preexisting_lint_errors_do_not_block_an_unrelated_edit(self) -> None:
+        if self.tools._ruff_invocation() is None:
+            self.skipTest("ruff is not installed")
+        target = self.workspace / "legacy.py"
+        target.write_text("import os\nvalue = 1\n", encoding="utf-8")
+        result = self.tools.edit(
+            "legacy.py", start_line=2, end_line=2, new_text="value = 2"
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertIn("import os", target.read_text(encoding="utf-8"))
 
     def test_ambiguous_edit_fails(self) -> None:
         self.tools.write("duplicate.txt", "same\nsame\n")
@@ -620,15 +661,15 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"caf\xe9\n")
 
     def test_find_glob_does_not_match_across_directories(self) -> None:
-        self.tools.write("src/top.py", "x\n")
-        self.tools.write("src/deep/nested.py", "x\n")
+        self.tools.write("src/top.py", "x = 1\n")
+        self.tools.write("src/deep/nested.py", "x = 2\n")
         with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             result = self.tools.find("src/*.py")
         names = {Path(path).name for path in result["files"]}
         self.assertEqual(names, {"top.py"})
 
     def test_find_glob_is_case_sensitive(self) -> None:
-        self.tools.write("UPPER.PY", "x\n")
+        self.tools.write("UPPER.PY", "x = 1\n")
         with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
             result = self.tools.find("*.py")
         self.assertEqual(result["files"], [])
