@@ -234,6 +234,14 @@ class ToolTests(unittest.TestCase):
         self.assertIn("-def targt():", message)
         self.assertIn("+def target():", message)
 
+    def test_not_found_diagnostics_are_bounded_for_a_huge_line(self) -> None:
+        self.tools.write("huge.txt", "x" * 20_000 + "\n")
+        with self.assertRaises(ToolError) as context:
+            self.tools.edit("huge.txt", "needle", "replacement")
+        message = str(context.exception)
+        self.assertIn("Most similar region", message)
+        self.assertLess(len(message), 5_000)
+
     def test_write_rolls_back_a_new_python_syntax_error(self) -> None:
         with self.assertRaises(ToolError) as context:
             self.tools.write("broken.py", "def broken(:\n")

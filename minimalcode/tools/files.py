@@ -24,8 +24,11 @@ from .search import _MAX_READ_LINE_CHARS, drain_physical_line
 _UMASK_LOCK = threading.Lock()
 
 # Failure feedback has to stay useful without turning a retry into another
-# large prompt: a closest-match diff is capped at this many lines.
+# large prompt: a closest-match diff is capped by lines, per-line width, and
+# total characters.
 _MAX_DIAGNOSTIC_DIFF_LINES = 40
+_MAX_DIAGNOSTIC_DIFF_CHARS = 4000
+_MAX_DIAGNOSTIC_LINE_CHARS = 300
 # Scoring every possible window is quadratic on a large file. Exact line hits
 # are always scored; the remaining evenly spaced windows keep a typo-only match
 # bounded on multi-megabyte inputs.
@@ -106,16 +109,25 @@ def _line_number_at(text: str, offset: int) -> int:
 
 def _clip_diagnostic(lines: list[str]) -> str:
     """Join a diff without letting a wrong-file match flood the next request."""
-    if len(lines) > _MAX_DIAGNOSTIC_DIFF_LINES:
+    clipped = [
+        line
+        if len(line) <= _MAX_DIAGNOSTIC_LINE_CHARS
+        else line[: _MAX_DIAGNOSTIC_LINE_CHARS - 3] + "..."
+        for line in lines
+    ]
+    if len(clipped) > _MAX_DIAGNOSTIC_DIFF_LINES:
         head = _MAX_DIAGNOSTIC_DIFF_LINES - 4
         tail = 3
-        omitted = len(lines) - head - tail
-        lines = [
-            *lines[:head],
+        omitted = len(clipped) - head - tail
+        clipped = [
+            *clipped[:head],
             f"... ({omitted} diff lines omitted) ...",
-            *lines[-tail:],
+            *clipped[-tail:],
         ]
-    return "\n".join(lines)
+    text = "\n".join(clipped)
+    if len(text) > _MAX_DIAGNOSTIC_DIFF_CHARS:
+        text = text[: _MAX_DIAGNOSTIC_DIFF_CHARS - 20] + "\n... (diff truncated)"
+    return text
 
 
 def _closest_fragment(original: str, needle: str) -> tuple[int, int, float, str] | None:
@@ -201,8 +213,15 @@ def _range_hint(lines: list[str], start: int, end: int) -> str:
         return "the file is empty; write or append content instead"
     nearest_start = min(max(1, start), total)
     nearest_end = min(max(nearest_start, end), total)
+
+    def visible(line: str) -> str:
+        line = line.rstrip("\r\n")
+        if len(line) > _MAX_DIAGNOSTIC_LINE_CHARS:
+            return line[: _MAX_DIAGNOSTIC_LINE_CHARS - 3] + "..."
+        return line
+
     preview = "".join(
-        f"{number:>6}\t{lines[number - 1]}"
+        f"{number:>6}\t{visible(lines[number - 1])}\n"
         for number in range(nearest_start, nearest_end + 1)
     )
     if preview and not preview.endswith(("\n", "\r")):
