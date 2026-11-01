@@ -49,6 +49,7 @@ class ShellTests(unittest.TestCase):
             powershell_heredoc_delimiter("cat <<-EOF\n\thello\n\tEOF\n"),
             "EOF",
         )
+        self.assertEqual(powershell_heredoc_delimiter("cat <<EOF"), "EOF")
         self.assertIsNone(powershell_heredoc_delimiter("$x = 1 << 2"))
         self.assertIsNone(powershell_heredoc_delimiter('echo "a << b"'))
         self.assertIsNone(

@@ -23,8 +23,7 @@ __all__ = [
 ]
 
 # Bash heredoc starts with ``<<WORD`` or ``<<-WORD``. A PowerShell bit shift
-# such as ``$x << 2`` cannot match because the delimiter must be a word, and a
-# quoted ``"a << b"`` only matches when a later line is exactly ``b``.
+# such as ``$x << 2`` cannot match because the delimiter must be a word.
 _HEREDOC_RE = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\1")
 
 # A shell that exists on disk is not necessarily a shell that can start: a
@@ -195,20 +194,49 @@ def select_shell(
     raise ShellError(message)
 
 
+def _unquoted_heredoc_marks(line: str) -> list[int]:
+    """Return ``<<`` offsets that are outside PowerShell string literals."""
+    positions: list[int] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            if char == "`" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if (
+            line.startswith("<<", index)
+            and not line.startswith("<<<", index)
+            and (index == 0 or line[index - 1] != "<")
+        ):
+            positions.append(index)
+            index += 2
+            continue
+        index += 1
+    return positions
+
+
 def powershell_heredoc_delimiter(command: str) -> str | None:
     """Return the bash heredoc delimiter that PowerShell cannot execute.
 
-    Detection requires the closing delimiter on a later line, which keeps a
-    quoted ``"a << b"`` or a Python shift expression from being rejected. The
-    caller decides whether the active shell is PowerShell; bash/zsh heredocs
-    remain valid there.
+    ``<<`` inside a quoted string (including a PowerShell here-string) and a
+    shift such as ``$x << 2`` are ignored. The caller decides whether the
+    active shell is PowerShell; bash/zsh heredocs remain valid there.
     """
-    lines = command.splitlines()
-    for index, line in enumerate(lines):
-        for match in _HEREDOC_RE.finditer(line):
-            delimiter = match.group(2)
-            if any(candidate.strip() == delimiter for candidate in lines[index + 1 :]):
-                return delimiter
+    for line in command.splitlines():
+        for index in _unquoted_heredoc_marks(line):
+            match = _HEREDOC_RE.match(line, index)
+            if match is not None:
+                return match.group(2)
     return None
 
 
