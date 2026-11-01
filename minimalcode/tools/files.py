@@ -5,12 +5,17 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..errors import ToolError
 from .search import _MAX_READ_LINE_CHARS, drain_physical_line
+
+# ``os.umask`` is process-global; serialize the read-and-restore window so a
+# concurrently created directory cannot inherit a zero umask.
+_UMASK_LOCK = threading.Lock()
 
 # Reported only when the requested range really is not valid UTF-8, so a plain
 # read stays silent about encoding.
@@ -82,7 +87,8 @@ class FileToolsMixin:
             # Decoding with ``replace`` used to hide this: the caller saw a
             # clean read made of U+FFFD characters, and only ``edit`` later
             # refused the same file. Read it again lossily so the content is
-            # still visible, and say that the bytes were not UTF-8.
+            # still visible, and say that the bytes were not UTF-8 only when
+            # the returned range actually contains a replacement character.
             scan = self._scan_lines(
                 target,
                 start=start,
@@ -90,7 +96,8 @@ class FileToolsMixin:
                 line_limit=line_limit,
                 errors="replace",
             )
-            warnings.append(_NOT_UTF8_WARNING)
+            if "\ufffd" in "".join(scan.chunks):
+                warnings.append(_NOT_UTF8_WARNING)
 
         if scan.start is None:
             if start > max(1, scan.last_line):
@@ -141,16 +148,20 @@ class FileToolsMixin:
         truncated = False
         last_line = 0
         pending = ""
+        # Two extra characters make an exactly-at-the-limit physical line,
+        # including its terminator, readable as a complete line instead of
+        # being flagged as a cut and dropping every line after it.
+        read_limit = line_limit + 2
         with target.open(
             "r", encoding="utf-8-sig", errors=errors, newline=""
         ) as handle:
             number = 0
             while True:
-                line = pending + handle.readline(line_limit)
+                line = pending + handle.readline(read_limit)
                 pending = ""
                 if not line:
                     break
-                if line.endswith("\r") and len(line) >= line_limit:
+                if line.endswith("\r") and len(line) >= read_limit:
                     # A limit that lands between CR and LF must not turn the
                     # LF into a separate empty line. Peek one character and
                     # keep it for the next iteration when it is real content.
@@ -163,13 +174,33 @@ class FileToolsMixin:
                 last_line = number
                 if "\x00" in line:
                     raise ToolError("binary files are not supported by read")
-                line_cut = len(line) >= line_limit and not line.endswith(("\n", "\r"))
+                line_cut = len(line) >= read_limit and not line.endswith(("\n", "\r"))
+                if line_cut:
+                    # The limit may still be an exact fit for a complete line
+                    # that had not delivered its terminator within the limit.
+                    position = handle.tell()
+                    following = handle.read(1)
+                    if not following:
+                        line_cut = False
+                    elif following == "\n":
+                        line += following
+                        line_cut = False
+                    elif following == "\r":
+                        line += following
+                        peek = handle.read(1)
+                        if peek == "\n":
+                            line += peek
+                        elif peek:
+                            handle.seek(position + 1)
+                        line_cut = False
+                    else:
+                        handle.seek(position)
                 if number < start or (stop is not None and number > stop):
                     if line_cut:
                         # Skip the rest of an over-long physical line so the
                         # next readline starts a new line and the reported
                         # numbers keep matching the file.
-                        drain_physical_line(handle, line_limit)
+                        drain_physical_line(handle, read_limit)
                     if stop is not None and number > stop:
                         break
                     continue
@@ -211,7 +242,17 @@ class FileToolsMixin:
         process umask instead of mkstemp's 0600 so other users/groups can read
         source files created by the agent.
         """
-        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        fd: int
+        temp_name: str
+        try:
+            fd, temp_name = tempfile.mkstemp(
+                # A temp name longer than the filesystem's limit fails with an
+                # opaque EINVAL; the random suffix is what matters, not the stem.
+                prefix=f".{target.name[:40]}.",
+                dir=target.parent,
+            )
+        except OSError as exc:
+            raise ToolError(f"cannot write {target}: {exc}") from exc
         temp_path = Path(temp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
@@ -219,8 +260,9 @@ class FileToolsMixin:
                 handle.flush()
                 os.fsync(handle.fileno())
             if mode is None:
-                current_umask = os.umask(0)
-                os.umask(current_umask)
+                with _UMASK_LOCK:
+                    current_umask = os.umask(0)
+                    os.umask(current_umask)
                 mode = 0o666 & ~current_umask
             try:
                 os.chmod(temp_path, mode)
@@ -267,7 +309,10 @@ class FileToolsMixin:
         except OSError as exc:
             raise ToolError(f"cannot create parent directory: {exc}") from exc
         existed = target.exists()
-        mode = target.stat().st_mode & 0o7777 if existed else None
+        # Never carry setuid/setgid bits onto rewritten content: the kernel
+        # clears them on a normal write, and restoring them would hand the new
+        # bytes the old privilege.
+        mode = target.stat().st_mode & 0o777 if existed else None
         self._write_atomic(target, content, mode=mode)
         return {
             "status": "success",
@@ -370,7 +415,7 @@ class FileToolsMixin:
                 f"edited file is too large: {len(encoded)} bytes exceeds "
                 f"tools.max_file_bytes ({self.max_file_bytes})"
             )
-        self._write_atomic(target, updated, mode=target.stat().st_mode & 0o7777)
+        self._write_atomic(target, updated, mode=target.stat().st_mode & 0o777)
         return {
             "status": "success",
             "path": str(target),
