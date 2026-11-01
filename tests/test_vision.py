@@ -123,6 +123,20 @@ class VisionClientTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_describe_rejects_oversized_and_unsupported_data(self) -> None:
+        client = _describe_client(
+            lambda request: httpx2.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        )
+        try:
+            with self.assertRaisesRegex(ToolError, "max_image_bytes"):
+                client.describe("image/png", PNG_BYTES + b"\\x00" * 2048)
+            with self.assertRaisesRegex(ToolError, "supported formats"):
+                client.describe("image/png", b"not an image")
+        finally:
+            client.close()
+
     def test_describe_truncates_long_text(self) -> None:
         client = _describe_client(
             lambda request: httpx2.Response(

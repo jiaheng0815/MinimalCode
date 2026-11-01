@@ -431,6 +431,26 @@ class WebToolTests(unittest.TestCase):
         self.assertEqual(web["base_url"], "https://api.deepseek.com/v1/tools")
         self.assertEqual(web["search_path"], "search")
 
+    def test_web_client_inherits_provider_headers(self) -> None:
+        # A provider that authenticates with a custom header must not lose it in
+        # web_tools, which carried its own empty `headers` block.
+        config = _web_config()
+        config["headers"] = {"X-Auth": "provider-token"}
+        requests: list[httpx2.Request] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            requests.append(request)
+            return httpx2.Response(200, json={"results": []})
+
+        client = ProviderWebClient(
+            "custom", config, transport=httpx2.MockTransport(handler)
+        )
+        try:
+            client.search("query")
+        finally:
+            client.close()
+        self.assertEqual(requests[0].headers["x-auth"], "provider-token")
+
 
 if __name__ == "__main__":
     unittest.main()

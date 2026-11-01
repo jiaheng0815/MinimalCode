@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .config import ConfigError, load_settings, write_settings
+from .config import (
+    DEFAULT_SETTINGS,
+    ConfigError,
+    load_settings,
+    write_settings_document,
+)
 
 PI_PROTOCOLS = {
     "openai-completions": "openai_chat",
@@ -101,8 +106,15 @@ def import_pi_settings(
         raise ConfigError(f"{pi_root / 'models.json'}: providers must be an object")
 
     destination = load_settings(destination_home)
-    data = copy.deepcopy(destination.data)
+    raw = copy.deepcopy(destination.raw or {})
+    raw_providers = raw.get("providers")
+    if not isinstance(raw_providers, dict):
+        raw_providers = {}
+    presets = DEFAULT_SETTINGS.get("providers")
+    if not isinstance(presets, dict):
+        presets = {}
     imported: list[tuple[str, dict[str, Any], str]] = []
+    imported_configs: dict[str, dict[str, Any]] = {}
     skipped: list[str] = []
     already_present: list[str] = []
 
@@ -127,8 +139,14 @@ def import_pi_settings(
             skipped.append(provider_name)
             continue
 
-        existing = data["providers"].get(provider_name)
-        if existing is not None and not overwrite:
+        existing = raw_providers.get(provider_name)
+        # A name that only matches a bundled preset carries no user data, so it
+        # must not be reported as "already imported" or block a fresh import.
+        if (
+            existing is not None
+            and existing != presets.get(provider_name)
+            and not overwrite
+        ):
             skipped.append(provider_name)
             already_present.append(provider_name)
             continue
@@ -170,8 +188,8 @@ def import_pi_settings(
                 + "_API_KEY"
             )
             provider_config["api_key_env"] = env_name
-        data["providers"][provider_name] = provider_config
         imported.append((provider_name, provider_config, model_id))
+        imported_configs[provider_name] = provider_config
 
     if not imported:
         if already_present and len(already_present) == len(skipped):
@@ -192,9 +210,25 @@ def import_pi_settings(
         (item for item in imported if item[0] == default_provider),
         imported[0],
     )
-    data["provider"] = selected[0]
-    data["model"] = selected[2]
-    result_path = write_settings(data, destination_home)
+    document = copy.deepcopy(raw)
+    providers = document.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    # Replace each imported entry instead of deep-merging it: an overwrite must
+    # not keep a stale `api_key` from the entry it replaces.
+    for name, provider_config in imported_configs.items():
+        providers[name] = provider_config
+    document["providers"] = providers
+    current_provider = document.get("provider")
+    current_model = document.get("model")
+    selection_is_default = current_provider in (
+        None,
+        DEFAULT_SETTINGS.get("provider"),
+    ) and current_model in (None, DEFAULT_SETTINGS.get("model"))
+    if selection_is_default or current_provider == selected[0]:
+        document["provider"] = selected[0]
+        document["model"] = selected[2]
+    result_path = write_settings_document(document, destination_home)
     return ImportResult(
         provider=selected[0],
         model=selected[2],

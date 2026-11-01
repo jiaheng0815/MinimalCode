@@ -139,7 +139,10 @@ def _macos_image() -> bytes:
             "no_png",
             "can't make",
             "can’t make",
+            "can't get",
+            "can’t get",
             "(-1700)",
+            "(-1728)",
             "no image",
         )
         if any(marker in detail for marker in no_image_markers):
@@ -167,6 +170,7 @@ def _linux_image() -> bytes:
         ("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]),
     )
     found = False
+    last_error: ClipboardError | None = None
     for name, arguments in candidates:
         executable = shutil.which(name)
         if executable is None:
@@ -174,11 +178,24 @@ def _linux_image() -> bytes:
         found = True
         try:
             completed = _run([executable, *arguments], label=name)
-        except ClipboardError:
-            # A missing Wayland session is common on X11; try the next reader.
+        except ClipboardError as exc:
+            # A missing Wayland session is common on X11; try the next reader,
+            # but remember why it failed so a real read error is not reported
+            # as an empty clipboard.
+            last_error = exc
             continue
-        if completed.returncode == 0 and completed.stdout:
-            return completed.stdout
+        if completed.returncode == 0:
+            if completed.stdout:
+                return completed.stdout
+            # This reader answered cleanly with no image; that is an empty
+            # clipboard, not a failure of a previous candidate.
+            last_error = None
+            continue
+        last_error = ClipboardError(
+            f"{name} clipboard read failed: {_first_error_line(completed)}"
+        )
+    if last_error is not None:
+        raise last_error
     if not found:
         raise ClipboardError(
             "clipboard image paste needs wl-paste (Wayland) or xclip (X11)"

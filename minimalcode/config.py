@@ -190,6 +190,135 @@ def _coerce_provider_values(name: str, provider: dict[str, Any]) -> dict[str, An
     return result
 
 
+def _placeholder_paths(
+    value: Any, prefix: tuple[str, ...] = ()
+) -> set[tuple[str, ...]]:
+    """Return the dotted paths whose string value contained ``${VAR}``."""
+    paths: set[tuple[str, ...]] = set()
+    if isinstance(value, str):
+        if _ENV_PATTERN.search(value):
+            paths.add(prefix)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                paths |= _placeholder_paths(item, (*prefix, key))
+    elif isinstance(value, list):
+        for item in value:
+            paths |= _placeholder_paths(item, prefix)
+    return paths
+
+
+def _coerce_keys(
+    section: dict[str, Any],
+    label: str,
+    paths: set[tuple[str, ...]],
+    *,
+    bools: tuple[str, ...] = (),
+    ints: tuple[str, ...] = (),
+    floats: tuple[str, ...] = (),
+) -> None:
+    """Re-type only the values that came from an environment placeholder."""
+    prefix = tuple(label.split("."))
+    for key in bools:
+        if key in section and (*prefix, key) in paths:
+            section[key] = _coerce_bool(section[key], f"{label}.{key}")
+    for key in ints:
+        if key in section and (*prefix, key) in paths:
+            section[key] = _coerce_int(section[key], f"{label}.{key}")
+    for key in floats:
+        if key in section and (*prefix, key) in paths:
+            section[key] = _coerce_float(section[key], f"{label}.{key}")
+
+
+def _coerce_root_values(data: dict[str, Any], paths: set[tuple[str, ...]]) -> None:
+    """Re-type non-provider values that came from ``${ENV}`` placeholders.
+
+    Provider blocks are expanded lazily by ``provider_config`` because a
+    placeholder in an unselected provider must not fail startup, so only the
+    root settings are coerced here. A plain string such as ``"false"`` stays a
+    string and is still rejected by validation; only an expanded placeholder
+    is re-typed.
+    """
+    if "max_turns" in data and ("max_turns",) in paths:
+        data["max_turns"] = _coerce_int(data["max_turns"], "max_turns")
+    shell = data.get("shell")
+    if isinstance(shell, dict):
+        _coerce_keys(
+            shell,
+            "shell",
+            paths,
+            ints=("max_output_chars",),
+            floats=("timeout_seconds",),
+        )
+    tools = data.get("tools")
+    if isinstance(tools, dict):
+        _coerce_keys(
+            tools,
+            "tools",
+            paths,
+            bools=("allow_outside_workspace",),
+            ints=(
+                "max_parallel",
+                "max_file_chars",
+                "max_file_bytes",
+                "max_results",
+            ),
+        )
+    subagent = data.get("subagent")
+    if isinstance(subagent, dict):
+        _coerce_keys(
+            subagent,
+            "subagent",
+            paths,
+            bools=("enabled",),
+            ints=("max_depth", "max_turns", "max_parallel"),
+            floats=("timeout_seconds",),
+        )
+    context = data.get("context")
+    if isinstance(context, dict):
+        _coerce_keys(
+            context,
+            "context",
+            paths,
+            ints=("keep_messages", "max_instruction_chars"),
+            floats=("compact_at",),
+        )
+    session = data.get("session")
+    if isinstance(session, dict):
+        _coerce_keys(session, "session", paths, bools=("save",))
+    output = data.get("output")
+    if isinstance(output, dict):
+        _coerce_keys(output, "output", paths, bools=("markdown_highlight",))
+    sandbox = data.get("sandbox")
+    if isinstance(sandbox, dict):
+        _coerce_keys(
+            sandbox,
+            "sandbox",
+            paths,
+            bools=("enabled", "allow_sensitive_files"),
+            ints=(
+                "max_output_chars",
+                "max_memory_mb",
+                "max_processes",
+            ),
+            floats=("timeout_seconds",),
+        )
+
+
+def _expand_root_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """Expand ``${VAR}`` placeholders outside the provider table.
+
+    Provider values are expanded by ``provider_config`` when that provider is
+    actually used, so selecting another provider never fails on its missing
+    environment variable.
+    """
+    expanded = dict(data)
+    for key, value in data.items():
+        if key != "providers":
+            expanded[key] = expand_env(value)
+    return expanded
+
+
 def _validate(data: dict[str, Any], path: Path) -> None:
     provider = data.get("provider")
     model = data.get("model")
@@ -551,6 +680,10 @@ class Settings:
     data: dict[str, Any]
     home: Path
     source: Path
+    # The settings file as written by the user (not merged with defaults and
+    # not env-expanded). Config writes start from this, so `config set-model`
+    # neither freezes every preset nor replaces `${VAR}` with its value.
+    raw: dict[str, Any] | None = None
 
     def get(self, path: str, default: Any = None) -> Any:
         value: Any = self.data
@@ -597,8 +730,9 @@ def load_settings(
         if require_file:
             raise ConfigError(f"settings file not found: {source}") from None
         data = copy.deepcopy(DEFAULT_SETTINGS)
+        _coerce_root_values(data, set())
         _validate(data, source)
-        return Settings(data=data, home=root, source=source)
+        return Settings(data=data, home=root, source=source, raw={})
     except (OSError, UnicodeDecodeError) as exc:
         # An existing but unreadable file must never silently fall back to
         # defaults: the user would be talking to a different provider than
@@ -613,11 +747,26 @@ def load_settings(
         raise ConfigError(f"{source}: top-level value must be an object")
 
     data = _deep_merge(DEFAULT_SETTINGS, raw)
+    unexpanded = {key: value for key, value in data.items() if key != "providers"}
+    placeholders = _placeholder_paths(unexpanded)
+    data = _expand_root_settings(data)
+    unresolved = _unresolved_env(
+        {key: value for key, value in data.items() if key != "providers"}
+    )
+    if unresolved is not None:
+        raise ConfigError(f"{source}: unset environment variable: {unresolved}")
+    _coerce_root_values(data, placeholders)
     _validate(data, source)
-    return Settings(data=data, home=root, source=source)
+    return Settings(data=data, home=root, source=source, raw=raw)
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    # Write through a symlinked settings file instead of replacing the link
+    # with a regular file (dotfile repositories are the common setup).
+    try:
+        path = Path(os.path.realpath(path))
+    except (OSError, RuntimeError, ValueError):
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
@@ -661,21 +810,126 @@ def _ensure_home_layout(root: Path) -> Path:
     return path
 
 
+_OMIT = object()
+
+
+def _prune_defaults(value: Any, default: Any) -> Any:
+    """Drop values that the bundled defaults already provide.
+
+    Persisting the merged settings froze every preset on disk: a later release
+    could no longer correct an existing key. Writing only the user's
+    differences keeps the defaults live. A missing key in the file simply
+    means "use the default", which is the same effective value.
+    """
+    if isinstance(value, dict) and isinstance(default, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key not in default:
+                result[key] = item
+                continue
+            pruned = _prune_defaults(item, default[key])
+            if pruned is not _OMIT:
+                result[key] = pruned
+        return result if result else _OMIT
+    if value == default:
+        return _OMIT
+    return value
+
+
+def file_settings(settings: Settings) -> dict[str, Any]:
+    """Return the settings document a user would edit.
+
+    Bundled defaults are merged in so the output is complete, and ``raw``
+    values are returned unexpanded so ``${VAR}`` placeholders stay visible.
+    """
+    return _deep_merge(DEFAULT_SETTINGS, copy.deepcopy(settings.raw or {}))
+
+
 def write_settings(data: dict[str, Any], home: str | Path | None = None) -> Path:
+    """Write a complete effective settings mapping.
+
+    Keys equal to the bundled defaults are pruned before writing, so the file
+    stays a delta and a later release can still correct a preset.
+    """
     root = home_dir(home)
     path = _ensure_home_layout(root)
     _validate(data, path)
-    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    pruned = _prune_defaults(data, DEFAULT_SETTINGS)
+    payload = {} if pruned is _OMIT else pruned
+    _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return path
 
 
-def ensure_config(home: str | Path | None = None, *, overwrite: bool = False) -> Path:
+def write_settings_document(
+    document: dict[str, Any],
+    home: str | Path | None = None,
+) -> Path:
+    """Validate and persist a complete user settings document.
+
+    The document is the raw file the user would edit: defaults are merged only
+    for validation, and values matching a bundled default are pruned so a
+    later release can still correct them.
+    """
+    root = home_dir(home)
+    path = _ensure_home_layout(root)
+    unexpanded = _deep_merge(DEFAULT_SETTINGS, copy.deepcopy(document))
+    placeholders = _placeholder_paths(
+        {key: value for key, value in unexpanded.items() if key != "providers"}
+    )
+    effective = _expand_root_settings(unexpanded)
+    _coerce_root_values(effective, placeholders)
+    _validate(effective, path)
+    pruned = _prune_defaults(document, DEFAULT_SETTINGS)
+    payload = {} if pruned is _OMIT else pruned
+    try:
+        text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"cannot serialize settings: {exc}") from exc
+    _atomic_write(path, text)
+    return path
+
+
+def save_settings(
+    settings: Settings,
+    updates: dict[str, Any],
+    home: str | Path | None = None,
+) -> Path:
+    """Merge ``updates`` into the user's file and persist only that delta.
+
+    ``settings.data`` is the effective view (defaults merged, environment
+    expanded); writing it back would freeze every preset and replace
+    placeholders with secrets. The raw file plus the requested keys is what a
+    `config set-*` command actually changes.
+    """
+    document = _deep_merge(copy.deepcopy(settings.raw or {}), updates)
+    return write_settings_document(document, home)
+
+
+def ensure_config(
+    home: str | Path | None = None,
+    *,
+    overwrite: bool = False,
+    minimal: bool = False,
+) -> Path:
+    """Create the settings file.
+
+    ``minimal`` is used for the automatic first-run creation: pinning only the
+    provider/model keeps every other value live under the bundled defaults, so
+    a later release can still correct a preset. ``minimalcode init`` keeps
+    writing the full template for users who want a file to edit.
+    """
     root = home_dir(home)
     path = _ensure_home_layout(root)
     if overwrite or not path.exists():
-        _atomic_write(
-            path, json.dumps(DEFAULT_SETTINGS, indent=2, ensure_ascii=False) + "\n"
+        payload = (
+            {
+                "provider": DEFAULT_SETTINGS["provider"],
+                "model": DEFAULT_SETTINGS["model"],
+            }
+            if minimal
+            else DEFAULT_SETTINGS
         )
+        _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return path
 
 
@@ -702,6 +956,17 @@ _SAFE_COMPACT_KEYS = {
 }
 
 
+_ENV_REFERENCE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_HEADER_NAMES = {
+    "accept",
+    "accept-language",
+    "anthropic-beta",
+    "anthropic-version",
+    "content-type",
+    "user-agent",
+}
+
+
 def _is_sensitive_key(key: object) -> bool:
     if not isinstance(key, str):
         return False
@@ -709,7 +974,7 @@ def _is_sensitive_key(key: object) -> bool:
     if lowered in _SENSITIVE_EXACT_KEYS:
         return True
     compact = re.sub(r"[^a-z0-9]", "", lowered)
-    if compact in _SAFE_COMPACT_KEYS or compact.endswith("env"):
+    if compact in _SAFE_COMPACT_KEYS:
         return False
     return (
         "apikey" in compact
@@ -724,8 +989,42 @@ def redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if _is_sensitive_key(key):
+            if (
+                isinstance(key, str)
+                and key.lower() == "headers"
+                and isinstance(item, dict)
+            ):
+                # Custom headers carry credentials too, and an arbitrary name
+                # such as `X-Auth` does not look sensitive. Only the standard
+                # protocol headers are safe to print.
+                result[key] = {
+                    header: (
+                        "<redacted>"
+                        if str(header).lower() not in _SAFE_HEADER_NAMES
+                        else header_value
+                    )
+                    for header, header_value in item.items()
+                }
+            elif (
+                isinstance(key, str)
+                and key.lower().endswith("env")
+                and not (isinstance(item, str) and _ENV_REFERENCE_RE.fullmatch(item))
+            ):
+                # An `*_env` key is only safe when its value is a variable
+                # name; a literal secret under that name must not print.
                 result[key] = "<redacted>" if item else item
+            elif _is_sensitive_key(key):
+                # An `*_env` entry holds the *name* of a variable, which is
+                # safe and useful to print; any other shape is a value.
+                if (
+                    isinstance(key, str)
+                    and key.lower().endswith("env")
+                    and isinstance(item, str)
+                    and _ENV_REFERENCE_RE.fullmatch(item)
+                ):
+                    result[key] = item
+                else:
+                    result[key] = "<redacted>" if item else item
             else:
                 result[key] = redact_config(item)
         return result

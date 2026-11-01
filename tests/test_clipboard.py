@@ -149,6 +149,37 @@ class ClipboardTests(unittest.TestCase):
         ):
             _linux_image()
 
+    def test_linux_reader_reports_failures_instead_of_an_empty_clipboard(
+        self,
+    ) -> None:
+        # A reader that was found but failed (no Wayland session, no X display)
+        # used to become an empty result, which the CLI treats as "no image".
+        with (
+            patch(
+                "minimalcode.clipboard.shutil.which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ),
+            patch(
+                "minimalcode.clipboard.subprocess.run",
+                return_value=_completed(stderr=b"cannot open display", returncode=1),
+            ),
+            self.assertRaisesRegex(ClipboardError, "cannot open display"),
+        ):
+            _linux_image()
+
+    def test_linux_reader_accepts_a_clean_empty_clipboard(self) -> None:
+        with (
+            patch(
+                "minimalcode.clipboard.shutil.which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ),
+            patch(
+                "minimalcode.clipboard.subprocess.run",
+                return_value=_completed(),
+            ),
+        ):
+            self.assertEqual(_linux_image(), b"")
+
 
 if __name__ == "__main__":
     unittest.main()

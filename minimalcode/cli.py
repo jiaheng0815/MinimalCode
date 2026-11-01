@@ -11,7 +11,7 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import __version__
 from .config import (
@@ -21,11 +21,12 @@ from .config import (
     _unresolved_env,
     ensure_config,
     expand_env,
+    file_settings,
     home_dir,
     load_settings,
     redact_config,
+    save_settings,
     settings_path,
-    write_settings,
 )
 from .errors import ConfigError, MinimalCodeError
 from .highlight import sanitize_terminal_text, style_activity_tag
@@ -230,18 +231,17 @@ def _management_command(argv: Sequence[str]) -> int | None:
                 raise ConfigError("model ID must not be empty")
             model = args.value.strip()
             settings.data["model"] = model
+            updates: dict[str, Any] = {"model": model}
             providers = settings.data.get("providers")
-            active = (
-                providers.get(str(settings.data.get("provider")))
-                if isinstance(providers, dict)
-                else None
-            )
+            active_name = str(settings.data.get("provider"))
+            active = providers.get(active_name) if isinstance(providers, dict) else None
             if isinstance(active, dict) and "model" in active:
                 # A provider-level model wins over the global setting; update
                 # it too or this command would report success and change
                 # nothing about the request that is actually sent.
                 active["model"] = model
-            path = write_settings(settings.data, args.home)
+                updates["providers"] = {active_name: {"model": model}}
+            path = save_settings(settings, updates, args.home)
             print(sanitize_terminal_text(f"{path}: model={model}"))
             return 0
         if args.action == "set-provider":
@@ -253,9 +253,11 @@ def _management_command(argv: Sequence[str]) -> int | None:
             if not isinstance(config, dict):
                 raise ConfigError(f"provider {provider!r} is not defined")
             settings.data["provider"] = provider
+            updates = {"provider": provider}
             provider_model = config.get("model")
             if isinstance(provider_model, str) and provider_model.strip():
                 settings.data["model"] = provider_model.strip()
+                updates["model"] = provider_model.strip()
             else:
                 print(
                     sanitize_terminal_text(
@@ -265,12 +267,14 @@ def _management_command(argv: Sequence[str]) -> int | None:
                     ),
                     file=sys.stderr,
                 )
-            path = write_settings(settings.data, args.home)
+            path = save_settings(settings, updates, args.home)
             print(sanitize_terminal_text(f"{path}: provider={provider}"))
             return 0
         print(
             json.dumps(
-                redact_config(settings.data),
+                # Show the file the user would edit, with defaults merged but
+                # `${VAR}` placeholders intact, instead of the runtime view.
+                redact_config(file_settings(settings)),
                 indent=2,
                 ensure_ascii=False,
             )
@@ -967,6 +971,10 @@ def _read_clipboard_image(agent: Agent) -> tuple[str, bytes] | None:
 
     try:
         return clipboard_image()
+    except KeyboardInterrupt:
+        # Cancelling the paste should return to the prompt, not end the REPL.
+        print("\nclipboard image cancelled", file=sys.stderr)
+        return None
     except (MinimalCodeError, OSError) as exc:
         print(
             f"clipboard image unavailable: {sanitize_terminal_text(str(exc))}",
@@ -1002,6 +1010,9 @@ def _image_message(
         return text or None
     try:
         description = client.describe(media_type, data)
+    except KeyboardInterrupt:
+        print("\nimage paste cancelled", file=sys.stderr)
+        return text or None
     except (MinimalCodeError, OSError) as exc:
         print(
             f"image paste failed: {sanitize_terminal_text(str(exc))}",
@@ -1217,7 +1228,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     cwd = _resolve_cwd(args.cwd)
     settings = load_settings(args.home)
     if not settings.source.exists():
-        ensure_config(args.home)
+        ensure_config(args.home, minimal=True)
         settings = load_settings(args.home, require_file=True)
     _apply_sandbox_overrides(settings, args)
     env_config = _apply_anthropic_env(settings, args) if args.anthropic_env else None

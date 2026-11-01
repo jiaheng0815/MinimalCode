@@ -81,6 +81,15 @@ def is_loopback_url(url: str) -> bool:
         return False
 
 
+def merge_headers(*sources: Any) -> dict[str, Any]:
+    """Merge header mappings left to right, letting later entries win."""
+    merged: dict[str, Any] = {}
+    for source in sources:
+        if isinstance(source, dict):
+            merged.update(source)
+    return merged
+
+
 def build_headers(api_key: str | None, custom: Any) -> dict[str, str]:
     """Build request headers, honouring a caller-supplied Authorization."""
     headers = {
@@ -259,6 +268,7 @@ __all__ = [
     "build_headers",
     "connection_backoff",
     "is_loopback_url",
+    "merge_headers",
     "post_json",
     "resolve_trust_env",
 ]

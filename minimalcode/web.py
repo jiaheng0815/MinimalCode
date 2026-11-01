@@ -9,7 +9,13 @@ import httpx2
 
 from .config import provider_api_key
 from .errors import ToolError
-from .httpclient import build_client, build_headers, join_url_path, post_json
+from .httpclient import (
+    build_client,
+    build_headers,
+    join_url_path,
+    merge_headers,
+    post_json,
+)
 
 _MAX_NESTED_ITEMS = 32
 
@@ -87,7 +93,9 @@ class ProviderWebClient:
         api_key = provider_api_key(web) or provider_api_key(config)
         self._client = build_client(
             base_url=base_url,
-            headers=build_headers(api_key, web.get("headers")),
+            headers=build_headers(
+                api_key, merge_headers(config.get("headers"), web.get("headers"))
+            ),
             timeout=timeout,
             transport=transport,
             trust_env=web.get("trust_env", config.get("trust_env")),

@@ -10,7 +10,13 @@ import httpx2
 
 from .config import provider_api_key
 from .errors import ToolError
-from .httpclient import build_client, build_headers, join_url_path, post_json
+from .httpclient import (
+    build_client,
+    build_headers,
+    join_url_path,
+    merge_headers,
+    post_json,
+)
 
 # The provider judges formats by content, not by file name, so the tool does the
 # same and labels the data URL with the detected type.
@@ -117,7 +123,9 @@ class ProviderVisionClient:
         api_key = provider_api_key(vision) or provider_api_key(config)
         self._client = build_client(
             base_url=base_url,
-            headers=build_headers(api_key, vision.get("headers")),
+            headers=build_headers(
+                api_key, merge_headers(config.get("headers"), vision.get("headers"))
+            ),
             timeout=timeout,
             transport=transport,
             trust_env=vision.get("trust_env", config.get("trust_env")),
@@ -147,6 +155,16 @@ class ProviderVisionClient:
             raise ToolError(f"read_image is not enabled for provider {self.name!r}")
         if not isinstance(data, bytes) or not data:
             raise ToolError("image data must be non-empty bytes")
+        if len(data) > self.max_image_bytes:
+            raise ToolError(
+                f"image is too large: {len(data)} bytes exceeds "
+                f"vision.max_image_bytes ({self.max_image_bytes})"
+            )
+        if image_media_type(data) is None:
+            raise ToolError(
+                f"image data is not one of the supported formats "
+                f"({SUPPORTED_IMAGE_FORMATS})"
+            )
         if question is not None and not isinstance(question, str):
             raise ToolError("question must be a string or null")
         prompt = (question or "").strip() or (

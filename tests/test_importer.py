@@ -165,6 +165,87 @@ class ImporterTests(unittest.TestCase):
                     pi_home=pi_home,
                 )
 
+    def test_bundled_provider_name_can_be_imported_into_a_fresh_home(self) -> None:
+        # The check for "already present" used the defaults-merged view, so a
+        # Pi provider named after a preset (openai, anthropic, ...) was always
+        # reported as imported even in an empty home.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            pi_home.mkdir()
+            (pi_home / "models.json").write_text(
+                json.dumps(
+                    {
+                        "providers": {
+                            "openai": {
+                                "baseUrl": "https://example.test/v1",
+                                "api": "openai-chat",
+                                "models": [
+                                    {"id": "custom-model", "contextWindow": 64000}
+                                ],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = import_pi_settings(
+                destination_home=root / ".MinimalCode", pi_home=pi_home
+            )
+            self.assertEqual(result.provider, "openai")
+            self.assertEqual(result.skipped, [])
+            settings = load_settings(root / ".MinimalCode", require_file=True)
+            _, provider = settings.provider_config()
+            self.assertEqual(provider["base_url"], "https://example.test/v1")
+            self.assertEqual(provider["model"], "custom-model")
+
+    def test_overwrite_replaces_the_whole_provider_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            destination = root / ".MinimalCode"
+            _write_pi_config(pi_home, api_key="old-secret")
+            import_pi_settings(
+                destination_home=destination,
+                pi_home=pi_home,
+                include_secrets=True,
+            )
+            import_pi_settings(
+                destination_home=destination,
+                pi_home=pi_home,
+                include_secrets=False,
+                overwrite=True,
+            )
+            settings = load_settings(destination, require_file=True)
+            _, provider = settings.provider_config()
+            # A deep merge would keep the credential from the entry being
+            # replaced even though the new import asked not to copy secrets.
+            self.assertNotIn("api_key", provider)
+            self.assertEqual(provider["api_key_env"], "MINIMALCODE_LOCAL_API_KEY")
+
+    def test_an_explicit_provider_selection_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            destination = root / ".MinimalCode"
+            _write_pi_config(pi_home)
+            destination.mkdir(parents=True)
+            (destination / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "deepseek-anthropic",
+                        "model": "deepseek-flash",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = import_pi_settings(destination_home=destination, pi_home=pi_home)
+            self.assertEqual(result.provider, "local")
+            settings = load_settings(destination, require_file=True)
+            self.assertEqual(settings.get("provider"), "deepseek-anthropic")
+            self.assertEqual(settings.get("model"), "deepseek-flash")
+            self.assertEqual(settings.provider_config("local")[0], "local")
+
 
 if __name__ == "__main__":
     unittest.main()

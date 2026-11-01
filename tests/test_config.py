@@ -11,8 +11,10 @@ from minimalcode.config import (
     ConfigError,
     ensure_config,
     expand_env,
+    file_settings,
     load_settings,
     redact_config,
+    save_settings,
     settings_path,
 )
 
@@ -412,6 +414,96 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(redacted["access_token"], "<redacted>")
         self.assertEqual(redacted["X-Api-Key"], "<redacted>")
         self.assertEqual(redacted["client_secret"], "<redacted>")
+        self.assertEqual(redacted["api_key_env"], "SAFE_VARIABLE_NAME")
+
+    def test_root_placeholders_are_expanded_and_coerced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = home / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "sandbox": {"enabled": "${MC_TEST_ENABLED}"},
+                        "tools": {"max_parallel": "${MC_TEST_PARALLEL}"},
+                        "shell": {"path": "${MC_TEST_SHELL}"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "MC_TEST_ENABLED": "false",
+                    "MC_TEST_PARALLEL": "7",
+                    "MC_TEST_SHELL": "/opt/test/bash",
+                },
+            ):
+                settings = load_settings(home)
+            self.assertIs(settings.get("sandbox.enabled"), False)
+            self.assertEqual(settings.get("tools.max_parallel"), 7)
+            self.assertEqual(settings.get("shell.path"), "/opt/test/bash")
+
+    def test_unset_root_placeholder_names_the_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            (home / "settings.json").write_text(
+                json.dumps({"shell": {"path": "${MC_MISSING_SHELL}"}}),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                self.assertRaisesRegex(ConfigError, "MC_MISSING_SHELL"),
+            ):
+                load_settings(home)
+
+    def test_plain_string_boolean_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            (home / "settings.json").write_text(
+                json.dumps({"sandbox": {"enabled": "false"}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "sandbox.enabled"):
+                load_settings(home)
+
+    def test_saved_settings_keep_only_the_user_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home)
+            settings = load_settings(home)
+            self.assertEqual(json.loads(settings.source.read_text())["max_turns"], 1000)
+            save_settings(settings, {"model": "new-model"}, home)
+            saved = json.loads(settings.source.read_text(encoding="utf-8"))
+            self.assertEqual(saved, {"model": "new-model"})
+            self.assertEqual(file_settings(settings)["max_turns"], 1000)
+
+    def test_automatic_first_run_does_not_freeze_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            ensure_config(home, minimal=True)
+            saved = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(saved), {"provider", "model"})
+            self.assertNotIn("providers", saved)
+            self.assertEqual(load_settings(home).get("max_turns"), 1000)
+
+    def test_redaction_hides_custom_headers_and_bad_env_values(self) -> None:
+        data = {
+            "providers": {
+                "p": {
+                    "headers": {
+                        "X-Auth": "Bearer secret",
+                        "Content-Type": "application/json",
+                    }
+                }
+            },
+            "auth_token_env": "literal-secret",
+            "api_key_env": "SAFE_VARIABLE_NAME",
+        }
+        redacted = redact_config(data)
+        headers = redacted["providers"]["p"]["headers"]
+        self.assertEqual(headers["X-Auth"], "<redacted>")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(redacted["auth_token_env"], "<redacted>")
         self.assertEqual(redacted["api_key_env"], "SAFE_VARIABLE_NAME")
 
 
