@@ -417,6 +417,43 @@ class HighlightTests(unittest.TestCase):
                         rendered,
                     )
 
+    def test_table_separator_at_end_of_stream_terminates(self) -> None:
+        # A `| --- |` row with no trailing newline used to advance the cursor
+        # by zero and spin forever inside finish().
+        for sample in ("| --- |", "|---|", "|-", "-|", "x\n| --- |"):
+            for size in (1, 2, len(sample)):
+                with self.subTest(sample=sample, size=size):
+                    stream = io.StringIO()
+                    highlighter = MarkdownHighlighter(stream, color=True)
+                    for index in range(0, len(sample), size):
+                        highlighter.feed(sample[index : index + size])
+                    highlighter.finish()
+                    self.assertNotIn("---", strip_ansi(stream.getvalue()))
+
+    def test_empty_list_item_ends_its_line(self) -> None:
+        # `- ` followed by a newline consumed the newline without resetting the
+        # line state, so the next heading rendered literally.
+        sample = "- \n# Heading\n"
+        for size in (1, 2, 3, len(sample)):
+            with self.subTest(size=size):
+                rendered = _render(sample, io.StringIO(), color=True, size=size)
+                self.assertEqual(strip_ansi(rendered), "- \nHeading\n")
+
+    def test_thinking_newline_resynchronizes_the_markdown_renderer(self) -> None:
+        from minimalcode.highlight.palette import _PALETTES
+
+        stream = io.StringIO()
+        highlighter = MarkdownHighlighter(stream, color=True)
+        thinking = ThinkingRenderer(stream, color=True)
+        thinking.feed("reasoning")
+        self.assertTrue(thinking.finish())
+        highlighter.note_external_newline()
+        highlighter.feed("# Heading\n")
+        highlighter.finish()
+        self.assertTrue(stream.getvalue().endswith("\x1b[0m\n"))
+        self.assertIn(_PALETTES["dark"]["h1"], stream.getvalue())
+        self.assertNotIn("# Heading", stream.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,15 +49,23 @@ class ThinkingRenderer:
         self._last_char = text[-1]
         self._open = True
 
-    def finish(self) -> None:
-        """Close the reasoning block so the answer starts on its own line."""
+    def finish(self) -> bool:
+        """Close the reasoning block so the answer starts on its own line.
+
+        Returns True when a newline was written to the shared stream, so a
+        Markdown renderer drawing after this one can resynchronize its line
+        state.
+        """
         # Reset even when no complete delta was written: a block whose entire
         # content is still held as an incomplete escape sequence must not poison
         # the next reasoning block with that pending state.
         self._sanitizer.finish()
+        wrote_newline = False
         if self.enabled and self._open and self._last_char != "\n":
             self.stream.write("\n")
             self.stream.flush()
+            wrote_newline = True
         self._sanitizer = TerminalSanitizer()
         self._last_char = ""
         self._open = False
+        return wrote_newline

@@ -492,11 +492,17 @@ class Agent:
         # ``complete_text``; there is no usage object to record.
         return self.provider.complete_text(messages)
 
+    def _close_thinking(self) -> None:
+        """Finish the reasoning block and resync the Markdown line state."""
+        if self._thinking_renderer is None:
+            return
+        if self._thinking_renderer.finish() and self._highlighter is not None:
+            self._highlighter.note_external_newline()
+
     def _write_delta(self, text: str) -> None:
-        if self._thinking_renderer is not None:
-            # Close the reasoning block first, so the answer never continues on
-            # the styled line the reasoning was written to.
-            self._thinking_renderer.finish()
+        # Close the reasoning block first, so the answer never continues on the
+        # styled line the reasoning was written to.
+        self._close_thinking()
         if self.stream_output:
             if self._highlighter is not None:
                 self._highlighter.feed(text)
@@ -512,8 +518,7 @@ class Agent:
             self._thinking_renderer.feed(text)
 
     def _finish_delta(self) -> None:
-        if self._thinking_renderer is not None:
-            self._thinking_renderer.finish()
+        self._close_thinking()
         if self._highlighter is not None:
             self._highlighter.finish()
         else:

@@ -92,10 +92,21 @@ class MarkdownHighlighter(CodeHighlightMixin):
         """Advance the cursor until input is exhausted or more is needed."""
         while self._cursor < len(self._pending):
             if self._in_fence and self._at_line_start:
+                start = self._cursor
                 if not self._consume_code_line_start(final=final):
                     break
+                if self._cursor == start and self._at_line_start:
+                    # No progress with no state change would spin forever.
+                    self._flush_unparsed(segments)
+                    break
             elif self._at_line_start:
+                start = self._cursor
                 if not self._consume_line_start(segments, final=final):
+                    break
+                if self._cursor == start and self._at_line_start:
+                    # A `| --- |` row at the very end of a stream used to land
+                    # here: the separator was dropped without consuming it.
+                    self._flush_unparsed(segments)
                     break
             elif self._line_kind == "code":
                 self._consume_code(segments)
@@ -201,9 +212,13 @@ class MarkdownHighlighter(CodeHighlightMixin):
             elif text[body_start + 1].isspace():
                 self._flush_indent(segments)
                 self._emit(segments, body_start + 1, self.palette["bullet"])
-                self._emit(segments, body_start + 2, None)
                 self._line_kind = "list"
                 self._at_line_start = False
+                if text[body_start + 1] == "\n":
+                    # The marker is the whole line. Leave the terminator to
+                    # `_consume_markdown` so the next line starts as a line.
+                    return True
+                self._emit(segments, body_start + 2, None)
                 return True
 
         number_end = body_start
@@ -244,7 +259,8 @@ class MarkdownHighlighter(CodeHighlightMixin):
                 # Drop the `| --- |` row wholesale, indentation included, instead
                 # of printing a wall of dashes and pipes between header and body.
                 self._line_indent = 0
-                self._advance(line_end + 1 - self._cursor)
+                consumed = len(text) if line_end < 0 else line_end + 1
+                self._advance(consumed - self._cursor)
                 self._end_line()
                 return True
 
@@ -592,6 +608,41 @@ class MarkdownHighlighter(CodeHighlightMixin):
         self._inline_mode = None
         self._line_indent = 0
         self._reset_code_line()
+
+    def note_external_newline(self) -> None:
+        """Record a newline written to the same stream by another renderer.
+
+        Reasoning is drawn by ``ThinkingRenderer`` on this stream; without this
+        call the highlighter still believes it is mid-line and prints the next
+        heading or fence literally. Any held tail is flushed unchanged, because
+        the bytes before the newline are already on screen.
+        """
+        tail = self._pending[self._cursor :]
+        if tail:
+            self._write(tail)
+        self._pending = ""
+        self._cursor = 0
+        self._previous = "\n"
+        self._at_line_start = True
+        self._line_kind = "normal"
+        self._heading_level = 0
+        self._inline_mode = None
+        self._line_indent = 0
+        self._in_fence = False
+        self._reset_code_line()
+
+    def _flush_unparsed(
+        self,
+        segments: list[tuple[str | None, list[str]]],
+    ) -> None:
+        """Emit the remaining buffer as plain text when parsing cannot advance.
+
+        This is a safety valve: a construct that no rule consumes must never
+        turn `feed()`/`finish()` into an infinite loop.
+        """
+        if self._cursor < len(self._pending):
+            self._emit(segments, len(self._pending), None)
+        self._end_line()
 
     def _reset_stream_state(self) -> None:
         """Reset parsing state so the renderer can be reused."""
