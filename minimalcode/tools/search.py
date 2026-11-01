@@ -9,12 +9,15 @@ engine and shape the result.
 from __future__ import annotations
 
 import json
+import os
+import queue
 import re
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +95,26 @@ for path in spec["files"]:
                     ("\n", "\r")
                 )
                 if cut:
+                    # A line of exactly the limit may still be complete; look at
+                    # the following character before dropping its tail.
+                    position = handle.tell()
+                    following = handle.read(1)
+                    if not following:
+                        cut = False
+                    elif following == "\n":
+                        line += following
+                        cut = False
+                    elif following == "\r":
+                        line += following
+                        peek = handle.read(1)
+                        if peek == "\n":
+                            line += peek
+                        elif peek:
+                            handle.seek(position + 1)
+                        cut = False
+                    else:
+                        handle.seek(position)
+                if cut:
                     # Swallow the rest of this physical line so the next
                     # readline starts a new line and `number` stays aligned
                     # with the file instead of counting each fragment.
@@ -165,6 +188,44 @@ def drain_physical_line(handle: Any, limit: int) -> None:
             return
 
 
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill a search child and any descendant that inherited its stdout."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def inline_guard_available() -> bool:
+    """Return True when the in-process regex fallback can enforce a deadline.
+
+    ``inline_python_grep`` uses ``SIGALRM``, which exists only on POSIX and is
+    delivered only to the main thread. The agent runs adjacent read-only tools
+    in worker threads, so callers must not pick that fallback when the guard is
+    unavailable.
+    """
+    return hasattr(signal, "SIGALRM") and (
+        threading.current_thread() is threading.main_thread()
+    )
+
+
 def run_bounded_command(
     command: list[str],
     *,
@@ -199,7 +260,6 @@ def run_bounded_command(
         return int(result.get("exit_code", 0) or 0), lines[:limit], truncated, stderr
 
     timed_out = threading.Event()
-    finished = threading.Event()
     process: subprocess.Popen[bytes] | None = None
     with tempfile.TemporaryFile() as err_file:
         try:
@@ -209,60 +269,67 @@ def run_bounded_command(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=err_file,
+                # A process group lets the timeout kill grandchildren that keep
+                # the stdout pipe open after the direct child exited.
+                start_new_session=os.name != "nt",
             )
         except (OSError, ValueError) as exc:
             raise ToolError(f"search failed: {exc}") from exc
 
-        def kill() -> None:
-            """Timer callback: kill once, and only while the child is running."""
-            if finished.is_set() or process.poll() is not None:
-                return
-            timed_out.set()
-            try:
-                process.kill()
-            except OSError:
-                pass
+        assert process.stdout is not None
+        # Reading in a daemon thread keeps a grandchild that inherited stdout
+        # from blocking the caller past the deadline. The direct child can exit
+        # first, and on Windows the surviving grandchild is no longer reachable
+        # through taskkill's process tree.
+        output: queue.Queue[bytes | None] = queue.Queue()
+        reader_done = threading.Event()
 
-        timer = threading.Timer(timeout, kill)
-        timer.daemon = True
-        timer.start()
+        def read_output() -> None:
+            try:
+                for _ in range(limit + 2):
+                    raw = process.stdout.readline()
+                    if not raw:
+                        break
+                    output.put(raw)
+            except (OSError, ValueError):
+                pass
+            finally:
+                output.put(None)
+                reader_done.set()
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
         lines: list[str] = []
         truncated = False
+        deadline = time.monotonic() + timeout
+        while len(lines) <= limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out.set()
+                break
+            try:
+                raw = output.get(timeout=remaining)
+            except queue.Empty:
+                timed_out.set()
+                break
+            if raw is None:
+                break
+            lines.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+        if len(lines) > limit:
+            truncated = True
+            lines = lines[:limit]
+            _kill_process_tree(process)
+        elif timed_out.is_set():
+            _kill_process_tree(process)
         try:
-            assert process.stdout is not None
-            # Read one line past the limit: its presence distinguishes an exact
-            # fit from a truncated result.
-            while len(lines) <= limit:
-                raw = process.stdout.readline()
-                if not raw:
-                    break
-                lines.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
-            if len(lines) > limit:
-                truncated = True
-                lines = lines[:limit]
-                finished.set()
-                try:
-                    process.kill()
-                except OSError:
-                    pass
             process.wait(timeout=5)
-            finished.set()
         except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
             timed_out.set()
-        finally:
-            # Always stop the timer and close the pipe, including on errors.
-            finished.set()
-            timer.cancel()
-            if process.stdout is not None:
-                process.stdout.close()
+            _kill_process_tree(process)
+        # Closing the pipe is safe only once the reader stopped using it; a
+        # blocked read is left to its daemon thread instead of deadlocking.
+        if reader_done.wait(1.0):
+            process.stdout.close()
         err_file.seek(0)
         stderr = err_file.read(4000).decode("utf-8", errors="replace").strip()
         if timed_out.is_set():

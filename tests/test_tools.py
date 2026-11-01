@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,7 +12,11 @@ from unittest.mock import patch
 from minimalcode.config import ConfigError, load_settings
 from minimalcode.shell import detect_shell
 from minimalcode.tools import ToolError, ToolRuntime
-from minimalcode.tools.search import inline_python_grep, run_python_grep
+from minimalcode.tools.search import (
+    inline_python_grep,
+    run_bounded_command,
+    run_python_grep,
+)
 
 
 class ToolTests(unittest.TestCase):
@@ -454,7 +460,62 @@ class ToolTests(unittest.TestCase):
         ):
             self.tools.grep("needle", path="build")
             self.tools.grep("needle", path="build/generated.py")
-        self.assertNotIn("!**/build/**", run.call_args.args[0])
+            self.assertNotIn("!**/build/**", run.call_args.args[0])
+
+    def test_read_exact_line_limit_keeps_following_lines(self) -> None:
+        # The per-line read limit was one char short of the configured maximum,
+        # so a line of exactly that width looked truncated and the rest of the
+        # file was dropped even though the character budget had room.
+        self.tools.max_file_chars = 2_000_000
+        (self.workspace / "exact.txt").write_text(
+            "x" * 1_000_000 + "\ny\n", encoding="utf-8", newline=""
+        )
+        result = self.tools.read("exact.txt")
+        self.assertEqual(result["start_line"], 1)
+        self.assertEqual(result["end_line"], 2)
+        self.assertFalse(result["truncated"])
+        self.assertIn("\ty\n", result["content"])
+
+    def test_glob_with_repeated_double_stars_is_linear(self) -> None:
+        from minimalcode.tools.search_tools import SearchToolsMixin
+
+        path = self.workspace / ("a" * 200)
+        pattern = "**a" * 20 + "b"
+        started = time.monotonic()
+        matched = SearchToolsMixin._matches_glob(path, self.workspace, pattern)
+        elapsed = time.monotonic() - started
+        self.assertFalse(matched)
+        self.assertLess(elapsed, 1.0)
+
+    @unittest.skipIf(os.name == "nt", "Windows file names cannot contain ':'")
+    def test_grep_result_path_with_colon_numbers_is_not_truncated(self) -> None:
+        self.tools.write("a:33:b.txt", "needle\n")
+        result = self.tools.grep("needle", path="a:33:b.txt")
+        self.assertEqual(len(result["matches"]), 1)
+        expected = str(self.workspace / "a:33:b.txt")
+        self.assertTrue(
+            result["matches"][0].startswith(expected + ":1:"), result["matches"]
+        )
+
+    def test_bounded_search_times_out_when_a_grandchild_holds_the_pipe(self) -> None:
+        # The direct child exits immediately, but its child keeps stdout open.
+        # The timeout used to skip the kill (the leader had exited) and then
+        # block in readline() until that grandchild finished on its own.
+        code = (
+            "import subprocess, sys; "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])"
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(ToolError, "timed out"):
+            run_bounded_command(
+                [sys.executable, "-c", code],
+                # The surviving grandchild inherits the working directory, and
+                # Windows keeps a directory locked while it is a process cwd.
+                cwd=Path(sys.prefix),
+                limit=10,
+                timeout=1,
+            )
+        self.assertLess(time.monotonic() - started, 20)
 
     def test_shell_tool(self) -> None:
         shell = detect_shell()

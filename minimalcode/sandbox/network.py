@@ -7,6 +7,8 @@ gate is what makes the default ``deny`` meaningful on every platform.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from urllib.parse import urlsplit
 
@@ -38,32 +40,115 @@ _NETWORK_COMMANDS = frozenset(
         "bitsadmin",
     }
 )
-_NETWORK_SEQUENCES = (
-    re.compile(
-        r"\bgit\s+(?:clone|fetch|pull|push|ls-remote|submodule)\b", re.IGNORECASE
+# Programs whose subcommand, not name, decides whether they reach the network.
+# Options before the subcommand are skipped, so `pip -q install x` and
+# `git -C . clone x` are still recognized instead of hiding the subcommand.
+_NETWORK_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "git": frozenset({"clone", "fetch", "pull", "push", "ls-remote", "submodule"}),
+    "pip": frozenset({"install", "download", "search", "index"}),
+    "pip3": frozenset({"install", "download", "search", "index"}),
+    "npm": frozenset({"install", "add", "i", "ci", "exec", "x"}),
+    "pnpm": frozenset({"install", "add", "i", "dlx", "update"}),
+    "yarn": frozenset({"install", "add", "dlx", "upgrade"}),
+    "cargo": frozenset({"install", "add", "update"}),
+    "gem": frozenset({"install", "update"}),
+    "go": frozenset({"get", "install"}),
+    "composer": frozenset({"install", "add", "require", "update"}),
+    "dotnet": frozenset({"add", "restore", "tool"}),
+    "apt": frozenset({"install", "update", "upgrade", "dist-upgrade"}),
+    "apt-get": frozenset({"install", "update", "upgrade", "dist-upgrade"}),
+    "brew": frozenset({"install", "update", "upgrade", "tap"}),
+    "dnf": frozenset({"install", "update", "upgrade"}),
+    "yum": frozenset({"install", "update", "upgrade"}),
+    "apk": frozenset({"add", "update", "upgrade"}),
+    "docker": frozenset({"pull", "push", "login", "run", "build"}),
+    "uv": frozenset({"add", "sync", "install", "run"}),
+    "poetry": frozenset({"add", "install", "update"}),
+    "openssl": frozenset({"s_client", "s_server"}),
+}
+# Options that consume the following token. Only the common ones are listed;
+# an unknown option is skipped alone, which is enough for the subcommand to
+# surface after at most a few tokens.
+_SUBCOMMAND_OPTION_VALUES: dict[str, frozenset[str]] = {
+    "git": frozenset(
+        {
+            "-C",
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--exec-path",
+            "--config-env",
+        }
     ),
-    re.compile(r"\bpip[0-9.]*\s+(?:install|download|search|index)\b", re.IGNORECASE),
-    re.compile(r"\b(?:npm|pnpm|yarn)\s+(?:install|add|i|ci)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:cargo|gem|go|composer|dotnet)\s+(?:install|get|add|restore)\b",
-        re.IGNORECASE,
+    "pip": frozenset(
+        {
+            "-r",
+            "--requirement",
+            "-e",
+            "--editable",
+            "-t",
+            "--target",
+            "-c",
+            "--constraint",
+            "-i",
+            "--index-url",
+            "--extra-index-url",
+            "-f",
+            "--find-links",
+            "--trusted-host",
+            "--python-version",
+        }
     ),
-    re.compile(r"\bapt(?:-get)?\s+(?:install|update|upgrade)\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:brew|dnf|yum|apk|pacman)\s+(?:install|add|upgrade)\b", re.IGNORECASE
+    "npm": frozenset(
+        {
+            "--prefix",
+            "--registry",
+            "--cache",
+            "--userconfig",
+            "--globalconfig",
+            "--workspace",
+            "-w",
+        }
     ),
-    re.compile(r"\bdocker\s+(?:pull|push|login|run)\b", re.IGNORECASE),
-    # `python -m pip show/list` and friends are read-only; only the subcommands
-    # that actually reach an index are treated as network use.
+    "pnpm": frozenset({"--dir", "-C", "--filter", "-F"}),
+    "yarn": frozenset({"--cwd", "--modules-folder"}),
+    "uv": frozenset({"--directory", "--project", "--cache-dir"}),
+    "docker": frozenset({"-H", "--host", "--context", "-c"}),
+}
+_SUBCOMMAND_OPTION_VALUES["pip3"] = _SUBCOMMAND_OPTION_VALUES["pip"]
+# Interpreter-only checks. `match` (not `search`) keeps `echo git clone` and
+# `rg "pip install"` from matching.
+_COMMAND_SEQUENCES = (
     re.compile(
         r"\bpython[0-9.]*\s+-m\s+pip\b[^|;&\n]*?\b(?:install|download|search|index)\b",
         re.IGNORECASE,
     ),
     re.compile(r"\bpython[0-9.]*\s+-m\s+(?:http\.server|requests)\b", re.IGNORECASE),
-    re.compile(r"\b(?:requests|urllib|httpx|socket)\.", re.IGNORECASE),
 )
-_URL_PATTERN = re.compile(r"\b(?:https?|ftps?)://([^\s'\"`/?#]+)", re.IGNORECASE)
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:\\=-]+")
+# Code that reaches the network from inside an inline `python -c`/`node -e`
+# script. It is searched only in nested command strings, never in the outer
+# command, so `rg "urllib.request"` is not misread as a network call.
+_NESTED_NETWORK_API = re.compile(
+    r"\b(?:requests|urllib3?|httpx|http\.client|ftplib|socket|urlopen|urlretrieve)\b",
+    re.IGNORECASE,
+)
+_URL_PATTERN = re.compile(
+    r"\b(?:https?|ftps?)://(?:[^/@\s'\"`?#]*@)?"
+    r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
+# curl options that can redirect a request away from the URL host: the
+# allowlist must see the resolver/proxy target as well, not just the URL.
+_HOST_OPTION_RE = re.compile(
+    r"(?:^|\s)(?P<flag>--resolve|--connect-to|--proxy|--preproxy|--socks5|"
+    r"--socks5-hostname|--url|-x)(?:=|\s+)(?P<value>\S+)",
+    re.IGNORECASE,
+)
+_ENCODED_COMMAND_FLAGS = frozenset({"-enc", "-encodedcommand"})
+_POWERSHELL_KINDS = frozenset({"powershell", "pwsh"})
+_FIND_COMMAND_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:\\\\=-]+")
 # Control operators that end a command. They are only separators outside quotes:
 # splitting the raw string turned `rg 'nc|netcat'` into two commands and denied
 # an ordinary source search.
@@ -83,11 +168,18 @@ _PREFIX_WORDS = frozenset(
         "exec",
         "for",
         "if",
+        "iex",
+        "invoke-expression",
+        "caffeinate",
         "nohup",
+        "setsid",
+        "start",
+        "start-process",
         "sudo",
         "then",
         "time",
         "toybox",
+        "unbuffer",
         "until",
         "while",
     }
@@ -111,7 +203,9 @@ _INLINE_COMMAND_SHELLS = frozenset(
         "python",
         "python3",
         "ruby",
+        "runuser",
         "sh",
+        "su",
         "zsh",
     }
 )
@@ -124,6 +218,30 @@ _WRAPPER_ARGUMENTS: dict[str, dict[str, int]] = {
     "env": {"-u": 1, "-C": 1, "-S": 1, "--unset": 1, "--chdir": 1},
     "nice": {"-n": 1, "--adjustment": 1},
     "xargs": {"-I": 1, "-n": 1, "-P": 1, "-d": 1, "-E": 1, "-L": 1, "-s": 1},
+    # Process launchers and tracers: the program they run is the real command.
+    "watch": {"-n": 1, "--interval": 1, "-d": 0, "-q": 0, "-t": 0, "-b": 0, "-e": 0},
+    "strace": {
+        "-e": 1,
+        "-o": 1,
+        "-p": 1,
+        "-s": 1,
+        "-u": 1,
+        "-a": 1,
+        "-b": 1,
+        "-I": 1,
+        "-X": 1,
+    },
+    "ltrace": {"-e": 1, "-o": 1, "-p": 1, "-s": 1, "-u": 1, "-a": 1},
+    "stdbuf": {"-i": 1, "-o": 1, "-e": 1},
+    "systemd-run": {
+        "--unit": 1,
+        "--description": 1,
+        "--property": 1,
+        "-p": 1,
+        "-E": 1,
+    },
+    "taskset": {"-c": 1, "-p": 1},
+    "ionice": {"-c": 1, "-n": 1, "-p": 1},
 }
 _WRAPPERS = frozenset(_WRAPPER_ARGUMENTS)
 _QUOTED_TEXT = re.compile(r"'[^']*'|\"[^\"]*\"")
@@ -193,12 +311,40 @@ def _segments(command: str) -> list[str]:
     return segments
 
 
-def _scan_commands(command: str) -> tuple[list[str], list[str]]:
-    """Return command-position heads and nested inline command strings."""
+def _head_name(token: str) -> str:
+    """Return a bare, lowercase executable name from a command token."""
+    return token.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+
+
+def _decode_powershell_command(value: str) -> str | None:
+    """Decode a PowerShell -EncodedCommand value, or None when it is opaque."""
+    compact = value.strip()
+    if not compact:
+        return None
+    try:
+        raw = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    try:
+        return raw.decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
+def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
+    """Return heads, nested inline command strings, and an opaque flag.
+
+    A string nested in ``sh -c``/``pwsh -Command`` is sliced from the original
+    segment instead of being rebuilt from tokens: joining tokens dropped the
+    ``;``/``&`` separators, so ``sh -c 'true; curl x'`` looked like one
+    harmless ``true`` command.
+    """
     heads: list[str] = []
     inline: list[str] = []
+    opaque = False
     for segment in _segments(command):
-        tokens = _TOKEN_PATTERN.findall(segment)
+        matches = list(_TOKEN_PATTERN.finditer(segment))
+        tokens = [match.group(0) for match in matches]
         index = 0
         while index < len(tokens):
             token = tokens[index]
@@ -212,22 +358,68 @@ def _scan_commands(command: str) -> tuple[list[str], list[str]]:
             if lowered in _PREFIX_WORDS:
                 index += 1
                 continue
+            if token.startswith("-"):
+                # An option at command position belongs to a wrapper such as
+                # Start-Process (``Start-Process -FilePath curl``).
+                index += 1
+                continue
             heads.append(token)
-            head = token.replace("\\", "/").rsplit("/", 1)[-1]
-            if head.lower().removesuffix(".exe") in _INLINE_COMMAND_SHELLS:
+            program = _head_name(token)
+            if program == "find":
+                # `find . -exec curl ... +` runs a command from a token that is
+                # not at the start of the segment (a `\;` variant already splits
+                # into its own segment).
                 for position in range(index + 1, len(tokens) - 1):
-                    if _is_inline_flag(tokens[position]):
-                        heads.append(tokens[position + 1])
-                        inner = " ".join(tokens[position + 1 :])
+                    if tokens[position].lower() not in _FIND_COMMAND_FLAGS:
+                        continue
+                    heads.append(tokens[position + 1])
+                    inner = _strip_outer_quotes(
+                        segment[matches[position + 1].start() :]
+                    )
+                    if inner:
+                        inline.append(inner)
+                    break
+            if program in _INLINE_COMMAND_SHELLS:
+                for position in range(index + 1, len(tokens)):
+                    flag = tokens[position].lower()
+                    encoded = (
+                        flag in _ENCODED_COMMAND_FLAGS and program in _POWERSHELL_KINDS
+                    )
+                    if not encoded and not _is_inline_flag(tokens[position]):
+                        continue
+                    if position + 1 >= len(tokens):
+                        if encoded:
+                            opaque = True
+                        break
+                    value = tokens[position + 1]
+                    heads.append(value)
+                    if encoded:
+                        decoded = _decode_powershell_command(value)
+                        if decoded is None:
+                            opaque = True
+                        elif decoded.strip():
+                            inline.append(decoded)
+                    else:
+                        inner = _strip_outer_quotes(
+                            segment[matches[position + 1].start() :]
+                        )
                         if inner:
                             inline.append(inner)
-                        break
+                    break
             break
-    return heads, inline
+    return heads, inline, opaque
 
 
-def _command_position_text(segment: str) -> str:
-    """Return the part of one segment that starts a command."""
+def _strip_outer_quotes(text: str) -> str:
+    """Drop one pair of quotes that wrapped the whole inline command."""
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "'\"":
+        return stripped[1:-1]
+    return stripped
+
+
+def _command_tokens(segment: str) -> list[str]:
+    """Return tokens starting at the command position of one segment."""
     tokens = _TOKEN_PATTERN.findall(_QUOTED_TEXT.sub(" ", segment))
     index = 0
     while index < len(tokens):
@@ -242,8 +434,37 @@ def _command_position_text(segment: str) -> str:
         if lowered in _PREFIX_WORDS:
             index += 1
             continue
+        if token.startswith("-"):
+            index += 1
+            continue
         break
-    return " ".join(tokens[index:])
+    return tokens[index:]
+
+
+def _network_subcommand(program: str, arguments: list[str]) -> bool:
+    """Return True when a package/git-style program runs a network subcommand."""
+    subcommands = _NETWORK_SUBCOMMANDS.get(program)
+    if not subcommands:
+        return False
+    valued = _SUBCOMMAND_OPTION_VALUES.get(program, frozenset())
+    remaining = list(arguments)
+    # A few option/value pairs can precede the subcommand (`git -C . clone`,
+    # `npm --prefix x install`). Six probes cover them without scanning the
+    # whole command line and mistaking a later argument for a subcommand.
+    for _ in range(6):
+        while remaining and remaining[0].startswith("-"):
+            option = remaining.pop(0).lower()
+            if option in valued and remaining:
+                remaining.pop(0)
+        if not remaining:
+            return False
+        token = remaining.pop(0).lower()
+        if token in subcommands:
+            return True
+        if program == "uv" and token == "pip":
+            continue
+        return False
+    return False
 
 
 def _sequence_detected(command: str, depth: int = 0) -> bool:
@@ -251,16 +472,24 @@ def _sequence_detected(command: str, depth: int = 0) -> bool:
     if depth > _MAX_NESTED_COMMANDS:
         return False
     for segment in _segments(command):
-        # ``match`` (not ``search``) keeps `echo git clone` and
-        # `rg "pip install"` from looking like a download.
-        candidate = _command_position_text(segment)
-        if candidate and any(
-            pattern.match(candidate) for pattern in _NETWORK_SEQUENCES
-        ):
+        tokens = _command_tokens(segment)
+        if not tokens:
+            continue
+        program = _head_name(tokens[0])
+        if _network_subcommand(program, tokens[1:]):
             return True
-    return any(
-        _sequence_detected(inner, depth + 1) for inner in _scan_commands(command)[1]
-    )
+        candidate = " ".join(tokens)
+        if any(pattern.match(candidate) for pattern in _COMMAND_SEQUENCES):
+            return True
+    _heads, inline, opaque = _scan_commands(command)
+    if opaque:
+        return True
+    for inner in inline:
+        if _NESTED_NETWORK_API.search(inner):
+            return True
+        if _sequence_detected(inner, depth + 1):
+            return True
+    return False
 
 
 def _all_command_heads(command: str, depth: int = 0) -> list[str]:
@@ -269,17 +498,75 @@ def _all_command_heads(command: str, depth: int = 0) -> list[str]:
     Only command positions count. Scanning every token (the earlier behaviour)
     made `git log --grep=curl` and `rg curl` look like downloads, so the gate
     refused ordinary source searches for the word "curl".
-
-    ``sh -c "sudo curl http://x"`` starts curl, but only the inline command
-    string names it; without descending into it the wrapper hid the real
-    client from the name check.
     """
-    heads, inline = _scan_commands(command)
+    heads, inline, _opaque = _scan_commands(command)
     if depth >= _MAX_NESTED_COMMANDS:
         return heads
     for inner in inline:
         heads.extend(_all_command_heads(inner, depth + 1))
     return heads
+
+
+def _split_host_option(value: str) -> list[str]:
+    """Split a curl host option value, keeping bracketed IPv6 literals intact."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in value:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth = max(0, depth - 1)
+        if char == ":" and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    return [part.strip("[]") for part in parts]
+
+
+def _host_from_value(value: str) -> str:
+    """Reduce a URL or host[:port] option value to a bare hostname."""
+    text = value.strip().strip("'\"")
+    if "://" in text:
+        try:
+            return (urlsplit(text).hostname or "").rstrip(".").lower()
+        except ValueError:
+            return ""
+    authority = text.split("/", 1)[0].rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        return authority[1 : authority.find("]")].lower() if "]" in authority else ""
+    return authority.split(":", 1)[0].rstrip(".").lower()
+
+
+def _network_hosts(command: str) -> list[str]:
+    """Return every host a command can contact, including resolver overrides."""
+    hosts: list[str] = []
+
+    def add(candidate: str) -> None:
+        host = candidate.rstrip(".").lower()
+        if host and host not in hosts:
+            hosts.append(host)
+
+    for match in _URL_PATTERN.finditer(command):
+        authority = match.group(1)
+        if authority.startswith("["):
+            add(authority[1:].split("]", 1)[0])
+        else:
+            add(authority.split(":", 1)[0])
+    for match in _HOST_OPTION_RE.finditer(command):
+        flag = match.group("flag").lower()
+        value = match.group("value")
+        if flag in {"--resolve", "--connect-to"}:
+            parts = _split_host_option(value)
+            # HOST:PORT:ADDR (--resolve) and HOST1:PORT1:HOST2:PORT2
+            # (--connect-to) both put the real target in the third field.
+            for candidate in parts[0:1] + parts[2:3]:
+                add(candidate)
+        else:
+            add(_host_from_value(value))
+    return hosts
 
 
 def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
@@ -289,28 +576,20 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
     this is a policy gate for the local baseline rather than a proof. Hard
     isolation is provided by the container backends.
     """
-    hosts: list[str] = []
-    for match in _URL_PATTERN.finditer(command):
-        authority = match.group(1).split("@")[-1]
-        if authority.startswith("["):
-            # IPv6 literals are bracketed and may contain colons.
-            host = authority[1:].split("]", 1)[0]
-        else:
-            host = authority.split(":")[0]
-        host = host.rstrip(".").lower()
-        if host and host not in hosts:
-            hosts.append(host)
+    # `cmd` escapes with `^` (`cu^rl`), so the analysis runs on a caret-free
+    # copy as well. Only command positions are inspected, so a literal caret in
+    # a quoted pattern stays harmless.
+    normalized = command.replace("^", "") if "^" in command else command
+    hosts = _network_hosts(normalized)
     detected = False
-    for head in _all_command_heads(command):
+    for head in _all_command_heads(normalized):
         # Compare bare executable names so `/usr/bin/curl` and `curl.exe`
         # match the same entry.
-        token = head.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        token = token.removesuffix(".exe")
-        if token in _NETWORK_COMMANDS:
+        if _head_name(head) in _NETWORK_COMMANDS:
             detected = True
             break
     if not detected:
-        detected = _sequence_detected(command)
+        detected = _sequence_detected(normalized)
     return detected, tuple(hosts)
 
 

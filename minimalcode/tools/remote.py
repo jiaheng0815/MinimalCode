@@ -21,18 +21,17 @@ class RemoteToolsMixin:
         if not target.is_file():
             raise ToolError(f"file not found: {target}")
         try:
-            size = target.stat().st_size
+            # Read one byte past the limit instead of trusting stat(): the file
+            # can grow between the check and the read.
+            with target.open("rb") as handle:
+                data = handle.read(self.vision_client.max_image_bytes + 1)
         except OSError as exc:
             raise ToolError(f"cannot read image: {target}: {exc}") from exc
-        if size > self.vision_client.max_image_bytes:
+        if len(data) > self.vision_client.max_image_bytes:
             raise ToolError(
-                f"image is too large: {size} bytes exceeds "
+                f"image is too large: more than "
                 f"vision.max_image_bytes ({self.vision_client.max_image_bytes})"
             )
-        try:
-            data = target.read_bytes()
-        except OSError as exc:
-            raise ToolError(f"cannot read image: {target}: {exc}") from exc
         media_type = image_media_type(data)
         if media_type is None:
             raise ToolError(

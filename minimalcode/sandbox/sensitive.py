@@ -6,6 +6,7 @@ this is a last line of defence rather than the only sandbox boundary.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 SENSITIVE_DIRECTORY_NAMES = frozenset(
@@ -16,6 +17,8 @@ SENSITIVE_DIRECTORY_NAMES = frozenset(
         ".gnupg",
         ".kube",
         ".minimalcode",
+        ".docker",
+        ".password-store",
     }
 )
 SENSITIVE_FILE_NAMES = frozenset(
@@ -26,16 +29,33 @@ SENSITIVE_FILE_NAMES = frozenset(
         ".pgpass",
         ".git-credentials",
         ".htpasswd",
+        ".pypirc",
+        ".vault-token",
+        ".dockercfg",
+        ".yarnrc.yml",
         "credentials",
+        "credentials.json",
         "secrets",
         "secrets.json",
         "id_rsa",
         "id_dsa",
         "id_ecdsa",
         "id_ed25519",
+        "id_ed25519_sk",
     }
 )
-SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks")
+SENSITIVE_KEY_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+SENSITIVE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".keystore",
+    ".jks",
+    ".ppk",
+    ".p8",
+    ".kdbx",
+)
 SAFE_ENV_TEMPLATES = frozenset(
     {".env.example", ".env.sample", ".env.template", ".env.dist"}
 )
@@ -53,31 +73,58 @@ SENSITIVE_SEARCH_GLOBS: tuple[str, ...] = (
     "!**/.pgpass",
     "!**/.git-credentials",
     "!**/.htpasswd",
+    "!**/.pypirc",
+    "!**/.vault-token",
+    "!**/.dockercfg",
+    "!**/.yarnrc.yml",
     "!**/credentials",
+    "!**/credentials.json",
     "!**/secrets",
     "!**/secrets.json",
-    "!**/id_rsa",
-    "!**/id_dsa",
-    "!**/id_ecdsa",
-    "!**/id_ed25519",
+    "!**/id_rsa*",
+    "!**/id_dsa*",
+    "!**/id_ecdsa*",
+    "!**/id_ed25519*",
     "!**/*.pem",
     "!**/*.key",
     "!**/*.p12",
     "!**/*.pfx",
     "!**/*.keystore",
     "!**/*.jks",
+    "!**/*.ppk",
+    "!**/*.p8",
+    "!**/*.kdbx",
     "!**/.ssh/**",
     "!**/.aws/**",
     "!**/.azure/**",
     "!**/.gnupg/**",
     "!**/.kube/**",
     "!**/.minimalcode/**",
+    "!**/.docker/**",
+    "!**/.password-store/**",
 )
+
+
+def _normalized_parts(path: Path) -> list[str]:
+    """Lowercase path components, folding Windows name quirks when present."""
+    parts = [part.lower() for part in path.parts]
+    if os.name == "nt":
+        # NTFS ignores trailing dots/spaces on lookup, and `name:stream` opens
+        # an alternate data stream of `name`; neither spelling should dodge
+        # the name rules.
+        normalized: list[str] = []
+        for part in parts:
+            part = part.rstrip(" .")
+            if part and part[-1] != "\\":
+                part = part.split(":", 1)[0]
+            normalized.append(part)
+        parts = normalized
+    return parts
 
 
 def is_sensitive_path(path: Path) -> bool:
     """Return True for credential-like paths that the sandbox blocks by default."""
-    parts = [part.lower() for part in path.parts]
+    parts = _normalized_parts(path)
     for part in parts:
         if part in SENSITIVE_DIRECTORY_NAMES:
             return True
@@ -90,5 +137,7 @@ def is_sensitive_path(path: Path) -> bool:
     if name in SENSITIVE_FILE_NAMES:
         return True
     if name.startswith((".env.", ".env-")):
+        return True
+    if name.startswith(SENSITIVE_KEY_PREFIXES) and not name.endswith(".pub"):
         return True
     return any(name.endswith(suffix) for suffix in SENSITIVE_SUFFIXES)

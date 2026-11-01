@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+# A command that was refused on network grounds is the one most likely to
+# carry a credential: `curl -H "Authorization: Bearer ..."` is exactly what the
+# policy stops. Records must not become a second plaintext copy of the key.
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)\b(authorization\s*:\s*)(?!bearer)[^\s'\"]+"),
+    re.compile(r"(?i)\b(x-api-key\s*:\s*)[^\s'\"]+"),
+    re.compile(
+        r"(?i)\b((?:api[_-]?key|token|password|passwd|secret)\s*[=:]\s*)"
+        r"[^\s'\"]+"
+    ),
+    re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
+)
+_MAX_TARGET_CHARS = 500
+
+
+def redact_command(text: str) -> str:
+    """Mask credential-shaped values and bound the recorded text."""
+    redacted = str(text)
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(lambda match: match.group(1) + "<redacted>", redacted)
+    if len(redacted) > _MAX_TARGET_CHARS:
+        redacted = redacted[:_MAX_TARGET_CHARS] + " ...<truncated>"
+    return redacted
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,14 +66,18 @@ class SandboxAudit:
         """Record one denial and increment the lifetime counter."""
         with self._lock:
             self._denials.append(
-                SandboxDenial(operation=operation, target=str(target), reason=reason)
+                SandboxDenial(
+                    operation=str(operation),
+                    target=redact_command(str(target)),
+                    reason=str(reason),
+                )
             )
             self.total_denials += 1
 
     def note(self, message: str) -> None:
         """Record an operational note such as a retry or timeout."""
         with self._lock:
-            self._notes.append(str(message))
+            self._notes.append(redact_command(str(message)))
 
     def denials(self) -> list[SandboxDenial]:
         """Return a snapshot of the recent denial ring buffer."""

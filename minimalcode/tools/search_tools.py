@@ -17,6 +17,7 @@ from .search import (
     _MAX_GREP_LINE_CHARS,
     IGNORED_DIRECTORIES,
     IGNORED_GLOBS,
+    inline_guard_available,
     inline_python_grep,
     run_python_grep,
     smart_case_ignore,
@@ -96,11 +97,18 @@ class SearchToolsMixin:
 
     def _explicit_ignored_target(self, target: Path) -> bool:
         """Return True when the caller named a normally ignored directory."""
-        try:
-            relative = target.relative_to(self.cwd)
-        except ValueError:
+        relative = None
+        for root in (self.cwd, *self.sandbox.policy.allowed_roots):
+            try:
+                relative = target.relative_to(root)
+                break
+            except ValueError:
+                continue
+        if relative is None:
             relative = target
-        parts = relative.parts[:-1] if target.is_file() else relative.parts
+        parts = list(relative.parts)
+        if target.is_file():
+            parts = parts[:-1]
         return any(part in IGNORED_DIRECTORIES for part in parts)
 
     def _ignore_globs(self, target: Path) -> tuple[str, ...]:
@@ -130,11 +138,35 @@ class SearchToolsMixin:
 
     def _grep_line_allowed(self, line: str) -> bool:
         """Keep one ripgrep match only when its path is allowed."""
-        match = _GREP_RESULT_RE.match(line)
-        if match is None:
+        path = self._grep_line_path(line)
+        if path is None:
             # A head/tail truncation marker or a line fragment is not a match.
             return False
-        return self._allowed_result_path(match.group("path"))
+        return self._allowed_result_path(path)
+
+    def _grep_line_path(self, line: str) -> str | None:
+        """Extract the file path from one `path:line:text` match line.
+
+        A file name may itself contain ``:N:``, so the shortest prefix is not
+        always the real path. The longest prefix that exists on disk wins; the
+        first candidate is the fallback for a path that vanished mid-search.
+        """
+        match = _GREP_RESULT_RE.match(line)
+        if match is None:
+            return None
+        fallback = match.group("path")
+        chosen = fallback
+        for boundary in re.finditer(r":\d+:", line):
+            candidate = line[: boundary.start()]
+            try:
+                path = Path(candidate)
+                if not path.is_absolute():
+                    path = self.cwd / path
+                if path.exists():
+                    chosen = candidate
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return chosen
 
     def _find_result_allowed(self, raw: str) -> bool:
         """Keep one `rg --files` path only when it names an allowed file."""
@@ -191,13 +223,24 @@ class SearchToolsMixin:
         if not files:
             return {"status": "success", "matches": [], "truncated": False}
         if not self._can_spawn_argv():
-            # A backend without argv support still gets line-accurate results;
-            # it just cannot isolate the regex in a child process.
-            return inline_python_grep(
+            # A backend without argv support still gets line-accurate results.
+            # The in-process engine cannot interrupt a catastrophic regex from
+            # a worker thread or on Windows, so in that case the trusted child
+            # interpreter is used instead of risking a hung agent process.
+            if inline_guard_available():
+                return inline_python_grep(
+                    pattern=pattern,
+                    files=files,
+                    limit=limit,
+                    max_bytes=self.max_file_bytes,
+                )
+            return run_python_grep(
                 pattern=pattern,
                 files=files,
                 limit=limit,
                 max_bytes=self.max_file_bytes,
+                sandbox=None,
+                cwd=self.cwd,
             )
         return run_python_grep(
             pattern=pattern,
@@ -210,59 +253,64 @@ class SearchToolsMixin:
 
     @staticmethod
     @lru_cache(maxsize=256)
-    def _glob_regex(glob_pattern: str) -> re.Pattern[str]:
-        """Translate a ripgrep-style glob to a compiled, case-sensitive regex."""
-        parts: list[str] = ["^"]
+    def _glob_tokens(glob_pattern: str) -> tuple[tuple[str, Any], ...]:
+        """Translate a ripgrep-style glob into path-aware match tokens.
+
+        A regex translation of repeated ``**`` runs (``**a**a**a...``) is
+        exponential on a non-matching path, so matching is a small linear scan
+        instead. ``*`` never crosses ``/``, ``**`` does, and ``**/`` matches
+        zero or more complete directories.
+        """
+        tokens: list[tuple[str, Any]] = []
         index = 0
-        while index < len(glob_pattern):
+        length = len(glob_pattern)
+        while index < length:
             char = glob_pattern[index]
             if char == "*":
                 if glob_pattern.startswith("**/", index):
-                    # `**/` means zero or more directories, as in ripgrep.
-                    parts.append("(?:.*/)?")
+                    tokens.append(("dirs", None))
                     index += 3
                 elif glob_pattern.startswith("**", index):
-                    parts.append(".*")
+                    tokens.append(("any", None))
                     index += 2
                 else:
-                    parts.append("[^/]*")
+                    tokens.append(("star", None))
                     index += 1
                 continue
             if char == "?":
-                parts.append("[^/]")
+                tokens.append(("one", None))
                 index += 1
                 continue
             if char == "[":
                 end = index + 1
-                if end < len(glob_pattern) and glob_pattern[end] in "!^":
+                if end < length and glob_pattern[end] in "!^":
                     end += 1
-                if end < len(glob_pattern) and glob_pattern[end] == "]":
+                if end < length and glob_pattern[end] == "]":
                     end += 1
-                while end < len(glob_pattern) and glob_pattern[end] != "]":
+                while end < length and glob_pattern[end] != "]":
                     end += 1
-                if end >= len(glob_pattern):
-                    parts.append(r"\[")
+                if end >= length:
+                    tokens.append(("lit", "["))
                     index += 1
                     continue
                 content = glob_pattern[index + 1 : end]
                 if content.startswith("!"):
                     content = "^" + content[1:]
                 if content in {"", "^"}:
-                    parts.append(r"\[\]")
+                    tokens.append(("lit", "[]"))
                 else:
-                    parts.append(f"[{content}]")
+                    try:
+                        tokens.append(("class", re.compile(f"[{content}]")))
+                    except re.error:
+                        tokens.append(("lit", glob_pattern[index : end + 1]))
                 index = end + 1
                 continue
-            parts.append(re.escape(char))
-            index += 1
-        parts.append("$")
-        expression = "".join(parts)
-        try:
-            return re.compile(expression)
-        except re.error:
-            # Keep a malformed character class from turning a search into an
-            # uncaught exception; treat the whole pattern literally instead.
-            return re.compile("^" + re.escape(glob_pattern) + "$")
+            end = index
+            while end < length and glob_pattern[end] not in "*?[":
+                end += 1
+            tokens.append(("lit", glob_pattern[index:end]))
+            index = end
+        return tuple(tokens)
 
     @classmethod
     def _matches_glob(cls, file_path: Path, root: Path, glob_pattern: str) -> bool:
@@ -274,7 +322,55 @@ class SearchToolsMixin:
         # A glob containing a separator is matched against the relative path;
         # `*.py` keeps matching any file name, but `*` no longer crosses `/`.
         candidate = relative if "/" in glob_pattern else file_path.name
-        return cls._glob_regex(glob_pattern).fullmatch(candidate) is not None
+        return cls._match_glob_tokens(cls._glob_tokens(glob_pattern), candidate)
+
+    @staticmethod
+    def _match_glob_tokens(tokens: tuple[tuple[str, Any], ...], text: str) -> bool:
+        """Return True when ``text`` matches the token sequence."""
+        length = len(text)
+        positions: set[int] = {0}
+        for kind, value in tokens:
+            next_positions: set[int] = set()
+            if kind == "lit":
+                for position in positions:
+                    if text.startswith(value, position):
+                        next_positions.add(position + len(value))
+            elif kind == "one":
+                for position in positions:
+                    if position < length and text[position] != "/":
+                        next_positions.add(position + 1)
+            elif kind == "class":
+                for position in positions:
+                    if (
+                        position < length
+                        and text[position] != "/"
+                        and value.match(text[position])
+                    ):
+                        next_positions.add(position + 1)
+            elif kind == "star":
+                for position in positions:
+                    next_positions.add(position)
+                    end = position
+                    while end < length and text[end] != "/":
+                        end += 1
+                        next_positions.add(end)
+            elif kind == "any":
+                for position in positions:
+                    next_positions.update(range(position, length + 1))
+            elif kind == "dirs":
+                for position in positions:
+                    next_positions.add(position)
+                    end = position
+                    while True:
+                        slash = text.find("/", end)
+                        if slash < 0:
+                            break
+                        next_positions.add(slash + 1)
+                        end = slash + 1
+            positions = next_positions
+            if not positions:
+                return False
+        return length in positions
 
     def find(
         self,

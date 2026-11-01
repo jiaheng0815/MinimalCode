@@ -88,7 +88,9 @@ class SandboxPolicy:
             allowed_hosts=(),
             timeout_seconds=3600.0,
             max_output_chars=10_000_000,
-            allow_sensitive_files=True,
+            # File checks stay active in this class's own contract: only the
+            # command execution layer is disabled.
+            allow_sensitive_files=False,
             max_memory_mb=0,
             max_processes=0,
             docker_image="",
