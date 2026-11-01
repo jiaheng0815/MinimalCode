@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -40,6 +41,28 @@ class TransportMixin:
                 )
             yield line
 
+    def _read_body(self, response: httpx2.Response) -> bytes:
+        """Read a response body under the same whole-request deadline.
+
+        ``response.read()`` is bounded only by the per-socket read timeout, so a
+        server that keeps trickling a byte would hold a non-streaming request
+        open forever. Reading chunks and checking the deadline applies the
+        configured ``timeout_seconds`` to the whole body.
+        """
+        deadline = getattr(self, "_stream_deadline", None)
+        chunks: list[bytes] = []
+        try:
+            for chunk in response.iter_bytes():
+                if deadline is not None and time.monotonic() > deadline:
+                    raise ProviderError(
+                        "provider response exceeded timeout_seconds "
+                        f"({self.timeout_seconds:g}s)"
+                    )
+                chunks.append(chunk)
+        except httpx2.HTTPError as exc:
+            raise ProviderError(f"provider response read failed: {exc}") from exc
+        return b"".join(chunks)
+
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         """POST ``payload`` and return a successful response.
 
@@ -47,7 +70,11 @@ class TransportMixin:
         one 429/503 retry. Any other status is reported through ProviderError
         with the bounded response body.
         """
-        stream = bool(payload.get("stream"))
+        # Keep the transport streamed even for a `stream: false` request: the
+        # parsers read either SSE lines or the whole body through `_read_body`,
+        # which is the only path that enforces the whole-generation deadline.
+        # Letting httpx2 read a non-streaming body internally would bypass it.
+        stream = True
         last_error: ProviderError | None = None
         # Counts failures, not requests: the status retry below is charged outside
         # this budget, so one call issues at most httpclient.CONNECTION_ATTEMPTS + 1 requests.
@@ -120,7 +147,10 @@ class TransportMixin:
                 # Retry-After is seconds in practice. The floor keeps "0" from
                 # collapsing the single status retry into an immediate repeat;
                 # the ceiling stops a provider from parking the turn for minutes.
-                delay = min(max(float(retry_after), 0.2), 5.0)
+                requested_delay = float(retry_after)
+                if not math.isfinite(requested_delay):
+                    requested_delay = 1.0
+                delay = min(max(requested_delay, 0.2), 5.0)
             except ValueError:
                 delay = 1.0
             time.sleep(delay)

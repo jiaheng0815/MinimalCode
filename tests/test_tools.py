@@ -437,6 +437,32 @@ class ToolTests(unittest.TestCase):
             self.tools.shell("echo test", timeout=5)
         self.assertEqual(run.call_args.kwargs["timeout"], 5)
 
+    def test_write_rejects_nul_bytes(self) -> None:
+        with self.assertRaisesRegex(ToolError, "binary files"):
+            self.tools.write("nul.txt", "a\x00b")
+        self.assertFalse((self.workspace / "nul.txt").exists())
+
+    def test_edit_reports_non_utf8_text(self) -> None:
+        target = self.workspace / "latin.txt"
+        target.write_bytes(b"caf\xe9\n")
+        with self.assertRaisesRegex(ToolError, "not valid UTF-8"):
+            self.tools.edit("latin.txt", "caf", "CAF")
+        self.assertEqual(target.read_bytes(), b"caf\xe9\n")
+
+    def test_find_glob_does_not_match_across_directories(self) -> None:
+        self.tools.write("src/top.py", "x\n")
+        self.tools.write("src/deep/nested.py", "x\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            result = self.tools.find("src/*.py")
+        names = {Path(path).name for path in result["files"]}
+        self.assertEqual(names, {"top.py"})
+
+    def test_find_glob_is_case_sensitive(self) -> None:
+        self.tools.write("UPPER.PY", "x\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            result = self.tools.find("*.py")
+        self.assertEqual(result["files"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -311,11 +311,18 @@ def run_python_grep(
     }
     script = [sys.executable, "-c", _PYTHON_GREP_SCRIPT]
     if sandbox is not None:
+        # The child emits one bounded line per match, so the JSON envelope is
+        # larger than the default search cap. A truncated envelope is invalid
+        # JSON and used to surface as a bogus "invalid result" error.
+        output_cap = max(
+            _SEARCH_MAX_OUTPUT_CHARS,
+            limit * (_MAX_GREP_LINE_CHARS + 4096) + 4096,
+        )
         result = sandbox.run_argv(
             script,
             cwd=cwd or Path.cwd(),
             timeout=_SEARCH_TIMEOUT_SECONDS,
-            max_output_chars=_SEARCH_MAX_OUTPUT_CHARS,
+            max_output_chars=output_cap,
             stdin_text=json.dumps(spec),
         )
         if result.get("status") == "timeout":
@@ -420,6 +427,11 @@ def inline_python_grep(
     finally:
         if use_alarm:
             signal.setitimer(signal.ITIMER_REAL, 0)
-            if previous_handler is not None:
-                signal.signal(signal.SIGALRM, previous_handler)
+            # `getsignal` returns None when the handler was installed outside
+            # Python; passing that back raises TypeError and would leave our
+            # timeout handler installed for the rest of the process.
+            signal.signal(
+                signal.SIGALRM,
+                previous_handler if previous_handler is not None else signal.SIG_DFL,
+            )
     return {"status": "success", "matches": matches[:limit], "truncated": False}

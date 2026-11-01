@@ -36,11 +36,33 @@ class ShellSpec:
     is_windows: bool
 
 
+def _is_wsl_bash_stub(executable: str) -> bool:
+    """Return True for the WSL launcher that lives in System32.
+
+    ``shutil.which("bash")`` finds ``C:\\Windows\\System32\\bash.exe`` on many
+    Windows machines even when no Git Bash is installed. Running workspace
+    commands through it silently switches to a Linux namespace with different
+    paths and interpreters, so it must not be selected as the native shell.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        parts = [part.lower() for part in Path(executable).resolve().parts]
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return (
+        len(parts) >= 2
+        and parts[-1] == "bash.exe"
+        and parts[-2] == "system32"
+        and "windows" in parts
+    )
+
+
 def _kind_for_executable(executable: str) -> tuple[str, str]:
     name = Path(executable).stem.lower()
-    if name == "pwsh":
+    if name == "pwsh" or name.startswith("pwsh-"):
         return "pwsh7", "PowerShell 7"
-    if name == "powershell":
+    if name == "powershell" or name.startswith("powershell-"):
         return "windows_powershell", "Windows PowerShell 5.1"
     if name == "bash":
         return "bash", "bash"
@@ -62,6 +84,10 @@ def _resolve_override(preferred: str) -> ShellSpec:
     if resolved is None:
         raise ShellError(f"configured shell not found: {preferred}")
     kind, label = _kind_for_executable(resolved)
+    if kind == "bash" and _is_wsl_bash_stub(resolved):
+        raise ShellError(
+            f"configured shell is the WSL bash launcher, not a native shell: {resolved}"
+        )
     return ShellSpec(
         kind=kind,
         executable=resolved,
@@ -141,6 +167,9 @@ def select_shell(
         executable = finder(name)
         if executable:
             kind, label = _kind_for_executable(executable)
+            if kind == "bash" and _is_wsl_bash_stub(executable):
+                unusable.append(f"{name}: WSL bash launcher is not a native shell")
+                continue
             shell = ShellSpec(
                 kind=kind,
                 executable=executable,
@@ -201,7 +230,7 @@ def run_shell(
         return {"status": "error", "message": "command is empty"}
     try:
         requested_timeout = float(timeout)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"status": "error", "message": "timeout must be a number"}
     if math.isnan(requested_timeout):
         return {"status": "error", "message": "timeout must be a number"}

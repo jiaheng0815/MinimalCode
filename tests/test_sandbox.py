@@ -523,9 +523,43 @@ class SearchLeakTests(SandboxTestBase):
             tools.find("*")
             find_command = run.call_args.args[0]
         for command in (grep_command, find_command):
+            self.assertIn("--no-config", command)
             self.assertIn("!**/.env", command)
             self.assertIn("!**/.ssh/**", command)
         self.assertEqual(run.call_args.kwargs["sandbox"], tools.sandbox)
+
+    def test_ripgrep_results_are_filtered_by_the_path_policy(self) -> None:
+        visible = self.workspace / "app.py"
+        secret = self.workspace / ".env"
+        visible.write_text("needle\n", encoding="utf-8")
+        secret.write_text("needle=secret\n", encoding="utf-8")
+        marker = "... <truncated 10 chars> ..."
+        tools = self._tools()
+        with (
+            patch(
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
+                side_effect=[
+                    (
+                        0,
+                        [f"{secret}:1:needle=secret", marker, f"{visible}:1:needle"],
+                        True,
+                        "",
+                    ),
+                    (0, [str(secret), marker, str(visible)], True, ""),
+                ],
+            ),
+        ):
+            grep_result = tools.grep("needle")
+            find_result = tools.find("*")
+
+        self.assertEqual(grep_result["matches"], [f"{visible}:1:needle"])
+        self.assertTrue(grep_result["truncated"])
+        self.assertEqual(find_result["files"], [str(visible)])
+        self.assertTrue(find_result["truncated"])
 
 
 class ConfigAndCliTests(SandboxTestBase):

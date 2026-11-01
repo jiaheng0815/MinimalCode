@@ -814,6 +814,9 @@ class AnthropicProviderTests(unittest.TestCase):
             ),
             "https://api.anthropic.com/v1": "https://api.anthropic.com/v1/messages",
             "https://example.test/v1/messages": ("https://example.test/v1/messages"),
+            "https://example.test/v1/messages?api-version=2024": (
+                "https://example.test/v1/messages?api-version=2024"
+            ),
         }
         for base_url, expected in cases.items():
             with self.subTest(base_url=base_url):

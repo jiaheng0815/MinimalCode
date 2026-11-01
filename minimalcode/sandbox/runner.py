@@ -185,7 +185,7 @@ class SandboxRunner:
             }
         try:
             requested_timeout = float(timeout)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return {
                 "status": "error",
                 "shell": shell_label,
@@ -199,7 +199,7 @@ class SandboxRunner:
             }
         try:
             requested_output = int(max_output_chars)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             requested_output = 1
         requested_output = max(1, requested_output)
 

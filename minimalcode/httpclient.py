@@ -9,9 +9,10 @@ is how a proxy bug could exist in one copy and not the others.
 from __future__ import annotations
 
 import ipaddress
+import math
 import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
@@ -38,6 +39,17 @@ def connection_backoff(attempt: int) -> float:
     return min(delay, CONNECTION_BACKOFF_CAP_SECONDS)
 
 
+def join_url_path(base_url: str, path: str) -> str:
+    """Append a path segment before any query string or fragment."""
+    parsed = urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    suffix = path.strip("/")
+    joined = f"{base_path}/{suffix}" if suffix else base_path
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, joined, parsed.query, parsed.fragment)
+    )
+
+
 def is_loopback_url(url: str) -> bool:
     """Return True when ``url`` targets this machine.
 
@@ -55,11 +67,16 @@ def is_loopback_url(url: str) -> bool:
         return False
     if not host:
         return False
-    lowered = host.lower()
+    lowered = host.lower().rstrip(".")
     if lowered == "localhost" or lowered.endswith(".localhost"):
         return True
+    if lowered == "0.0.0.0":
+        # Connecting to the wildcard address reaches this machine on the
+        # platforms where it is accepted, so a proxy would break it the same
+        # way it breaks 127.0.0.1.
+        return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        return ipaddress.ip_address(lowered).is_loopback
     except ValueError:
         return False
 
@@ -144,6 +161,7 @@ def post_json(
     budget_end = deadline if deadline is not None else time.monotonic() + timeout
     attempts = 0
     last_error: httpx2.HTTPError | None = None
+    last_status: int | None = None
     status_retried = False
     while attempts < CONNECTION_ATTEMPTS:
         remaining = budget_end - time.monotonic()
@@ -160,11 +178,12 @@ def post_json(
             if response.status_code in {429, 503} and not status_retried:
                 status_retried = True
                 status_code = response.status_code
+                last_status = status_code
                 try:
-                    delay = min(
-                        max(float(response.headers.get("Retry-After", "1")), 0.2),
-                        5.0,
-                    )
+                    requested_delay = float(response.headers.get("Retry-After", "1"))
+                    if not math.isfinite(requested_delay):
+                        requested_delay = 1.0
+                    delay = min(max(requested_delay, 0.2), 5.0)
                 except ValueError:
                     delay = 1.0
                 response.close()
@@ -218,6 +237,14 @@ def post_json(
         if not isinstance(data, dict):
             raise ToolError(f"provider {label} request returned an invalid response")
         return data
+    if last_error is None and last_status is not None:
+        # The only reason the loop ended after a status retry is that the
+        # remaining budget was spent on the backoff sleep. Reporting a
+        # connection error here would say "None" and drop the HTTP status.
+        raise ToolError(
+            f"provider {label} request failed with HTTP {last_status} "
+            "and no time was left to retry"
+        )
     raise ToolError(
         f"provider {label} request failed after {attempts} attempts: {last_error}"
     ) from last_error

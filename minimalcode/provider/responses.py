@@ -14,6 +14,7 @@ from .common import (
     decode_json_body,
     is_event_stream,
     normalize_usage,
+    strip_sse_bom,
     tool_arguments,
 )
 from .types import ProviderReply, ToolCall
@@ -36,7 +37,13 @@ class ResponsesProtocolMixin:
         """Convert stored Chat-style messages into Responses input items."""
         items: list[dict[str, Any]] = []
         for message in messages:
+            if not isinstance(message, dict):
+                continue
             role = message.get("role")
+            if not isinstance(role, str):
+                # Session history is user-editable; a non-string role cannot be
+                # sent as an input item and must not raise AttributeError.
+                continue
             content = message.get("content")
             if role == "tool":
                 items.append(
@@ -248,10 +255,7 @@ class ResponsesProtocolMixin:
         response = self._open(payload)
         try:
             if not is_event_stream(response):
-                try:
-                    body = response.read()
-                except httpx2.HTTPError as exc:
-                    raise ProviderError(f"provider stream interrupted: {exc}") from exc
+                body = self._read_body(response)
                 parsed, data = decode_json_body(body)
                 if parsed:
                     return self._parse_responses_payload(
@@ -265,6 +269,7 @@ class ResponsesProtocolMixin:
                 lines = response.iter_lines()
             try:
                 for line in self._checked_lines(lines):
+                    line = strip_sse_bom(line)
                     if not line or line.startswith((":", "event:")):
                         continue
                     if not line.startswith("data:"):
@@ -464,16 +469,41 @@ class ResponsesProtocolMixin:
         on_thinking: Callable[[str], None] | None,
     ) -> ProviderReply:
         """Parse an SSE body received for a non-streaming request."""
-        try:
-            body = response.read()
-        except httpx2.HTTPError as exc:
-            raise ProviderError(f"provider stream interrupted: {exc}") from exc
+        body = self._read_body(response)
         text = body.decode("utf-8", errors="replace")
         if "data:" not in text:
             raise ProviderError("provider returned an invalid response")
         content_parts: list[str] = []
+        fallback_text: list[str] = []
+        call_states: dict[str, dict[str, str]] = {}
+        output_keys: dict[str, str] = {}
         final_response: dict[str, Any] = {}
+        usage: dict[str, int] = {}
+
+        def state_for(key: str) -> dict[str, str]:
+            return call_states.setdefault(key, {"id": "", "name": "", "arguments": ""})
+
+        def update_call(item: dict[str, Any], key: str) -> None:
+            state = state_for(key)
+            if item.get("call_id"):
+                state["id"] = str(item["call_id"])
+            elif item.get("id"):
+                state["id"] = str(item["id"])
+            if item.get("name"):
+                state["name"] = str(item["name"])
+            arguments = item.get("arguments")
+            if isinstance(arguments, str):
+                if arguments or not state["arguments"]:
+                    state["arguments"] = arguments
+            elif isinstance(arguments, dict):
+                state["arguments"] = tool_arguments(arguments)
+
+        def add_fallback(text: str) -> None:
+            if text and (not fallback_text or fallback_text[-1] != text):
+                fallback_text.append(text)
+
         for line in self._checked_lines(text.splitlines()):
+            line = strip_sse_bom(line)
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -486,29 +516,117 @@ class ResponsesProtocolMixin:
             if not isinstance(event, dict):
                 continue
             event_type = str(event.get("type") or "")
+            if not event_type and event.get("error"):
+                raise self._response_error(event)
             if event_type == "response.output_text.delta":
                 delta = content_text(event.get("delta"))
                 if delta:
                     content_parts.append(delta)
                     if on_text is not None:
                         on_text(delta)
+            elif event_type == "response.output_text.done":
+                add_fallback(content_text(event.get("text")))
+            elif event_type in {
+                "response.output_item.added",
+                "response.output_item.done",
+            }:
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    key = str(item.get("id") or event.get("output_index", "0"))
+                    if "output_index" in event:
+                        output_keys[str(event["output_index"])] = key
+                    update_call(item, key)
+                elif isinstance(item, dict) and item.get("type") == "message":
+                    add_fallback(content_text(item.get("content")))
+            elif event_type == "response.function_call_arguments.delta":
+                raw_key = str(event.get("item_id") or event.get("output_index", "0"))
+                state = state_for(output_keys.get(raw_key, raw_key))
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    state["arguments"] += delta
+                elif delta is not None:
+                    state["arguments"] = tool_arguments(delta)
+            elif event_type == "response.function_call_arguments.done":
+                raw_key = str(event.get("item_id") or event.get("output_index", "0"))
+                state = state_for(output_keys.get(raw_key, raw_key))
+                arguments = event.get("arguments")
+                if isinstance(arguments, str) and (arguments or not state["arguments"]):
+                    state["arguments"] = arguments
             elif event_type in {"response.completed", "response.incomplete"}:
                 completed = event.get("response")
                 if isinstance(completed, dict):
                     final_response = completed
+                    parsed_usage = normalize_usage(completed.get("usage"))
+                    if parsed_usage:
+                        usage = parsed_usage
             elif event_type in {"response.failed", "error"}:
                 raise self._response_error(event)
-        if final_response:
-            reply = self._parse_responses_payload(
-                final_response, on_text=None, on_thinking=on_thinking
+
+        stream_calls: list[ToolCall] = []
+        for index, state in enumerate(call_states.values()):
+            if not state["name"]:
+                continue
+            stream_calls.append(
+                ToolCall(
+                    id=state["id"] or f"call_{index}",
+                    name=state["name"],
+                    arguments=state["arguments"] or "{}",
+                )
             )
-            if not content_parts and reply.content and on_text is not None:
-                on_text(reply.content)
-            return reply
-        if not content_parts:
+
+        def finish_content(reply_content: str = "") -> str:
+            content = "".join(content_parts)
+            if content:
+                return content
+            if fallback_text:
+                content = "".join(fallback_text)
+            elif reply_content:
+                content = reply_content
+            if content and on_text is not None and not content_parts:
+                on_text(content)
+            return content
+
+        if final_response:
+            has_output = isinstance(final_response.get("output"), list) or isinstance(
+                final_response.get("output_text"), str
+            )
+            reply = (
+                self._parse_responses_payload(
+                    final_response, on_text=None, on_thinking=on_thinking
+                )
+                if has_output
+                else None
+            )
+            if reply is not None:
+                tool_calls = reply.tool_calls or stream_calls
+                finish_reason = reply.finish_reason
+                if tool_calls and not reply.tool_calls:
+                    # The tool call came from SSE events rather than `output`, so
+                    # the payload parser did not know to report `tool_calls`.
+                    finish_reason = self._response_finish(final_response, True)
+                return ProviderReply(
+                    content=finish_content(reply.content),
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    usage=reply.usage,
+                )
+            content = finish_content()
+            if content or stream_calls:
+                return ProviderReply(
+                    content=content,
+                    tool_calls=stream_calls,
+                    finish_reason=self._response_finish(
+                        final_response, bool(stream_calls)
+                    ),
+                    usage=usage,
+                )
+            raise ProviderError("provider response has no output")
+        content = finish_content()
+        if not content and not stream_calls:
             raise ProviderError("provider returned an empty stream")
         return ProviderReply(
-            content="".join(content_parts),
+            content=content,
+            tool_calls=stream_calls,
             finish_reason="incomplete",
         )
 
@@ -528,12 +646,9 @@ class ResponsesProtocolMixin:
                 return self._parse_responses_sse_body(
                     response, on_text=on_text, on_thinking=on_thinking
                 )
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise ProviderError("provider returned invalid JSON") from exc
-            except httpx2.HTTPError as exc:
-                raise ProviderError(f"provider response read failed: {exc}") from exc
+            parsed, data = decode_json_body(self._read_body(response))
+            if not parsed:
+                raise ProviderError("provider returned invalid JSON")
         finally:
             response.close()
         return self._parse_responses_payload(

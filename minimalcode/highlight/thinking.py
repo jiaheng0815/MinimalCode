@@ -51,10 +51,11 @@ class ThinkingRenderer:
 
     def finish(self) -> None:
         """Close the reasoning block so the answer starts on its own line."""
-        if not self.enabled or not self._open:
-            return
+        # Reset even when no complete delta was written: a block whose entire
+        # content is still held as an incomplete escape sequence must not poison
+        # the next reasoning block with that pending state.
         self._sanitizer.finish()
-        if self._last_char and self._last_char != "\n":
+        if self.enabled and self._open and self._last_char != "\n":
             self.stream.write("\n")
             self.stream.flush()
         self._sanitizer = TerminalSanitizer()

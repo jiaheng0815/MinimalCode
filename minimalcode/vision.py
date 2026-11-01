@@ -10,7 +10,7 @@ import httpx2
 
 from .config import provider_api_key
 from .errors import ToolError
-from .httpclient import build_client, build_headers, post_json
+from .httpclient import build_client, build_headers, join_url_path, post_json
 
 # The provider judges formats by content, not by file name, so the tool does the
 # same and labels the data URL with the detected type.
@@ -20,6 +20,8 @@ _DETAIL_LEVELS = {"low", "high", "original", "auto"}
 
 def image_media_type(data: bytes) -> str | None:
     """Return the MIME type of a supported image, detected from its bytes."""
+    if not isinstance(data, (bytes, bytearray)):
+        return None
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
@@ -123,8 +125,8 @@ class ProviderVisionClient:
         self._timeout_seconds = timeout
         self._endpoint = (
             base_url
-            if base_url.endswith("/chat/completions")
-            else f"{base_url}/chat/completions"
+            if urlsplit(base_url).path.rstrip("/").endswith("/chat/completions")
+            else join_url_path(base_url, "chat/completions")
         )
         self.model = chosen_model
         self.detail = detail
@@ -145,6 +147,8 @@ class ProviderVisionClient:
             raise ToolError(f"read_image is not enabled for provider {self.name!r}")
         if not isinstance(data, bytes) or not data:
             raise ToolError("image data must be non-empty bytes")
+        if question is not None and not isinstance(question, str):
+            raise ToolError("question must be a string or null")
         prompt = (question or "").strip() or (
             "Describe this image in detail and transcribe all visible text verbatim."
         )

@@ -57,9 +57,12 @@ class ProcessToolsMixin:
             isinstance(timeout, bool) or not isinstance(timeout, (int, float))
         ):
             raise ToolError("timeout must be a number")
-        requested_timeout = float(
-            timeout if timeout is not None else self.shell_timeout
-        )
+        try:
+            requested_timeout = float(
+                timeout if timeout is not None else self.shell_timeout
+            )
+        except (OverflowError, ValueError) as exc:
+            raise ToolError("timeout must be a number") from exc
         if math.isnan(requested_timeout):
             raise ToolError("timeout must be a number")
         # The configured value is both the default and the hard ceiling.
@@ -95,9 +98,12 @@ class ProcessToolsMixin:
             isinstance(timeout, bool) or not isinstance(timeout, (int, float))
         ):
             raise ToolError("timeout must be a number")
-        requested_timeout = float(
-            timeout if timeout is not None else self.subagent_timeout
-        )
+        try:
+            requested_timeout = float(
+                timeout if timeout is not None else self.subagent_timeout
+            )
+        except (OverflowError, ValueError) as exc:
+            raise ToolError("timeout must be a number") from exc
         if math.isnan(requested_timeout):
             raise ToolError("timeout must be a number")
         limits = [requested_timeout, self.subagent_timeout]

@@ -178,6 +178,10 @@ class FileToolsMixin:
             encoded = content.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ToolError(f"content is not valid UTF-8 text: {exc}") from exc
+        if b"\x00" in encoded:
+            # `read` rejects NUL bytes as binary, so accepting them here would
+            # create a file the agent can write but never read back.
+            raise ToolError("binary files are not supported by write")
         if len(encoded) > self.max_file_bytes:
             raise ToolError(
                 f"content is too large for write: {len(encoded)} bytes exceeds "
@@ -221,7 +225,14 @@ class FileToolsMixin:
             raise ToolError("file is too large for edit")
 
         with target.open("r", encoding="utf-8", errors="strict", newline="") as handle:
-            original = handle.read()
+            try:
+                original = handle.read()
+            except UnicodeDecodeError as exc:
+                raise ToolError(
+                    f"file is not valid UTF-8 text: {target}: {exc}"
+                ) from exc
+        if "\x00" in original:
+            raise ToolError("binary files are not supported by edit")
         if "\r\n" in original:
             default_newline = "\r\n"
         elif "\r" in original and "\n" not in original:

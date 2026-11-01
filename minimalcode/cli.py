@@ -27,7 +27,7 @@ from .config import (
     settings_path,
     write_settings,
 )
-from .errors import ConfigError, MinimalCodeError, ProviderError
+from .errors import ConfigError, MinimalCodeError
 from .highlight import sanitize_terminal_text, style_activity_tag
 from .sandbox import NETWORK_POLICIES, SANDBOX_BACKENDS
 
@@ -530,7 +530,9 @@ def _format_usage(usage: dict[str, int], *, estimated: bool = False) -> str:
 
 def _print_usage(result: AgentResult) -> None:
     # The summary goes to stderr so piped stdout still contains only the answer.
-    usage = getattr(result, "run_usage", None) or getattr(result, "usage", None)
+    usage = getattr(result, "run_usage", None)
+    if usage is None:
+        usage = getattr(result, "usage", None)
     if not usage:
         return
     line = _format_usage(
@@ -1063,25 +1065,32 @@ def _chat_loop(
             return 0
         if command in {"/new", "/clear"}:
             save = bool(settings.get("session.save", True)) and not args.no_session
-            session = store.create(
-                agent.session.cwd,
-                provider=agent.provider.name,
-                model=agent.provider.model,
-                save=save,
-            )
-            agent.new_session(
-                session,
-                ToolRuntime(
-                    settings,
-                    session.cwd,
-                    agent.shell,
-                    web_client=agent.tools.web_client,
-                    vision_client=agent.tools.vision_client,
-                    provider_name=agent.provider.name,
+            try:
+                session = store.create(
+                    agent.session.cwd,
+                    provider=agent.provider.name,
                     model=agent.provider.model,
-                    thinking=agent.provider.thinking,
-                ),
-            )
+                    save=save,
+                )
+                agent.new_session(
+                    session,
+                    ToolRuntime(
+                        settings,
+                        session.cwd,
+                        agent.shell,
+                        web_client=agent.tools.web_client,
+                        vision_client=agent.tools.vision_client,
+                        provider_name=agent.provider.name,
+                        model=agent.provider.model,
+                        thinking=agent.provider.thinking,
+                    ),
+                )
+            except (MinimalCodeError, OSError, ValueError) as exc:
+                print(
+                    f"new session failed: {sanitize_terminal_text(str(exc))}",
+                    file=sys.stderr,
+                )
+                continue
             print("new session")
             continue
         if command == "/status":
@@ -1090,7 +1099,7 @@ def _chat_loop(
         if command == "/compact":
             try:
                 changed = agent.compact()
-            except (ProviderError, RuntimeError) as exc:
+            except (RuntimeError, OSError, ValueError) as exc:
                 print(
                     f"compact failed: {sanitize_terminal_text(str(exc))}",
                     file=sys.stderr,
@@ -1216,6 +1225,22 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
         providers = settings.data.get("providers")
         recorded_provider = resumed.provider if resumed is not None else ""
+        if (
+            resumed is not None
+            and recorded_provider
+            and not args.provider
+            and not args.anthropic_env
+            and isinstance(providers, dict)
+            and recorded_provider not in providers
+        ):
+            # The recorded history uses a wire protocol that this settings file
+            # cannot reconstruct. Falling back to the default provider would
+            # send it to a different protocol (and usually a different model).
+            raise ConfigError(
+                f"session was recorded with provider {recorded_provider!r}, which "
+                "is not configured; pass --provider, --anthropic-env, or a "
+                "different --session"
+            )
         use_recorded = (
             resumed is not None
             and not args.provider

@@ -14,15 +14,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from minimalcode.agent import AgentResult
 from minimalcode.cli import (
     _discard_standard_streams,
     _interactive,
+    _print_usage,
     _read_message,
     _reader_closed,
     _standard_stream_is_pipe,
     run,
 )
-from minimalcode.config import EFFORT_LEVELS, ensure_config, load_settings
+from minimalcode.config import EFFORT_LEVELS, ConfigError, ensure_config, load_settings
 from minimalcode.provider import ProviderError, ProviderReply
 from minimalcode.session import SessionStore
 
@@ -61,6 +63,24 @@ class FakeClosingClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class UsagePrintTests(unittest.TestCase):
+    def test_zero_run_usage_does_not_fall_back_to_session_total(self) -> None:
+        result = AgentResult(
+            text="",
+            completed=True,
+            usage={
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "total_tokens": 13,
+            },
+            run_usage={},
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _print_usage(result)
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class StubVisionClient:
@@ -206,6 +226,8 @@ class CliTests(unittest.TestCase):
                         str(home),
                         "--session",
                         session.session_id,
+                        "--provider",
+                        "fake",
                         "--cwd",
                         str(requested),
                         "say completed",
@@ -218,6 +240,32 @@ class CliTests(unittest.TestCase):
                 if message["role"] == "system"
             )
             self.assertIn(str(requested.resolve()), system_message)
+
+    def test_resumed_session_with_unconfigured_provider_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / ".MinimalCode"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            session = SessionStore(settings).create(
+                workspace,
+                provider="anthropic-env",
+                model="claude",
+                save=True,
+            )
+            with self.assertRaisesRegex(ConfigError, "not configured"):
+                run(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--session",
+                        session.session_id,
+                        "hello",
+                    ]
+                )
 
     def test_resumed_session_restores_its_recorded_provider_and_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

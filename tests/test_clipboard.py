@@ -114,6 +114,18 @@ class ClipboardTests(unittest.TestCase):
         ):
             self.assertEqual(_macos_image(), b"")
 
+    def test_macos_reader_reports_a_refused_apple_event(self) -> None:
+        with (
+            patch(
+                "minimalcode.clipboard.subprocess.run",
+                return_value=_completed(
+                    stderr=b"Not authorized to send Apple events", returncode=1
+                ),
+            ),
+            self.assertRaisesRegex(ClipboardError, "Not authorized"),
+        ):
+            _macos_image()
+
     def test_linux_reader_uses_wl_paste_first(self) -> None:
         with (
             patch(

@@ -85,6 +85,17 @@ class ImporterTests(unittest.TestCase):
             self.assertNotIn("api_key", provider)
             self.assertIn("api_key_env", provider)
 
+    def test_reimporting_an_existing_provider_explains_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            destination = root / ".MinimalCode"
+            _write_pi_config(pi_home)
+            import_pi_settings(destination_home=destination, pi_home=pi_home)
+
+            with self.assertRaisesRegex(ConfigError, "--overwrite"):
+                import_pi_settings(destination_home=destination, pi_home=pi_home)
+
     def test_invalid_base_url_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

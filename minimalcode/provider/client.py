@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
@@ -142,22 +142,35 @@ class OpenAICompatibleProvider(
         return False
 
     def _endpoint(self) -> str:
-        """Return the full protocol endpoint, accepting a full URL as-is."""
+        """Return the full protocol endpoint, accepting a full URL as-is.
+
+        A manually configured endpoint may carry a query string (Azure OpenAI's
+        ``api-version`` is the common case). Appending a path with plain string
+        concatenation would put it after the query, so path and query are
+        joined separately.
+        """
+        parsed = urlsplit(self.base_url)
+        path = parsed.path.rstrip("/")
         if self.protocol == "anthropic_messages":
-            if self.base_url.endswith("/messages"):
-                return self.base_url
-            if self.base_url.endswith("/v1"):
-                return f"{self.base_url}/messages"
-            # DeepSeek's Anthropic base is https://api.deepseek.com/anthropic,
-            # so the version segment is appended unless the caller supplied it.
-            return f"{self.base_url}/v1/messages"
-        if self.protocol == "openai_responses":
-            if self.base_url.endswith("/responses"):
-                return self.base_url
-            return f"{self.base_url}/responses"
-        if self.base_url.endswith("/chat/completions"):
-            return self.base_url
-        return f"{self.base_url}/chat/completions"
+            if path.endswith("/messages"):
+                new_path = path
+            elif path.endswith("/v1"):
+                new_path = f"{path}/messages"
+            else:
+                # DeepSeek's Anthropic base is https://api.deepseek.com/anthropic,
+                # so the version segment is appended unless the caller supplied it.
+                new_path = f"{path}/v1/messages"
+        elif self.protocol == "openai_responses":
+            new_path = path if path.endswith("/responses") else f"{path}/responses"
+        else:
+            new_path = (
+                path
+                if path.endswith("/chat/completions")
+                else f"{path}/chat/completions"
+            )
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, new_path, parsed.query, parsed.fragment)
+        )
 
     def stream_chat(
         self,
@@ -195,12 +208,16 @@ class OpenAICompatibleProvider(
             payload, on_text=on_text, on_thinking=on_thinking
         )
 
-    def complete_text(self, messages: list[dict[str, Any]]) -> str:
-        """Request a plain text completion, rejecting abnormal finish reasons."""
+    def complete(self, messages: list[dict[str, Any]]) -> ProviderReply:
+        """Request one plain-text completion and reject abnormal finish reasons."""
         reply = self.stream_chat(messages, tools=None, on_text=None)
         if reply.finish_reason not in {None, "stop", "completed"}:
             raise ProviderError(
                 "provider stopped the summary with finish reason "
                 f"{reply.finish_reason!r}"
             )
-        return reply.content
+        return reply
+
+    def complete_text(self, messages: list[dict[str, Any]]) -> str:
+        """Request a plain text completion, returning only its content."""
+        return self.complete(messages).content

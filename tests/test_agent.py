@@ -848,6 +848,16 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[0]["role"], "user")
             self.assertNotEqual(session.messages[2]["role"], "tool")
 
+    def test_repair_fills_null_content_behind_an_empty_tool_call_list(self) -> None:
+        from minimalcode.agent import _repair_tool_history
+
+        repaired, changed = _repair_tool_history(
+            [{"role": "assistant", "content": None, "tool_calls": []}]
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(repaired[0]["content"], "")
+
     def test_repair_tolerates_a_non_object_function(self) -> None:
         from minimalcode.agent import _repair_tool_history
 
@@ -1430,6 +1440,86 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(result.text, "partial answer")
             self.assertIn("partial answer", errors.getvalue())
             self.assertIn("content_filter", errors.getvalue())
+
+    def test_finish_reason_is_reported_when_the_last_allowed_turn_stops_early(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            errors = io.StringIO()
+            agent = Agent(
+                settings=settings,
+                provider=FilteredReplyProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                max_turns=1,
+                output=io.StringIO(),
+                error_output=errors,
+                stream_output=False,
+            )
+
+            result = agent.run("say something")
+
+            self.assertFalse(result.completed)
+            self.assertIn("partial answer", errors.getvalue())
+            self.assertIn("content_filter", errors.getvalue())
+            self.assertNotIn("Reached max turns", errors.getvalue())
+
+    def test_compaction_accounts_for_its_own_provider_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            for index in range(8):
+                session.append_message({"role": "user", "content": f"question {index}"})
+                session.append_message(
+                    {"role": "assistant", "content": f"answer {index}"}
+                )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            reply = ProviderReply(
+                content="summary",
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 101,
+                    "completion_tokens": 7,
+                    "total_tokens": 108,
+                },
+            )
+            with patch.object(
+                agent.provider, "complete", return_value=reply, create=True
+            ):
+                self.assertTrue(agent.compact())
+
+            self.assertEqual(agent.total_usage["prompt_tokens"], 101)
+            self.assertEqual(agent.total_usage["total_tokens"], 108)
+            self.assertEqual(agent.last_prompt_tokens, 0)
 
     def test_shell_output_is_shown_in_tool_activity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

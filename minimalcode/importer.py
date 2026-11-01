@@ -104,6 +104,7 @@ def import_pi_settings(
     data = copy.deepcopy(destination.data)
     imported: list[tuple[str, dict[str, Any], str]] = []
     skipped: list[str] = []
+    already_present: list[str] = []
 
     for name, raw_provider in source_providers.items():
         if not isinstance(raw_provider, dict):
@@ -129,12 +130,13 @@ def import_pi_settings(
         existing = data["providers"].get(provider_name)
         if existing is not None and not overwrite:
             skipped.append(provider_name)
+            already_present.append(provider_name)
             continue
 
         model_id = str(model["id"])
         try:
             context_window = int(model.get("contextWindow") or 128_000)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError(
                 f"provider {provider_name!r} has an invalid contextWindow"
             ) from exc
@@ -172,7 +174,18 @@ def import_pi_settings(
         imported.append((provider_name, provider_config, model_id))
 
     if not imported:
+        if already_present and len(already_present) == len(skipped):
+            raise ConfigError(
+                "providers already imported: "
+                + ", ".join(already_present)
+                + "; rerun with --overwrite to replace"
+            )
         detail = f"; skipped: {', '.join(skipped)}" if skipped else ""
+        if already_present:
+            detail += (
+                "; already present (rerun with --overwrite to replace): "
+                + ", ".join(already_present)
+            )
         raise ConfigError(f"no compatible Pi providers found{detail}")
 
     selected = next(

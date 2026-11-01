@@ -14,6 +14,7 @@ from .common import (
     decode_json_body,
     is_event_stream,
     stream_event_error,
+    strip_sse_bom,
     tool_arguments,
 )
 from .types import ProviderReply, ToolCall
@@ -44,6 +45,18 @@ _ANTHROPIC_STOP_REASONS = {
 def _anthropic_usage(raw: Any) -> dict[str, int]:
     """Normalize Anthropic usage, counting cached input as prompt tokens."""
     if not isinstance(raw, dict):
+        return {}
+    if not any(
+        key in raw
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        )
+    ):
+        # An empty usage object means "not reported", not "a free turn"; the
+        # agent uses a missing dict to decide whether to estimate.
         return {}
     try:
         input_tokens = int(raw.get("input_tokens") or 0)
@@ -381,10 +394,7 @@ class AnthropicProtocolMixin:
         response = self._open(payload)
         try:
             if not is_event_stream(response):
-                try:
-                    body = response.read()
-                except httpx2.HTTPError as exc:
-                    raise ProviderError(f"provider stream interrupted: {exc}") from exc
+                body = self._read_body(response)
                 parsed, data = decode_json_body(body)
                 if parsed:
                     return self._parse_anthropic_payload(
@@ -444,6 +454,7 @@ class AnthropicProtocolMixin:
 
         try:
             for line in self._checked_lines(lines):
+                line = strip_sse_bom(line)
                 if not line or line.startswith((":", "event:")):
                     continue
                 if not line.startswith("data:"):
@@ -735,12 +746,9 @@ class AnthropicProtocolMixin:
                 return self._parse_anthropic_stream(
                     response.iter_lines(), on_text=on_text, on_thinking=on_thinking
                 )
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise ProviderError("provider returned invalid JSON") from exc
-            except httpx2.HTTPError as exc:
-                raise ProviderError(f"provider response read failed: {exc}") from exc
+            parsed, data = decode_json_body(self._read_body(response))
+            if not parsed:
+                raise ProviderError("provider returned invalid JSON")
         finally:
             response.close()
         return self._parse_anthropic_payload(

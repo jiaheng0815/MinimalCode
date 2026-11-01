@@ -342,6 +342,32 @@ class WebToolTests(unittest.TestCase):
             len(item["nested"]["text"]), 100 + len("\n<content truncated>")
         )
 
+    def test_search_bounds_nested_collections(self) -> None:
+        payload = {
+            "results": [
+                {
+                    "chunks": ["x" * 250 for _ in range(500)],
+                    "extra": {f"k{index}": "v" for index in range(500)},
+                }
+            ]
+        }
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, json=payload)
+            ),
+        )
+        try:
+            result = client.search("query")
+        finally:
+            client.close()
+        item = result["results"][0]
+        self.assertLessEqual(len(item["chunks"]), 33)
+        self.assertIn("<more list items omitted>", item["chunks"])
+        self.assertLessEqual(len(item["extra"]), 33)
+        self.assertIn("<more object keys omitted>", item["extra"].values())
+
     def test_fetch_accepts_null_title(self) -> None:
         client = ProviderWebClient(
             "custom",

@@ -9,10 +9,20 @@ import httpx2
 
 from ..errors import ProviderError
 
+_USAGE_KEYS = frozenset(
+    {
+        "prompt_tokens",
+        "input_tokens",
+        "completion_tokens",
+        "output_tokens",
+        "total_tokens",
+    }
+)
+
 
 def normalize_usage(raw: Any) -> dict[str, int]:
     """Normalize Chat and Responses usage objects to one stable key set."""
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not any(key in raw for key in _USAGE_KEYS):
         return {}
     prompt = raw.get("prompt_tokens", raw.get("input_tokens", 0))
     completion = raw.get("completion_tokens", raw.get("output_tokens", 0))
@@ -37,8 +47,9 @@ def normalize_usage(raw: Any) -> dict[str, int]:
         total_int = int(total or prompt_int + completion_int)
         cached_int = int(cached or 0)
         reasoning_int = int(reasoning or 0)
-    except (TypeError, ValueError):
-        # Usage is diagnostic only; a malformed object must not fail a turn.
+    except (TypeError, ValueError, OverflowError):
+        # Usage is diagnostic only; a malformed object (including a non-finite
+        # JSON number such as Infinity) must not fail a turn.
         return {}
     return {
         "prompt_tokens": prompt_int,
@@ -88,6 +99,11 @@ def tool_arguments(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError):
         return "{}"
+
+
+def strip_sse_bom(line: str) -> str:
+    """Remove a UTF-8 BOM that a gateway left at the start of an SSE line."""
+    return line.lstrip("\ufeff") if line else line
 
 
 def is_event_stream(response: httpx2.Response) -> bool:

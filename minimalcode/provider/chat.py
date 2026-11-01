@@ -15,6 +15,7 @@ from .common import (
     is_event_stream,
     normalize_usage,
     stream_event_error,
+    strip_sse_bom,
     tool_arguments,
 )
 from .types import ProviderReply, ToolCall
@@ -40,7 +41,7 @@ class ChatProtocolMixin:
         return [
             {key: value for key, value in message.items() if key != "provider_content"}
             for message in messages
-            if isinstance(message, dict)
+            if isinstance(message, dict) and isinstance(message.get("role"), str)
         ]
 
     def _chat_payload(
@@ -85,10 +86,7 @@ class ChatProtocolMixin:
         response = self._open(payload)
         try:
             if not is_event_stream(response):
-                try:
-                    body = response.read()
-                except httpx2.HTTPError as exc:
-                    raise ProviderError(f"provider stream interrupted: {exc}") from exc
+                body = self._read_body(response)
                 parsed, data = decode_json_body(body)
                 if parsed:
                     return self._parse_chat_payload(
@@ -126,6 +124,7 @@ class ChatProtocolMixin:
 
         try:
             for line in self._checked_lines(lines):
+                line = strip_sse_bom(line)
                 if not line or line.startswith((":", "event:")):
                     continue
                 if not line.startswith("data:"):
@@ -210,6 +209,20 @@ class ChatProtocolMixin:
                                     if last_call_index >= 0
                                     else len(calls)
                                 )
+                        else:
+                            # A non-conforming server can reuse an index for a
+                            # new call id. Treat that as a new call instead of
+                            # overwriting the first one and concatenating its
+                            # arguments into invalid JSON.
+                            existing = calls.get(index)
+                            incoming_id = str(raw_call.get("id") or "")
+                            if (
+                                existing is not None
+                                and incoming_id
+                                and existing["id"]
+                                and incoming_id != existing["id"]
+                            ):
+                                index = len(calls)
                         last_call_index = index
                         entry = calls.setdefault(
                             index,
@@ -344,12 +357,9 @@ class ChatProtocolMixin:
                 return self._parse_chat_stream(
                     response.iter_lines(), on_text=on_text, on_thinking=on_thinking
                 )
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise ProviderError("provider returned invalid JSON") from exc
-            except httpx2.HTTPError as exc:
-                raise ProviderError(f"provider response read failed: {exc}") from exc
+            parsed, data = decode_json_body(self._read_body(response))
+            if not parsed:
+                raise ProviderError("provider returned invalid JSON")
         finally:
             response.close()
         return self._parse_chat_payload(data, on_text=on_text, on_thinking=on_thinking)

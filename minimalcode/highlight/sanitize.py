@@ -22,13 +22,28 @@ def _csi_length(data: str, start: int) -> int | None:
     return None
 
 
+def _c1_csi_length(data: str, start: int) -> int | None:
+    """Return the length of a single-byte C1 CSI (0x9B) sequence."""
+    index = start + 1
+    while index < len(data):
+        code = ord(data[index])
+        if 0x40 <= code <= 0x7E:
+            return index + 1 - start
+        if not 0x20 <= code <= 0x3F:
+            return 1
+        index += 1
+    return None
+
+
 def _string_sequence_length(data: str, start: int, sequence_start: int) -> int | None:
     """Return the length of an OSC/DCS-style string sequence."""
     index = start
     while index < len(data):
         # OSC/DCS strings end with BEL (xterm) or ST (``ESC \``); both forms appear
         # in the wild, so either terminates the sequence.
-        if data[index] == "\x07":
+        if data[index] == "\x07" or data[index] == "\x9c":
+            # BEL (xterm), ST (``ESC \``), and the single-byte C1 ST all
+            # terminate an OSC/DCS-style string.
             return index + 1 - sequence_start
         if data[index] == "\x1b":
             if index + 1 >= len(data):
@@ -67,8 +82,10 @@ class TerminalSanitizer:
             return _string_sequence_length(data, start + 2, start)
         # Anything else is a two-byte escape (``ESC 7``, ``ESC c``). Two is returned
         # rather than one so the parameter byte is consumed too; leaving it would
-        # print a stray character where the sequence used to be.
-        return 2
+        # print a stray character where the sequence used to be. A control byte
+        # after ESC cannot be a two-byte final, so only the ESC is removed —
+        # otherwise an isolated ESC before a newline would join two lines.
+        return 2 if 0x20 <= ord(marker) <= 0x7E else 1
 
     def feed(self, text: str) -> str:
         """Consume a delta and return the safe text that is complete so far."""
@@ -102,8 +119,26 @@ class TerminalSanitizer:
             code = ord(char)
             if char in "\n\t":
                 rendered.append(char)
-            elif code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F:
+            elif code < 0x20 or code == 0x7F:
                 pass
+            elif 0x80 <= code <= 0x9F:
+                # Single-byte C1 controls include complete CSI/OSC/DCS
+                # sequences. Dropping only the lead byte printed their payload
+                # as ordinary text, so consume the whole sequence.
+                if code == 0x9B:
+                    length = _c1_csi_length(data, index)
+                    if length is None:
+                        self._pending = data[index:]
+                        break
+                    index += length
+                    continue
+                if code in {0x90, 0x98, 0x9D, 0x9E, 0x9F}:
+                    length = _string_sequence_length(data, index + 1, index)
+                    if length is None:
+                        self._pending = data[index:]
+                        break
+                    index += length
+                    continue
             else:
                 rendered.append(char)
             index += 1

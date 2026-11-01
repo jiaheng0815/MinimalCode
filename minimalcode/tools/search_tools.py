@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 import shutil
 from collections.abc import Iterator
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,8 @@ from .search import (
     smart_case_ignore,
 )
 from .validation import positive_limit
+
+_GREP_RESULT_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):")
 
 
 class SearchToolsMixin:
@@ -51,6 +53,7 @@ class SearchToolsMixin:
         if rg and self._can_spawn_argv():
             command = [
                 rg,
+                "--no-config",
                 "--line-number",
                 "--no-heading",
                 "--color",
@@ -73,15 +76,21 @@ class SearchToolsMixin:
                 command.extend(["--glob", sandbox_glob])
             command.extend(["--", pattern, str(target)])
             returncode, lines, truncated, stderr = search_module.run_bounded_command(
-                command, cwd=self.cwd, limit=limit, sandbox=self.sandbox
+                command,
+                cwd=self.cwd,
+                # Read one line past the requested count so a filtered sensitive
+                # path cannot make an incomplete result look complete.
+                limit=limit + 1,
+                sandbox=self.sandbox,
             )
             # Exit 1 means "no matches" and is not an error.
             if not truncated and returncode not in (0, 1):
                 raise ToolError(stderr or f"grep exited {returncode}")
+            matches = [line for line in lines if self._grep_line_allowed(line)]
             return {
                 "status": "success",
-                "matches": lines[:limit],
-                "truncated": truncated,
+                "matches": matches[:limit],
+                "truncated": truncated or len(matches) > limit,
             }
         return self._python_grep(pattern, target, glob, limit)
 
@@ -105,6 +114,39 @@ class SearchToolsMixin:
         if self.sandbox.policy.allow_sensitive_files:
             return ()
         return SENSITIVE_SEARCH_GLOBS
+
+    def _allowed_result_path(self, raw: str) -> bool:
+        """Return True when one search result may be shown for this workspace."""
+        try:
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = self.cwd / candidate
+            candidate = candidate.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return self.sandbox.is_allowed(
+            candidate, operation="read", allow_outside=self.allow_outside
+        )
+
+    def _grep_line_allowed(self, line: str) -> bool:
+        """Keep one ripgrep match only when its path is allowed."""
+        match = _GREP_RESULT_RE.match(line)
+        if match is None:
+            # A head/tail truncation marker or a line fragment is not a match.
+            return False
+        return self._allowed_result_path(match.group("path"))
+
+    def _find_result_allowed(self, raw: str) -> bool:
+        """Keep one `rg --files` path only when it names an allowed file."""
+        try:
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = self.cwd / candidate
+            if not candidate.is_file():
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return self._allowed_result_path(str(candidate))
 
     def _can_spawn_argv(self) -> bool:
         """Return True when the active backend can start a child process.
@@ -167,17 +209,60 @@ class SearchToolsMixin:
         )
 
     @staticmethod
-    def _glob_variants(glob_pattern: str) -> tuple[str, ...]:
-        """Return the pattern plus the form with every ``**/`` collapsed.
-
-        ripgrep reads ``**/`` as "zero or more directories", while ``fnmatch``
-        needs at least one, so `src/**/*.py` used to skip `src/config.py`
-        entirely and report a complete result.
-        """
-        collapsed = glob_pattern.replace("**/", "")
-        if collapsed == glob_pattern:
-            return (glob_pattern,)
-        return (glob_pattern, collapsed)
+    @lru_cache(maxsize=256)
+    def _glob_regex(glob_pattern: str) -> re.Pattern[str]:
+        """Translate a ripgrep-style glob to a compiled, case-sensitive regex."""
+        parts: list[str] = ["^"]
+        index = 0
+        while index < len(glob_pattern):
+            char = glob_pattern[index]
+            if char == "*":
+                if glob_pattern.startswith("**/", index):
+                    # `**/` means zero or more directories, as in ripgrep.
+                    parts.append("(?:.*/)?")
+                    index += 3
+                elif glob_pattern.startswith("**", index):
+                    parts.append(".*")
+                    index += 2
+                else:
+                    parts.append("[^/]*")
+                    index += 1
+                continue
+            if char == "?":
+                parts.append("[^/]")
+                index += 1
+                continue
+            if char == "[":
+                end = index + 1
+                if end < len(glob_pattern) and glob_pattern[end] in "!^":
+                    end += 1
+                if end < len(glob_pattern) and glob_pattern[end] == "]":
+                    end += 1
+                while end < len(glob_pattern) and glob_pattern[end] != "]":
+                    end += 1
+                if end >= len(glob_pattern):
+                    parts.append(r"\[")
+                    index += 1
+                    continue
+                content = glob_pattern[index + 1 : end]
+                if content.startswith("!"):
+                    content = "^" + content[1:]
+                if content in {"", "^"}:
+                    parts.append(r"\[\]")
+                else:
+                    parts.append(f"[{content}]")
+                index = end + 1
+                continue
+            parts.append(re.escape(char))
+            index += 1
+        parts.append("$")
+        expression = "".join(parts)
+        try:
+            return re.compile(expression)
+        except re.error:
+            # Keep a malformed character class from turning a search into an
+            # uncaught exception; treat the whole pattern literally instead.
+            return re.compile("^" + re.escape(glob_pattern) + "$")
 
     @classmethod
     def _matches_glob(cls, file_path: Path, root: Path, glob_pattern: str) -> bool:
@@ -186,15 +271,10 @@ class SearchToolsMixin:
             relative = file_path.relative_to(root).as_posix()
         except ValueError:
             relative = file_path.as_posix()
-        for pattern in cls._glob_variants(glob_pattern):
-            if fnmatch.fnmatch(file_path.name, pattern):
-                return True
-            if fnmatch.fnmatch(relative, pattern):
-                return True
-            # `**/` is optional in ripgrep globs, required by fnmatch.
-            if pattern.startswith("**/") and fnmatch.fnmatch(relative, pattern[3:]):
-                return True
-        return False
+        # A glob containing a separator is matched against the relative path;
+        # `*.py` keeps matching any file name, but `*` no longer crosses `/`.
+        candidate = relative if "/" in glob_pattern else file_path.name
+        return cls._glob_regex(glob_pattern).fullmatch(candidate) is not None
 
     def find(
         self,
@@ -214,6 +294,7 @@ class SearchToolsMixin:
         if rg and self._can_spawn_argv():
             command = [
                 rg,
+                "--no-config",
                 "--files",
                 "--hidden",
                 "--no-ignore",
@@ -227,14 +308,18 @@ class SearchToolsMixin:
                 command.extend(["--glob", sandbox_glob])
             command.append(str(target))
             returncode, paths, truncated, stderr = search_module.run_bounded_command(
-                command, cwd=self.cwd, limit=limit, sandbox=self.sandbox
+                command,
+                cwd=self.cwd,
+                limit=limit + 1,
+                sandbox=self.sandbox,
             )
             if not truncated and returncode not in (0, 1):
                 raise ToolError(stderr or f"find exited {returncode}")
+            files = [path for path in paths if self._find_result_allowed(path)]
             return {
                 "status": "success",
-                "files": paths[:limit],
-                "truncated": truncated,
+                "files": files[:limit],
+                "truncated": truncated or len(files) > limit,
             }
 
         paths: list[str] = []

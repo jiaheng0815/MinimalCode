@@ -156,6 +156,22 @@ class HighlightTests(unittest.TestCase):
         text = "safe\x1b[2J\x1b]0;title\x07 still\x1b[31mred\x08\nnext"
         self.assertEqual(sanitize_terminal_text(text), "safe stillred\nnext")
 
+    def test_isolated_escape_before_newline_does_not_join_lines(self) -> None:
+        self.assertEqual(sanitize_terminal_text("alpha\x1b\nbeta"), "alpha\nbeta")
+
+    def test_c1_control_sequences_do_not_leak_their_payload(self) -> None:
+        text = "\x9b31mred\x9b0m\x9d0;title\x9cvisible"
+        self.assertEqual(sanitize_terminal_text(text), "redvisible")
+
+    def test_thinking_renderer_resets_a_fully_held_block(self) -> None:
+        stream = io.StringIO()
+        renderer = ThinkingRenderer(stream, theme="dark", color=True)
+        renderer.feed("\x1b]0;unterminated")
+        renderer.finish()
+        renderer.feed("second block")
+        renderer.finish()
+        self.assertEqual(strip_ansi(stream.getvalue()), "second block\n")
+
     def test_split_escape_sequences_do_not_leak(self) -> None:
         stream = io.StringIO()
         highlighter = MarkdownHighlighter(stream, color=True)

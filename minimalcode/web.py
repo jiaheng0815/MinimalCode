@@ -9,7 +9,9 @@ import httpx2
 
 from .config import provider_api_key
 from .errors import ToolError
-from .httpclient import build_client, build_headers, post_json
+from .httpclient import build_client, build_headers, join_url_path, post_json
+
+_MAX_NESTED_ITEMS = 32
 
 
 class ProviderWebClient:
@@ -104,7 +106,7 @@ class ProviderWebClient:
             raise ToolError(f"web tools are not enabled for provider {self.name!r}")
         return post_json(
             self._client,
-            f"{self._endpoint}/{path}",
+            join_url_path(self._endpoint, path),
             payload,
             label="web",
             timeout=self._timeout_seconds,
@@ -169,12 +171,22 @@ class ProviderWebClient:
         if depth >= 32:
             return "<nested value omitted>"
         if isinstance(value, dict):
-            return {
+            items = list(value.items())
+            normalized = {
                 key: self._normalize_value(item, depth + 1)
-                for key, item in value.items()
+                for key, item in items[:_MAX_NESTED_ITEMS]
             }
+            if len(items) > _MAX_NESTED_ITEMS:
+                normalized.setdefault("<truncated>", "<more object keys omitted>")
+            return normalized
         if isinstance(value, list):
-            return [self._normalize_value(item, depth + 1) for item in value]
+            normalized = [
+                self._normalize_value(item, depth + 1)
+                for item in value[:_MAX_NESTED_ITEMS]
+            ]
+            if len(value) > _MAX_NESTED_ITEMS:
+                normalized.append("<more list items omitted>")
+            return normalized
         return value
 
     def fetch(self, url: str) -> dict[str, Any]:

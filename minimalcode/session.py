@@ -193,8 +193,13 @@ class SessionStore:
             return self.load(candidate, default_workspace=cwd)
 
         files = self._candidate_files(cwd)
-        if not files:
-            files = self._candidate_files()
+        # A session from another workspace is still addressable by its ID; the
+        # sessions listing shows those IDs, so only searching the current
+        # workspace made listed sessions fail to resolve here.
+        global_files = self._candidate_files()
+        if global_files:
+            seen_files = set(files)
+            files.extend(path for path in global_files if path not in seen_files)
         identities = [(path, self._recorded_session_id(path)) for path in files]
         matches = [
             path

@@ -41,24 +41,29 @@ class _Capture:
         self.head = bytearray()
         self.tail = bytearray()
         self.dropped = False
+        # A timeout path can snapshot the capture while the reader thread is
+        # still draining the pipe, so mutations and reads are serialized.
+        self._lock = threading.Lock()
 
     def consume(self, chunk: bytes) -> None:
         """Append a chunk, evicting old tail bytes once the budget is full."""
         head_limit = max(1, self.limit_bytes * 3 // 5)
-        if len(self.head) < head_limit:
-            take = min(head_limit - len(self.head), len(chunk))
-            self.head.extend(chunk[:take])
-            chunk = chunk[take:]
-        if chunk:
-            self.tail.extend(chunk)
-            tail_limit = max(0, self.limit_bytes - len(self.head))
-            if len(self.tail) > tail_limit:
-                del self.tail[: len(self.tail) - tail_limit]
-                self.dropped = True
+        with self._lock:
+            if len(self.head) < head_limit:
+                take = min(head_limit - len(self.head), len(chunk))
+                self.head.extend(chunk[:take])
+                chunk = chunk[take:]
+            if chunk:
+                self.tail.extend(chunk)
+                tail_limit = max(0, self.limit_bytes - len(self.head))
+                if len(self.tail) > tail_limit:
+                    del self.tail[: len(self.tail) - tail_limit]
+                    self.dropped = True
 
     def text(self) -> str:
         """Decode the retained bytes as UTF-8 with replacement."""
-        return _decode_output(bytes(self.head) + bytes(self.tail))
+        with self._lock:
+            return _decode_output(bytes(self.head) + bytes(self.tail))
 
 
 def _pump(stream: IO[bytes], capture: _Capture) -> None:
@@ -286,6 +291,16 @@ def _execute(
     tree_options: dict[str, object] = (
         {} if os.name == "nt" else {"start_new_session": True}
     )
+    if (
+        preexec is not None
+        and threading.current_thread() is not threading.main_thread()
+    ):
+        # Python documents preexec_fn as unsafe in a threaded process: the
+        # child can deadlock before exec if another thread holds a lock. The
+        # concurrent-subagent path launches its children from worker threads;
+        # those children re-apply limits to their own commands in their own
+        # main thread, so skipping the hook here is safer than risking a hang.
+        preexec = None
     try:
         with tempfile.TemporaryFile() as in_file:
             if stdin_text is None:

@@ -41,10 +41,13 @@ SAFE_ENV_TEMPLATES = frozenset(
 )
 
 # ripgrep globs that keep bulk searches from echoing credentials. They are
-# exclusion-only: a positive re-include would widen a `find` pattern.
+# exclusion-only: a positive re-include would widen a `find` pattern. The
+# globs cannot express every policy rule (case-insensitive suffixes, and the
+# difference between `.env.example` and `.env.local`), so result paths are
+# filtered through `SandboxRunner.is_allowed` as a second line of defence.
 SENSITIVE_SEARCH_GLOBS: tuple[str, ...] = (
     "!**/.env",
-    "!**/.env.*",
+    "!**/.env-*",
     "!**/.netrc",
     "!**/.npmrc",
     "!**/.pgpass",

@@ -398,8 +398,392 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         sleep.assert_called_once_with(2.0)
 
+    def test_usage_with_non_finite_numbers_is_ignored(self) -> None:
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            body = json.dumps(
+                {
+                    "choices": [
+                        {"message": {"content": "ok"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {"prompt_tokens": float("inf"), "total_tokens": 1},
+                }
+            )
+            return httpx2.Response(200, content=body.encode("utf-8"))
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "ok")
+        self.assertEqual(reply.usage, {})
+
+    def test_empty_usage_event_does_not_clear_a_reported_usage(self) -> None:
+        events = [
+            {
+                "choices": [{"delta": {"content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 2,
+                    "total_tokens": 9,
+                },
+            },
+            {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        body += "data: [DONE]\n\n"
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1"},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.usage["prompt_tokens"], 7)
+        self.assertEqual(reply.usage["total_tokens"], 9)
+
+    def test_reused_tool_call_index_starts_a_new_call(self) -> None:
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_a",
+                                    "function": {"name": "read", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_b",
+                                    "function": {"name": "write", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1"},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(
+            [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+            [("call_a", "read", "{}"), ("call_b", "write", "{}")],
+        )
+
+    def test_sse_bom_is_ignored_for_each_protocol(self) -> None:
+        cases = {
+            "openai_chat": (
+                True,
+                [
+                    {
+                        "choices": [
+                            {
+                                "delta": {"content": "ok"},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                ],
+            ),
+            "openai_responses": (
+                False,
+                [
+                    {"type": "response.output_text.delta", "delta": "ok"},
+                    {"type": "response.completed", "response": {"status": "completed"}},
+                ],
+            ),
+            "anthropic_messages": (
+                True,
+                [
+                    {
+                        "type": "message_start",
+                        "message": {"usage": {"input_tokens": 1}},
+                    },
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "ok"},
+                    },
+                    {"type": "message_stop"},
+                ],
+            ),
+        }
+        for protocol, (stream, events) in cases.items():
+            with self.subTest(protocol=protocol):
+                body = "\ufeff" + "".join(
+                    f"data: {json.dumps(event)}\n\n" for event in events
+                )
+
+                def handler(
+                    request: httpx2.Request, payload: str = body
+                ) -> httpx2.Response:
+                    return httpx2.Response(
+                        200,
+                        headers={"Content-Type": "text/event-stream"},
+                        content=payload.encode("utf-8"),
+                    )
+
+                provider = OpenAICompatibleProvider(
+                    name="test",
+                    config={
+                        "base_url": "https://provider.test/v1",
+                        "protocol": protocol,
+                        "stream": stream,
+                    },
+                    model="model-a",
+                    thinking="none",
+                    transport=httpx2.MockTransport(handler),
+                )
+                try:
+                    reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+                finally:
+                    provider.close()
+                self.assertEqual(reply.content, "ok")
+
+    def test_responses_non_stream_sse_keeps_deltas_without_output(self) -> None:
+        events = [
+            {"type": "response.output_text.delta", "delta": "hello "},
+            {"type": "response.output_text.delta", "delta": "world"},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        deltas: list[str] = []
+        try:
+            reply = provider.stream_chat(
+                [{"role": "user", "content": "hello"}], on_text=deltas.append
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "hello world")
+        self.assertEqual(reply.finish_reason, "stop")
+        self.assertEqual(deltas, ["hello ", "world"])
+
+    def test_responses_input_skips_non_object_and_non_string_role_messages(
+        self,
+    ) -> None:
+        seen_request: dict[str, object] = {}
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            seen_request.update(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "status": "completed",
+                    "output": [{"type": "message", "content": [{"text": "ok"}]}],
+                },
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            provider.stream_chat(
+                [
+                    {"role": "user", "content": "hello"},
+                    "junk",
+                    {"role": 5, "content": "invalid"},
+                ]
+            )
+        finally:
+            provider.close()
+
+        self.assertEqual(seen_request["input"], [{"role": "user", "content": "hello"}])
+
+    def test_responses_non_stream_sse_preserves_tool_calls(self) -> None:
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '{"path":"a.py"}',
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": '{"path":"a.py"}',
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": False,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(
+            [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+            [("call_1", "read", '{"path":"a.py"}')],
+        )
+        self.assertEqual(reply.finish_reason, "tool_calls")
+
+    def test_endpoint_keeps_a_configured_query_string(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="azure",
+            config={
+                "base_url": (
+                    "https://example.test/openai/deployments/m/chat/completions"
+                    "?api-version=2024-06-01"
+                )
+            },
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(lambda request: httpx2.Response(200)),
+        )
+        try:
+            self.assertEqual(
+                provider._endpoint(),
+                "https://example.test/openai/deployments/m/chat/completions"
+                "?api-version=2024-06-01",
+            )
+        finally:
+            provider.close()
+
+    def test_response_body_read_is_bounded_by_the_deadline(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, content=b"{}")
+            ),
+        )
+        try:
+            provider._stream_deadline = 0.0
+            with self.assertRaisesRegex(ProviderError, "exceeded timeout_seconds"):
+                provider._read_body(httpx2.Response(200, content=b"{}"))
+        finally:
+            provider.close()
+
     def test_retry_after_is_bounded(self) -> None:
-        cases = {"0": 0.2, "-5": 0.2, "120": 5.0, "soon": 1.0}
+        cases = {
+            "0": 0.2,
+            "-5": 0.2,
+            "120": 5.0,
+            "soon": 1.0,
+            "nan": 1.0,
+            "inf": 1.0,
+        }
         for header, expected in cases.items():
             with self.subTest(retry_after=header):
                 attempts = 0

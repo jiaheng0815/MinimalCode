@@ -107,6 +107,24 @@ class SessionTests(unittest.TestCase):
             assert latest is not None
             self.assertEqual(latest.session_id, valid.session_id)
 
+    def test_resolve_finds_a_session_from_another_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first_workspace = root / "first"
+            second_workspace = root / "second"
+            first_workspace.mkdir()
+            second_workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            first = store.create(
+                first_workspace, provider="test", model="model", save=True
+            )
+            store.create(second_workspace, provider="test", model="model", save=True)
+
+            loaded = store.resolve(first.session_id, second_workspace)
+
+            self.assertEqual(loaded.session_id, first.session_id)
+            self.assertEqual(loaded.cwd, first_workspace.resolve())
+
     def test_resolve_accepts_full_recorded_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -194,7 +194,10 @@ def _repair_tool_history(
         if (
             role == "assistant"
             and message.get("content") is None
-            and not isinstance(message.get("tool_calls"), list)
+            and (
+                not isinstance(message.get("tool_calls"), list)
+                or not message["tool_calls"]
+            )
         ):
             # Older sessions stored an empty reply as null content. Providers
             # reject that shape on the next request, so repair it in place.
@@ -429,6 +432,8 @@ class Agent:
         usage: dict[str, int],
         messages: list[dict[str, Any]],
         reply_text: str = "",
+        *,
+        update_prompt_state: bool = True,
     ) -> None:
         """Record one turn's usage, estimating only what the provider omitted.
 
@@ -436,6 +441,9 @@ class Agent:
         servers that ignore ``stream_options`` report nothing at all, and
         printing ``0 completion`` for a real answer is a lie. Estimates are
         flagged so the CLI can mark them instead of presenting them as reported.
+        Compaction and summary requests pass ``update_prompt_state=False`` so
+        their prompt size is counted in the totals without becoming the main
+        conversation's compaction trigger.
         """
         estimated = not usage
         if estimated:
@@ -458,10 +466,27 @@ class Agent:
                 estimated = True
         for key in self.total_usage:
             self.total_usage[key] += int(normalized.get(key, 0))
-        self.last_prompt_tokens = int(normalized.get("prompt_tokens", 0))
+        if update_prompt_state:
+            self.last_prompt_tokens = int(normalized.get("prompt_tokens", 0))
         if estimated:
             self.estimated_turns += 1
         self.session.append_usage(normalized)
+
+    def _complete_text(self, messages: list[dict[str, Any]]) -> str:
+        """Complete a summary/compaction request and account for its usage."""
+        complete = getattr(self.provider, "complete", None)
+        if callable(complete):
+            reply = complete(messages)
+            self._accumulate_usage(
+                reply.usage,
+                messages,
+                reply.content,
+                update_prompt_state=False,
+            )
+            return reply.content
+        # Lightweight providers used by embedders and tests only implement
+        # ``complete_text``; there is no usage object to record.
+        return self.provider.complete_text(messages)
 
     def _write_delta(self, text: str) -> None:
         if self._thinking_renderer is not None:
@@ -591,11 +616,22 @@ class Agent:
                 )
                 for index, arguments in runnable
             ]
-            for thread in threads:
-                thread.start()
+            started: list[threading.Thread] = []
+            for thread, (index, _arguments) in zip(threads, runnable):
+                try:
+                    thread.start()
+                except RuntimeError as exc:
+                    # Thread exhaustion must not abort the turn or leave a slot
+                    # without an answer; report it as that call's tool failure.
+                    outcomes[index] = {
+                        "status": "error",
+                        "message": f"cannot start subagent worker: {exc}",
+                    }
+                    continue
+                started.append(thread)
             # Daemon threads keep Ctrl-C from waiting on every child: the
             # interrupt leaves this join and the process can exit.
-            for thread in threads:
+            for thread in started:
                 thread.join()
         return [outcomes[index] for index in range(len(calls))]
 
@@ -724,7 +760,20 @@ class Agent:
     ) -> None:
         if self.quiet:
             return
-        if turn >= self.max_turns:
+        if finish_reason in _INCOMPLETE_FINISH_REASONS:
+            # A provider-side stop is the concrete cause; max_turns only says
+            # how many rounds were allowed. Report the cause first even when the
+            # stop happened on the final allowed round.
+            preview = " ".join(final_text.split()) if final_text.strip() else ""
+            if len(preview) > 200:
+                preview = preview[:197] + "..."
+            if preview:
+                message = f"Provider stopped early: {preview}"
+            else:
+                message = (
+                    "The provider returned an empty response; the task is unfinished."
+                )
+        elif turn >= self.max_turns:
             message = f"Reached max turns ({self.max_turns}); task may be incomplete."
         elif not final_text.strip():
             message = "The provider returned an empty response; the task is unfinished."
@@ -794,7 +843,7 @@ class Agent:
             "work. Omit greetings and redundant reasoning. Use compact plain text."
         )
         try:
-            summary = self.provider.complete_text(
+            summary = self._complete_text(
                 [
                     {"role": "system", "content": prompt},
                     {
@@ -837,7 +886,7 @@ class Agent:
 
     def summarize(self) -> str:
         """Ask the provider to condense the whole session into durable notes."""
-        summary = self.provider.complete_text(
+        summary = self._complete_text(
             [
                 {"role": "system", "content": SUMMARY_PROMPT},
                 {

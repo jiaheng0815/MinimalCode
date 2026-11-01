@@ -72,12 +72,14 @@ def _line_ending(text: str) -> str:
 def _summary_block(summary: str, newline: str) -> str:
     """Wrap model output in the markers, in the file's line-ending style."""
     # A summary can echo the markers when AGENTS.md itself was part of the
-    # transcript; dropping those lines keeps a rerun from nesting blocks.
-    lines = [
-        line
-        for line in summary.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        if line.strip() not in {SUMMARY_START, SUMMARY_END}
-    ]
+    # transcript; stripping them from each line keeps a rerun from nesting
+    # blocks without deleting text that shares a line with a marker.
+    lines: list[str] = []
+    for raw_line in summary.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        if raw_line.strip() in {SUMMARY_START, SUMMARY_END}:
+            continue
+        line = raw_line.replace(SUMMARY_START, "").replace(SUMMARY_END, "")
+        lines.append(line)
     body = "\n".join(lines).strip("\n")
     return f"{SUMMARY_START}\n{body}\n{SUMMARY_END}".replace("\n", newline)
 

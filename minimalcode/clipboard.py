@@ -132,7 +132,21 @@ def _decode_base64(data: bytes) -> bytes:
 def _macos_image() -> bytes:
     completed = _run(["osascript", "-e", _MACOS_SCRIPT], label="macOS")
     if completed.returncode != 0:
-        return b""
+        detail = completed.stderr.decode("utf-8", errors="replace").lower()
+        # An empty clipboard is not an error, but a refused Apple Event or a
+        # broken osascript invocation must not look like "no image".
+        no_image_markers = (
+            "no_png",
+            "can't make",
+            "can’t make",
+            "(-1700)",
+            "no image",
+        )
+        if any(marker in detail for marker in no_image_markers):
+            return b""
+        raise ClipboardError(
+            f"macOS clipboard read failed: {_first_error_line(completed)}"
+        )
     return _parse_applescript_data(completed.stdout)
 
 

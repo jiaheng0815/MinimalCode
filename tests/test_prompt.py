@@ -56,6 +56,17 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(merged.endswith(SUMMARY_END + "\n"))
         self.assertIn("- wrote result.txt", merged)
 
+    def test_summary_markers_inside_a_line_are_stripped_without_losing_text(
+        self,
+    ) -> None:
+        summary = f"alpha {SUMMARY_START} middle {SUMMARY_END} omega"
+        merged = merge_agents_summary(None, summary)
+        self.assertIn("alpha", merged)
+        self.assertIn("middle", merged)
+        self.assertIn("omega", merged)
+        self.assertEqual(merged.count(SUMMARY_START), 1)
+        self.assertEqual(merged.count(SUMMARY_END), 1)
+
     def test_existing_agents_file_gets_the_block_appended(self) -> None:
         existing = "# Notes\n\nkeep me\n"
         merged = merge_agents_summary(existing, "new summary")

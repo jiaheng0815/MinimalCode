@@ -18,11 +18,14 @@ from unittest import mock
 
 import httpx2
 
+from minimalcode.errors import ToolError
 from minimalcode.httpclient import (
     build_client,
     build_headers,
     connection_backoff,
     is_loopback_url,
+    join_url_path,
+    post_json,
     resolve_trust_env,
 )
 
@@ -47,8 +50,10 @@ class LoopbackDetectionTests(unittest.TestCase):
         for url in (
             "http://127.0.0.1:11434/v1",
             "http://localhost/v1",
+            "http://localhost.:11434/v1",
             "https://app.localhost/v1",
             "http://[::1]:8080/v1",
+            "http://0.0.0.0:11434/v1",
         ):
             with self.subTest(url=url):
                 self.assertTrue(is_loopback_url(url))
@@ -59,6 +64,16 @@ class LoopbackDetectionTests(unittest.TestCase):
         ):
             with self.subTest(url=url):
                 self.assertFalse(is_loopback_url(url))
+
+    def test_join_url_path_keeps_a_query_string(self) -> None:
+        self.assertEqual(
+            join_url_path("https://example.test/v1?api-version=2", "chat/completions"),
+            "https://example.test/v1/chat/completions?api-version=2",
+        )
+        self.assertEqual(
+            join_url_path("https://example.test/v1/", "chat/completions"),
+            "https://example.test/v1/chat/completions",
+        )
 
     def test_env_proxies_apply_only_to_remote_targets(self) -> None:
         self.assertFalse(
@@ -146,6 +161,42 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertEqual(connection_backoff(2), 2.0)
         self.assertEqual(connection_backoff(5), 8.0)
         self.assertEqual(connection_backoff(20), 8.0)
+
+    def test_status_retry_that_consumes_the_budget_reports_the_status(self) -> None:
+        client = build_client(
+            base_url="https://provider.test/v1",
+            headers={"x-api-key": "secret"},
+            timeout=5,
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(429, headers={"Retry-After": "5"})
+            ),
+        )
+        clock = [0.0]
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def sleep(seconds: float) -> None:
+            clock[0] += seconds
+
+        try:
+            with (
+                mock.patch(
+                    "minimalcode.httpclient.time.monotonic", side_effect=monotonic
+                ),
+                mock.patch("minimalcode.httpclient.time.sleep", side_effect=sleep),
+                self.assertRaisesRegex(ToolError, "HTTP 429"),
+            ):
+                post_json(
+                    client,
+                    "https://provider.test/v1/tools",
+                    {},
+                    label="web",
+                    timeout=1,
+                    deadline=1,
+                )
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":
