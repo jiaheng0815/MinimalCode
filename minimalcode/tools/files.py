@@ -1,4 +1,4 @@
-"""Workspace-bound file operations: read, write, and exact-text edit."""
+"""Workspace-bound file operations: read, write, append, and structured edit."""
 
 from __future__ import annotations
 
@@ -40,6 +40,16 @@ _NOT_UTF8_WARNING = (
     "this range is not valid UTF-8; undecodable bytes were replaced with U+FFFD "
     "and edit refuses this file"
 )
+
+# ``str.splitlines`` also breaks on VT, FF, NEL, and U+2028/U+2029, while
+# ``read`` counts only CR/LF/CRLF. Line-mode edit must use the same definition
+# or it replaces a different line than the caller read.
+_PHYSICAL_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$")
+
+
+def _physical_lines(text: str) -> list[str]:
+    """Split ``text`` into CR/LF/CRLF lines, each keeping its terminator."""
+    return _PHYSICAL_LINE_RE.findall(text)
 
 
 @dataclass(slots=True)
@@ -85,14 +95,23 @@ def _source_preview(text: str, line: int | None) -> str:
     return f"\n  {line:>5} | {source}"
 
 
+def _dominant_newline(counts: dict[str, int]) -> str | None:
+    """Return the most frequent line ending, or None when there is none."""
+    best = max(counts, key=counts.__getitem__)
+    return best if counts[best] else None
+
+
+def _count_text_newlines(text: str) -> dict[str, int]:
+    crlf = text.count("\r\n")
+    return {
+        "\r\n": crlf,
+        "\n": text.count("\n") - crlf,
+        "\r": text.count("\r") - crlf,
+    }
+
+
 def _detect_newline_optional(text: str) -> str | None:
-    if "\r\n" in text:
-        return "\r\n"
-    if "\r" in text and "\n" not in text:
-        return "\r"
-    if "\n" in text:
-        return "\n"
-    return None
+    return _dominant_newline(_count_text_newlines(text))
 
 
 def _detect_newline(text: str) -> str:
@@ -106,13 +125,14 @@ def _line_ending_name(newline: str | None) -> str:
 
 def _detect_newline_bytes(data: bytes) -> str | None:
     """Detect a physical line ending without decoding the whole file."""
-    if b"\r\n" in data:
-        return "\r\n"
-    if b"\r" in data and b"\n" not in data:
-        return "\r"
-    if b"\n" in data:
-        return "\n"
-    return None
+    crlf = data.count(b"\r\n")
+    return _dominant_newline(
+        {
+            "\r\n": crlf,
+            "\n": data.count(b"\n") - crlf,
+            "\r": data.count(b"\r") - crlf,
+        }
+    )
 
 
 def _normalize_newlines(text: str, newline: str) -> str:
@@ -500,7 +520,13 @@ class FileToolsMixin:
                 os.chmod(temp_path, mode)
             except OSError:
                 pass
-            os.replace(temp_path, target)
+            try:
+                os.replace(temp_path, target)
+            except OSError as exc:
+                # A read-only target (or a read-only inherited mode on the
+                # temporary file) fails here; report a tool error instead of a
+                # raw PermissionError that the agent loop cannot explain.
+                raise ToolError(f"cannot write {target}: {exc}") from exc
             try:
                 directory_fd = os.open(target.parent, os.O_RDONLY)
             except OSError:
@@ -512,9 +538,20 @@ class FileToolsMixin:
                     pass
                 finally:
                     os.close(directory_fd)
+        except OSError as exc:
+            raise ToolError(f"cannot write {target}: {exc}") from exc
         finally:
-            # A failed write or replace must not leave a hidden temp file.
-            temp_path.unlink(missing_ok=True)
+            # A failed write or replace must not leave a hidden temp file. A
+            # Windows read-only attribute blocks unlink, so make it writable
+            # once and retry instead of leaking the file.
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                try:
+                    os.chmod(temp_path, 0o600)
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _ruff_invocation(self) -> list[str] | None:
         """Return a ruff command once, or None when ruff is unavailable."""
@@ -893,7 +930,7 @@ class FileToolsMixin:
                 raise ToolError("start_line is required when end_line is set")
             if end_line is None:
                 raise ToolError("end_line is required when start_line is set")
-            lines = original.splitlines(keepends=True)
+            lines = _physical_lines(original)
             # ``end_line == start_line - 1`` is an empty range: insert before
             # start_line. This gives the model a safe way to add a line without
             # guessing adjacent text.
@@ -916,10 +953,19 @@ class FileToolsMixin:
                 )
             start_index = start_line - 1
             end_index = end_line
+            prefix = "".join(lines[:start_index])
             span = "".join(lines[start_index:end_index])
             span_newline = _detect_newline(span) if span else default_newline
             replacement = _normalize_newlines(new_text, span_newline)
             if replacement:
+                if (
+                    prefix
+                    and not prefix.endswith(("\r", "\n"))
+                    and not replacement.startswith(("\r", "\n"))
+                ):
+                    # The insertion point follows a final line that has no
+                    # terminator; without one the new text is glued onto it.
+                    replacement = span_newline + replacement
                 region_has_terminator = span.endswith(("\r", "\n"))
                 following_exists = end_index < len(lines)
                 if (
@@ -928,11 +974,9 @@ class FileToolsMixin:
                     # A patch block is line-oriented. Without this, replacing
                     # line 7 of a 20-line file would glue line 8 onto it.
                     replacement += span_newline
-            updated = (
-                "".join(lines[:start_index]) + replacement + "".join(lines[end_index:])
-            )
+            updated = prefix + replacement + "".join(lines[end_index:])
             lines_removed = end_index - start_index
-            lines_added = len(replacement.splitlines())
+            lines_added = len(new_text.splitlines())
         else:
             if not isinstance(old_text, str) or not old_text:
                 raise ToolError(
@@ -983,21 +1027,25 @@ class FileToolsMixin:
                 pieces: list[str] = []
                 last = 0
                 count = 0
+                lines_removed = 0
+                lines_added = 0
                 for count, match in enumerate(pattern.finditer(original), start=1):
+                    replacement = replacement_for(match.group(0))
                     pieces.append(original[last : match.start()])
-                    pieces.append(replacement_for(match.group(0)))
+                    pieces.append(replacement)
+                    lines_removed += len(match.group(0).splitlines())
+                    lines_added += len(replacement.splitlines())
                     last = match.end()
                 pieces.append(original[last:])
                 updated = "".join(pieces)
             else:
+                replacement = replacement_for(first.group(0))
                 updated = (
-                    original[: first.start()]
-                    + replacement_for(first.group(0))
-                    + original[first.end() :]
+                    original[: first.start()] + replacement + original[first.end() :]
                 )
                 count = 1
-            lines_removed = len(first.group(0).splitlines())
-            lines_added = len(new_text.splitlines())
+                lines_removed = len(first.group(0).splitlines())
+                lines_added = len(replacement.splitlines())
         try:
             encoded = updated.encode("utf-8")
         except UnicodeEncodeError as exc:

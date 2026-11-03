@@ -404,6 +404,18 @@ class ToolTests(unittest.TestCase):
         self.assertIn("read_range", READ_ONLY_TOOLS)
         self.assertNotIn("append_file", READ_ONLY_TOOLS)
         self.assertTrue({"read_range", "append_file"} <= TOOL_NAMES)
+        self.tools.write("gate.txt", "one\n")
+        read_only = ToolRuntime(
+            self.settings, self.workspace, detect_shell(), read_only=True
+        )
+        self.assertIn(
+            "one",
+            read_only.dispatch(
+                "read_range", {"path": "gate.txt", "start_line": 1, "end_line": 1}
+            )["content"],
+        )
+        with self.assertRaisesRegex(ToolError, "disabled by --read-only"):
+            read_only.dispatch("append_file", {"path": "gate.txt", "content": "two\n"})
 
     def test_dispatch_reports_invalid_arguments(self) -> None:
         with self.assertRaises(ToolError) as context:
@@ -494,6 +506,129 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(any("a.py" in line for line in grep_result["matches"]))
         find_result = self.tools.find("*.py")
         self.assertTrue(any(path.endswith("a.py") for path in find_result["files"]))
+
+    def test_grep_single_file_with_ripgrep_keeps_its_only_match(self) -> None:
+        self.tools.write("a.txt", "needle\n")
+        path = str(self.workspace / "a.txt")
+        with (
+            patch(
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
+                return_value=(0, [f"{path}:1:needle"], False, ""),
+            ) as run,
+        ):
+            result = self.tools.grep("needle", path="a.txt")
+        # A single-file ripgrep run prints `LINE:TEXT` unless --with-filename
+        # is passed; the path filter then dropped every real match.
+        self.assertIn("--with-filename", run.call_args.args[0])
+        self.assertEqual(len(result["matches"]), 1)
+
+    def test_grep_retries_when_a_filtered_path_fills_the_window(self) -> None:
+        self.tools.write("a.txt", "needle\n")
+        (self.workspace / ".env.local").write_text("needle\n", encoding="utf-8")
+        blocked = f"{self.workspace / '.env.local'}:1:needle"
+        allowed = f"{self.workspace / 'a.txt'}:1:needle"
+        responses = [
+            (0, [blocked, blocked, blocked], True, ""),
+            (0, [allowed], False, ""),
+        ]
+        with (
+            patch(
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
+                side_effect=responses,
+            ) as run,
+        ):
+            result = self.tools.grep("needle", max_results=1)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertGreater(
+            run.call_args_list[1].kwargs["limit"],
+            run.call_args_list[0].kwargs["limit"],
+        )
+
+    def test_find_retries_when_a_filtered_path_fills_the_window(self) -> None:
+        self.tools.write("a.txt", "one\n")
+        (self.workspace / ".env").write_text("x\n", encoding="utf-8")
+        blocked = str(self.workspace / ".env")
+        allowed = str(self.workspace / "a.txt")
+        responses = [
+            (0, [blocked, blocked, blocked], True, ""),
+            (0, [allowed], False, ""),
+        ]
+        with (
+            patch(
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
+                side_effect=responses,
+            ) as run,
+        ):
+            result = self.tools.find("*", max_results=1)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual([Path(path).name for path in result["files"]], ["a.txt"])
+
+    def test_python_find_matches_braces_and_leading_exclusions(self) -> None:
+        self.tools.write("a.py", "value = 1\n")
+        self.tools.write("b.txt", "two\n")
+        self.tools.write("c.md", "three\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            braced = self.tools.find("*.{py,txt}")
+            excluded = self.tools.find("!*.py")
+        braced_names = {Path(path).name for path in braced["files"]}
+        excluded_names = {Path(path).name for path in excluded["files"]}
+        self.assertEqual(braced_names, {"a.py", "b.txt"})
+        self.assertIn("b.txt", excluded_names)
+        self.assertNotIn("a.py", excluded_names)
+
+    def test_line_edit_inserts_at_unterminated_eof(self) -> None:
+        path = self.workspace / "eof.txt"
+        path.write_bytes(b"one\ntwo")
+        result = self.tools.edit("eof.txt", start_line=3, end_line=2, new_text="three")
+        self.assertEqual(result["lines_added"], 1)
+        self.assertEqual(path.read_bytes(), b"one\ntwo\nthree")
+
+    def test_line_edit_counts_only_cr_and_lf_lines(self) -> None:
+        path = self.workspace / "formfeed.txt"
+        path.write_bytes(b"a = 1\n\x0c\nb = 2\n")
+        self.assertIn("b = 2", self.tools.read("formfeed.txt", 3, 3)["content"])
+        self.tools.edit("formfeed.txt", start_line=3, end_line=3, new_text="B = 3")
+        self.assertEqual(path.read_bytes(), b"a = 1\n\x0c\nB = 3\n")
+
+    def test_mixed_line_endings_use_the_dominant_style(self) -> None:
+        path = self.workspace / "mixed.txt"
+        path.write_bytes(b"a\r\nb\nc\nd\ne\n")
+        self.assertEqual(self.tools.read("mixed.txt")["line_ending"], "LF")
+        self.tools.write("mixed.txt", "x\ny\n")
+        self.assertEqual(path.read_bytes(), b"x\ny\n")
+
+    @unittest.skipUnless(os.name == "nt", "read-only replacement is Windows-only")
+    def test_read_only_target_reports_a_tool_error_without_a_temp_file(self) -> None:
+        path = self.workspace / "readonly.txt"
+        path.write_text("old\n", encoding="utf-8")
+        os.chmod(path, stat.S_IREAD)
+        try:
+            with self.assertRaisesRegex(ToolError, "cannot write"):
+                self.tools.write("readonly.txt", "new\n")
+        finally:
+            os.chmod(path, stat.S_IWRITE)
+        self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
+        self.assertEqual(
+            [
+                item.name
+                for item in self.workspace.iterdir()
+                if item.name.startswith(".")
+            ],
+            [],
+        )
 
     def test_ripgrep_paths_apply_the_same_ignore_globs(self) -> None:
         self.tools.write("src/current.py", "needle = 1\n")
