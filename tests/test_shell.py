@@ -55,6 +55,18 @@ class ShellTests(unittest.TestCase):
         self.assertIsNone(
             powershell_heredoc_delimiter("@'\nhello\n'@\nWrite-Output hi")
         )
+        self.assertEqual(powershell_heredoc_delimiter("cat <<\\EOF\nx\nEOF"), "EOF")
+        # A here-string may contain a bash heredoc as literal text; it is not
+        # a heredoc the active PowerShell shell has to execute.
+        self.assertIsNone(powershell_heredoc_delimiter('$t = @"\nsee <<EOF below\n"@'))
+
+    @unittest.skipUnless(os.name == "nt", "Windows shell aliases only")
+    def test_windowsapps_bash_alias_is_not_a_native_shell(self) -> None:
+        from minimalcode.shell import _is_wsl_bash_stub
+
+        alias = r"C:\Users\example\AppData\Local\Microsoft\WindowsApps\bash.exe"
+        self.assertTrue(_is_wsl_bash_stub(alias))
+        self.assertFalse(_is_wsl_bash_stub(r"C:\Program Files\Git\bin\bash.exe"))
 
     def test_invalid_timeout_returns_an_error(self) -> None:
         shell = detect_shell()

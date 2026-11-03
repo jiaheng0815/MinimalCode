@@ -22,9 +22,17 @@ __all__ = [
     "truncate_text",
 ]
 
-# Bash heredoc starts with ``<<WORD`` or ``<<-WORD``. A PowerShell bit shift
-# such as ``$x << 2`` cannot match because the delimiter must be a word.
-_HEREDOC_RE = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_.-]*)\1")
+# Bash heredoc starts with ``<<WORD``, ``<<-WORD``, or ``<<\WORD``. A PowerShell
+# bit shift such as ``$x << 2`` cannot match because the delimiter is a word.
+_HEREDOC_RE = re.compile(
+    r"(?<!<)<<-?\s*\\?(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_.-]*)"
+    r"(?P=quote)"
+)
+# A PowerShell here-string is a multi-line literal. Its body may legitimately
+# contain ``<<EOF``, so it must be removed before looking for bash heredocs.
+_HERE_STRING_RE = re.compile(
+    r"(?ms)(?<!\\)@(?P<quote>['\"])[ \t]*\r?\n.*?^[ \t]*(?P=quote)@[ \t]*$"
+)
 
 # A shell that exists on disk is not necessarily a shell that can start: a
 # pwsh build without libicu, or one whose .NET runtime cannot reserve memory,
@@ -56,12 +64,11 @@ def _is_wsl_bash_stub(executable: str) -> bool:
         parts = [part.lower() for part in Path(executable).resolve().parts]
     except (OSError, RuntimeError, ValueError):
         return False
-    return (
-        len(parts) >= 2
-        and parts[-1] == "bash.exe"
-        and parts[-2] == "system32"
-        and "windows" in parts
-    )
+    if len(parts) < 2 or parts[-1] != "bash.exe":
+        return False
+    # System32 holds the launcher, and the Store app alias under WindowsApps is
+    # a zero-byte reparse point that behaves the same way.
+    return (parts[-2] == "system32" and "windows" in parts) or "windowsapps" in parts
 
 
 def _kind_for_executable(executable: str) -> tuple[str, str]:
@@ -232,11 +239,12 @@ def powershell_heredoc_delimiter(command: str) -> str | None:
     shift such as ``$x << 2`` are ignored. The caller decides whether the
     active shell is PowerShell; bash/zsh heredocs remain valid there.
     """
+    command = _HERE_STRING_RE.sub("", command)
     for line in command.splitlines():
         for index in _unquoted_heredoc_marks(line):
             match = _HEREDOC_RE.match(line, index)
             if match is not None:
-                return match.group(2)
+                return match.group("delimiter")
     return None
 
 

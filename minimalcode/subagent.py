@@ -76,7 +76,14 @@ def build_command(shell: ShellSpec, **kwargs) -> str:
     argv = build_argv(**kwargs)
     quoted = [quote_argument(a, shell) for a in argv]
     if shell.kind in _POWERSHELL_KINDS:
-        return f"& {quoted[0]} " + " ".join(quoted[1:]) + "; exit $LASTEXITCODE"
+        # If the interpreter cannot be launched at all, PowerShell leaves
+        # $LASTEXITCODE null and a bare `exit` reports success. The parent would
+        # then treat a child that never started as a completed empty answer.
+        return (
+            f"& {quoted[0]} "
+            + " ".join(quoted[1:])
+            + "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }"
+        )
     return " ".join(quoted)
 
 

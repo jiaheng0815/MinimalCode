@@ -23,20 +23,23 @@ POWERSHELL = ShellSpec(
 )
 BASH = ShellSpec(kind="bash", executable="/bin/bash", label="bash", is_windows=False)
 
+POWERSHELL_EXIT_SUFFIX = (
+    "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 }"
+)
+
 
 def _parse(command: str) -> list[str]:
     """Extract argv from a shell command string.
 
     ``build_command`` renders per-shell syntax: PowerShell gets a leading
-    ``&`` call operator and a trailing ``; exit $LASTEXITCODE``.  Neither is
+    ``&`` call operator and a trailing null-safe exit suffix.  Neither is
     an argument to the child.  ``shlex.split`` (POSIX mode) unquotes both
     shells' output to the same argv, so assertions stay independent of the
     quoting style.
     """
     text = command
     text = text.removeprefix("& ")
-    suffix = "; exit $LASTEXITCODE"
-    text = text.removesuffix(suffix)
+    text = text.removesuffix(POWERSHELL_EXIT_SUFFIX)
     return shlex.split(text)
 
 
@@ -51,10 +54,8 @@ class SubagentCommandTests(unittest.TestCase):
         self.assertIn("--quiet", args)
         self.assertEqual(args[args.index("--max-turns") + 1], "7")
 
-    def test_powershell_uses_the_call_operator_and_keeps_the_exit_code(self) -> None:
-        command = build_command(POWERSHELL, cwd=Path("work"))
         self.assertTrue(command.startswith("& '"))
-        self.assertTrue(command.endswith("; exit $LASTEXITCODE"))
+        self.assertTrue(command.endswith(POWERSHELL_EXIT_SUFFIX))
         self.assertNotIn("exit $LASTEXITCODE", build_command(BASH, cwd=Path("work")))
 
     def test_prompt_never_reaches_the_command_line(self) -> None:
