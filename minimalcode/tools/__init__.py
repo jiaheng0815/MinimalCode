@@ -3,7 +3,7 @@
 The implementation is split by concern:
 
 * :mod:`minimalcode.tools.schemas` - provider-facing tool declarations
-* :mod:`minimalcode.tools.files` - read/write/edit
+* :mod:`minimalcode.tools.files` - read/read_range/write/append_file/edit
 * :mod:`minimalcode.tools.search` - low-level grep process handling
 * :mod:`minimalcode.tools.search_tools` - grep/find runtime methods
 * :mod:`minimalcode.tools.process` - shell/subagent execution

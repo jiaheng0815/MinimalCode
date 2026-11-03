@@ -25,6 +25,10 @@ from .search import (
 from .validation import positive_limit
 
 _GREP_RESULT_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):")
+# Sensitive-path filtering happens after ripgrep exits, so a run that returns
+# only filtered paths must be retried with a wider window. The cap keeps one
+# pathological search from scanning an unbounded number of lines.
+_MAX_GREP_SCAN_LINES = 20_000
 
 
 class SearchToolsMixin:
@@ -57,6 +61,9 @@ class SearchToolsMixin:
                 "--no-config",
                 "--line-number",
                 "--no-heading",
+                # A single-file target otherwise prints `LINE:TEXT` with no
+                # path, which the result-path filter rejects as a stray line.
+                "--with-filename",
                 "--color",
                 "never",
                 "--hidden",
@@ -76,18 +83,29 @@ class SearchToolsMixin:
             for sandbox_glob in self._sandbox_globs():
                 command.extend(["--glob", sandbox_glob])
             command.extend(["--", pattern, str(target)])
-            returncode, lines, truncated, stderr = search_module.run_bounded_command(
-                command,
-                cwd=self.cwd,
-                # Read one line past the requested count so a filtered sensitive
-                # path cannot make an incomplete result look complete.
-                limit=limit + 1,
-                sandbox=self.sandbox,
-            )
-            # Exit 1 means "no matches" and is not an error.
-            if not truncated and returncode not in (0, 1):
-                raise ToolError(stderr or f"grep exited {returncode}")
-            matches = [line for line in lines if self._grep_line_allowed(line)]
+            requested = limit + 1
+            while True:
+                returncode, lines, truncated, stderr = (
+                    search_module.run_bounded_command(
+                        command,
+                        cwd=self.cwd,
+                        # One line past the requested count proves truncation.
+                        limit=requested,
+                        sandbox=self.sandbox,
+                    )
+                )
+                # Exit 1 means "no matches" and is not an error.
+                if not truncated and returncode not in (0, 1):
+                    raise ToolError(stderr or f"grep exited {returncode}")
+                matches = [line for line in lines if self._grep_line_allowed(line)]
+                if not truncated or len(matches) > limit or len(lines) < requested:
+                    break
+                # Filtered paths consumed the whole window. Read a wider one
+                # so an allowed match later in the output is not lost.
+                grown = min(requested * 4, _MAX_GREP_SCAN_LINES)
+                if grown <= requested:
+                    break
+                requested = grown
             return {
                 "status": "success",
                 "matches": matches[:limit],
@@ -312,9 +330,38 @@ class SearchToolsMixin:
             index = end
         return tuple(tokens)
 
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def _expand_braces(glob_pattern: str) -> tuple[str, ...]:
+        """Expand the simple ``{py,txt}`` alternation ripgrep accepts."""
+        start = glob_pattern.find("{")
+        if start < 0:
+            return (glob_pattern,)
+        end = glob_pattern.find("}", start + 1)
+        if end < 0:
+            return (glob_pattern,)
+        choices = glob_pattern[start + 1 : end].split(",")
+        if len(choices) < 2 or any(not choice for choice in choices):
+            return (glob_pattern,)
+        prefix = glob_pattern[:start]
+        suffix = glob_pattern[end + 1 :]
+        return tuple(prefix + choice + suffix for choice in choices)
+
     @classmethod
     def _matches_glob(cls, file_path: Path, root: Path, glob_pattern: str) -> bool:
         """Match a ripgrep-style glob against the file name and relative path."""
+        if glob_pattern.startswith("!"):
+            # ripgrep treats a leading `!` as an exclusion.
+            return not cls._matches_glob(file_path, root, glob_pattern[1:])
+        return any(
+            cls._matches_single_glob(file_path, root, expanded)
+            for expanded in cls._expand_braces(glob_pattern)
+        )
+
+    @classmethod
+    def _matches_single_glob(
+        cls, file_path: Path, root: Path, glob_pattern: str
+    ) -> bool:
         try:
             relative = file_path.relative_to(root).as_posix()
         except ValueError:
@@ -403,15 +450,25 @@ class SearchToolsMixin:
             for sandbox_glob in self._sandbox_globs():
                 command.extend(["--glob", sandbox_glob])
             command.append(str(target))
-            returncode, paths, truncated, stderr = search_module.run_bounded_command(
-                command,
-                cwd=self.cwd,
-                limit=limit + 1,
-                sandbox=self.sandbox,
-            )
-            if not truncated and returncode not in (0, 1):
-                raise ToolError(stderr or f"find exited {returncode}")
-            files = [path for path in paths if self._find_result_allowed(path)]
+            requested = limit + 1
+            while True:
+                returncode, paths, truncated, stderr = (
+                    search_module.run_bounded_command(
+                        command,
+                        cwd=self.cwd,
+                        limit=requested,
+                        sandbox=self.sandbox,
+                    )
+                )
+                if not truncated and returncode not in (0, 1):
+                    raise ToolError(stderr or f"find exited {returncode}")
+                files = [path for path in paths if self._find_result_allowed(path)]
+                if not truncated or len(files) > limit or len(paths) < requested:
+                    break
+                grown = min(requested * 4, _MAX_GREP_SCAN_LINES)
+                if grown <= requested:
+                    break
+                requested = grown
             return {
                 "status": "success",
                 "files": files[:limit],
