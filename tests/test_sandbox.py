@@ -268,6 +268,11 @@ class NetworkPolicyTests(SandboxTestBase):
             # A wrapper inside an inline shell must not hide the real client.
             'sh -c "sudo curl https://example.com"',
             "busybox wget https://example.com",
+            # Shell escapes must not turn the executable name into a word that
+            # the gate no longer recognizes.
+            "c\\url https://example.com",
+            'c"url" https://example.com',
+            "c`url https://example.com",
         ):
             with self.subTest(command=command):
                 self.assertIsNotNone(policy.network_denial(command))
@@ -365,6 +370,15 @@ class NetworkPolicyTests(SandboxTestBase):
         target = audit.denials()[-1].target
         self.assertNotIn("sk-secret", target)
         self.assertIn("<redacted>", target)
+
+        audit.deny(
+            "shell",
+            "curl https://x.test?access_token=SEKRET123 -u admin:hunter2",
+            "network denied",
+        )
+        target = audit.denials()[-1].target
+        self.assertNotIn("SEKRET123", target)
+        self.assertNotIn("hunter2", target)
 
     def test_sensitive_file_variants_are_blocked(self) -> None:
         from minimalcode.sandbox.sensitive import is_sensitive_path

@@ -16,10 +16,13 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(authorization\s*:\s*)(?!bearer)[^\s'\"]+"),
     re.compile(r"(?i)\b(x-api-key\s*:\s*)[^\s'\"]+"),
     re.compile(
-        r"(?i)\b((?:api[_-]?key|token|password|passwd|secret)\s*[=:]\s*)"
+        # `access_token=...` and `client-secret: ...` are as sensitive as a
+        # bare `token=...`, so allow a name prefix before the keyword.
+        r"(?i)\b([\w-]*(?:api[_-]?key|token|password|passwd|secret)\s*[=:]\s*)"
         r"[^\s'\"]+"
     ),
     re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
+    re.compile(r"(?i)(\s(?:-u|--user|-b|--cookie|-H|--header)\s+)[^\s'\"]+"),
 )
 _MAX_TARGET_CHARS = 500
 

@@ -244,8 +244,46 @@ _WRAPPER_ARGUMENTS: dict[str, dict[str, int]] = {
     "ionice": {"-c": 1, "-n": 1, "-p": 1},
 }
 _WRAPPERS = frozenset(_WRAPPER_ARGUMENTS)
-_QUOTED_TEXT = re.compile(r"'[^']*'|\"[^\"]*\"")
 _MAX_NESTED_COMMANDS = 8
+_ESCAPE_CHARS = str.maketrans("", "", "\\`'\"^")
+
+
+def _shell_words(segment: str) -> list[tuple[str, int, int]]:
+    """Split one segment into words, removing quotes and concatenating parts.
+
+    A shell treats ``c"url"`` and ``c\\url`` as the single command ``curl``.
+    Tokenizing on alphanumeric runs split those into harmless pieces, so this
+    small scanner keeps quoted fragments attached to their neighbours while
+    still returning the source offsets used to slice an inline command.
+    """
+    words: list[tuple[str, int, int]] = []
+    buffer: list[str] = []
+    start: int | None = None
+    quote: str | None = None
+    for index, char in enumerate(segment):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            else:
+                buffer.append(char)
+            continue
+        if char in {"'", '"'}:
+            if start is None:
+                start = index
+            quote = char
+            continue
+        if char.isspace():
+            if start is not None:
+                words.append(("".join(buffer), start, index))
+                buffer = []
+                start = None
+            continue
+        if start is None:
+            start = index
+        buffer.append(char)
+    if start is not None:
+        words.append(("".join(buffer), start, len(segment)))
+    return words
 
 
 def _skip_wrapper(tokens: list[str], index: int, wrapper: str) -> int:
@@ -316,6 +354,19 @@ def _head_name(token: str) -> str:
     return token.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
 
 
+def _head_variants(token: str) -> list[str]:
+    """Return the executable names a token can denote after shell escapes.
+
+    Bash/PowerShell allow ``c\\url``, ``c"url"``, and ``c`url`` to invoke
+    ``curl``. The raw spelling is kept first so ordinary Windows paths still
+    resolve, and a quote/escape-free spelling is added when it differs.
+    """
+    raw = _head_name(token)
+    collapsed = token.translate(_ESCAPE_CHARS)
+    name = collapsed.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    return [raw] if name == raw else [raw, name]
+
+
 def _decode_powershell_command(value: str) -> str | None:
     """Decode a PowerShell -EncodedCommand value, or None when it is opaque."""
     compact = value.strip()
@@ -343,8 +394,8 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
     inline: list[str] = []
     opaque = False
     for segment in _segments(command):
-        matches = list(_TOKEN_PATTERN.finditer(segment))
-        tokens = [match.group(0) for match in matches]
+        words = _shell_words(segment)
+        tokens = [word for word, _start, _end in words]
         index = 0
         while index < len(tokens):
             token = tokens[index]
@@ -364,7 +415,8 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                 index += 1
                 continue
             heads.append(token)
-            program = _head_name(token)
+            program_names = list(_head_variants(token))
+            program = program_names[0]
             if program == "find":
                 # `find . -exec curl ... +` runs a command from a token that is
                 # not at the start of the segment (a `\;` variant already splits
@@ -373,17 +425,15 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                     if tokens[position].lower() not in _FIND_COMMAND_FLAGS:
                         continue
                     heads.append(tokens[position + 1])
-                    inner = _strip_outer_quotes(
-                        segment[matches[position + 1].start() :]
-                    )
+                    inner = _strip_outer_quotes(segment[words[position + 1][1] :])
                     if inner:
                         inline.append(inner)
                     break
-            if program in _INLINE_COMMAND_SHELLS:
+            if any(name in _INLINE_COMMAND_SHELLS for name in program_names):
                 for position in range(index + 1, len(tokens)):
                     flag = tokens[position].lower()
-                    encoded = (
-                        flag in _ENCODED_COMMAND_FLAGS and program in _POWERSHELL_KINDS
+                    encoded = flag in _ENCODED_COMMAND_FLAGS and any(
+                        name in _POWERSHELL_KINDS for name in program_names
                     )
                     if not encoded and not _is_inline_flag(tokens[position]):
                         continue
@@ -400,9 +450,7 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                         elif decoded.strip():
                             inline.append(decoded)
                     else:
-                        inner = _strip_outer_quotes(
-                            segment[matches[position + 1].start() :]
-                        )
+                        inner = _strip_outer_quotes(segment[words[position + 1][1] :])
                         if inner:
                             inline.append(inner)
                     break
@@ -420,7 +468,7 @@ def _strip_outer_quotes(text: str) -> str:
 
 def _command_tokens(segment: str) -> list[str]:
     """Return tokens starting at the command position of one segment."""
-    tokens = _TOKEN_PATTERN.findall(_QUOTED_TEXT.sub(" ", segment))
+    tokens = [word for word, _start, _end in _shell_words(segment)]
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -475,12 +523,13 @@ def _sequence_detected(command: str, depth: int = 0) -> bool:
         tokens = _command_tokens(segment)
         if not tokens:
             continue
-        program = _head_name(tokens[0])
-        if _network_subcommand(program, tokens[1:]):
+        programs = _head_variants(tokens[0])
+        if any(_network_subcommand(program, tokens[1:]) for program in programs):
             return True
-        candidate = " ".join(tokens)
-        if any(pattern.match(candidate) for pattern in _COMMAND_SEQUENCES):
-            return True
+        for program in programs:
+            candidate = " ".join([program, *tokens[1:]])
+            if any(pattern.match(candidate) for pattern in _COMMAND_SEQUENCES):
+                return True
     _heads, inline, opaque = _scan_commands(command)
     if opaque:
         return True
@@ -576,16 +625,21 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
     this is a policy gate for the local baseline rather than a proof. Hard
     isolation is provided by the container backends.
     """
-    # `cmd` escapes with `^` (`cu^rl`), so the analysis runs on a caret-free
-    # copy as well. Only command positions are inspected, so a literal caret in
-    # a quoted pattern stays harmless.
-    normalized = command.replace("^", "") if "^" in command else command
+    # `cmd` escapes with `^` (`cu^rl`) and PowerShell uses a backtick for the
+    # same purpose, so the analysis runs on an escape-free copy as well. Only
+    # command positions are inspected, so a literal escape in a quoted pattern
+    # stays harmless.
+    normalized = (
+        command.replace("^", "").replace("`", "")
+        if "^" in command or "`" in command
+        else command
+    )
     hosts = _network_hosts(normalized)
     detected = False
     for head in _all_command_heads(normalized):
-        # Compare bare executable names so `/usr/bin/curl` and `curl.exe`
-        # match the same entry.
-        if _head_name(head) in _NETWORK_COMMANDS:
+        # Compare bare executable names so `/usr/bin/curl`, `curl.exe`, and
+        # `c\url` all match the same entry.
+        if any(name in _NETWORK_COMMANDS for name in _head_variants(head)):
             detected = True
             break
     if not detected:
