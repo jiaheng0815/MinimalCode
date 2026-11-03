@@ -64,7 +64,7 @@ kind instead of falling back to `sh` semantics.
 | `allow` | `null` | Allowlist of tool names; `null` enables every tool the provider supports |
 | `allow_outside_workspace` | `false` | Allow file tools outside the workspace |
 | `max_file_chars` | `160000` | Maximum characters returned by one `read` call |
-| `max_file_bytes` | `5000000` | Maximum size accepted by `write` and `edit` |
+| `max_file_bytes` | `5000000` | Maximum size accepted by `write`, `append_file`, and `edit` |
 | `max_results` | `200` | Default `grep`/`find` result limit |
 | `max_parallel` | `4` | Concurrency for adjacent read-only tool calls |
 
@@ -72,7 +72,7 @@ kind instead of falling back to `sh` semantics.
 is built, and an unknown name is a configuration error rather than a silent
 no-op: intersecting with a typo would otherwise leave the agent with no usable
 tools. `--read-only` intersects the same set with the read-only tools (`read`,
-`grep`, `find`, `read_image`, `web_search`, `web_fetch`), so the flag and the
+`read_range`, `grep`, `find`, `read_image`, `web_search`, `web_fetch`), so the flag and the
 file compose in one direction only. Disabled tools are dropped from the request's
 `tools` array and refused by `dispatch`, which also covers a replayed session or
 a provider that ignores the schema list.
@@ -95,13 +95,18 @@ searched. Neither path parses `.gitignore`; install `ripgrep` if ignore-file
 semantics are required. A configured `max_results` above a tool's hard cap
 (2000 for `grep`, 5000 for `find`) is clamped to that cap.
 
-`read`, `write`, and `edit` operate on UTF-8 text. Content containing a NUL byte
-is treated as binary and rejected by all three, and `edit` reports a non-UTF-8
-file as a tool error instead of a codec exception. `read` decodes with a leading
-UTF-8 BOM removed, and scans the requested range strictly first: if the bytes are
-not valid UTF-8 it reads them again with replacement characters and adds a
-`warnings` entry saying so, because `edit` refuses that same file. A valid file
-is decoded once and carries no extra field.
+`read`, `read_range`, `write`, `append_file`, and `edit` operate on UTF-8 text.
+Content containing a NUL byte is treated as binary and rejected, and `edit`
+reports a non-UTF-8 file as a tool error instead of a codec exception. `read`
+decodes with a leading UTF-8 BOM removed and reports the detected `line_ending`
+(`LF`, `CRLF`, `CR`, or `none`); writes preserve an existing file's style.
+`read` scans the requested range strictly first: if the bytes are not valid
+UTF-8 it reads them again with replacement characters and adds a `warnings`
+entry saying so, because `edit` refuses that same file. A valid file is decoded
+once and carries no extra field. Python writes are compiled with `py_compile` and
+checked with `ruff` (when installed); a new diagnostic rolls the write back and
+returns its file, line, and source preview. Pre-existing lint findings do not
+block an unrelated edit.
 
 Adjacent read-only calls in one model turn run concurrently, bounded by
 `tools.max_parallel`, and their results are still written back in request order.

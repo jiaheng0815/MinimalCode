@@ -51,7 +51,7 @@ Private helpers are imported from the submodule that defines and uses them.
 |---|---|
 | `runtime.py` | `ToolRuntime`: shared settings, path resolver, dispatcher, allowlist gate, activity text |
 | `schemas.py` | Provider-facing tool declarations, the canonical tool-name set, and enablement rules |
-| `files.py` | `read`, `write`, atomic write, line-ending-preserving `edit` |
+| `files.py` | `read`/`read_range`, `write`, `append_file`, atomic line-ending-preserving `edit`, post-write validation and rollback |
 | `search.py` | Bounded `rg`/Python search processes, smart-case, output parsing |
 | `search_tools.py` | `grep` and `find`, ignore globs, sandbox glob exclusions |
 | `process.py` | `shell` and `subagent` execution through the runner |
