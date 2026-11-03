@@ -522,6 +522,56 @@ class ProviderTests(unittest.TestCase):
             [("call_a", "read", "{}"), ("call_b", "write", "{}")],
         )
 
+    def test_sparse_reused_tool_index_does_not_overwrite_another_call(self) -> None:
+        def fragment(index: int, call_id: str, name: str, arguments: str):
+            return {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "id": call_id,
+                                    "function": {"name": name, "arguments": arguments},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+        events = [
+            fragment(0, "call_a", "read", '{"path":"a"}'),
+            fragment(2, "call_b", "write", '{"path":"b"}'),
+            fragment(0, "call_c", "grep", '{"pattern":"c"}'),
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="test",
+            config={"base_url": "https://provider.test/v1"},
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(
+            [call.id for call in reply.tool_calls],
+            ["call_a", "call_b", "call_c"],
+        )
+
     def test_sse_bom_is_ignored_for_each_protocol(self) -> None:
         cases = {
             "openai_chat": (
@@ -735,6 +785,72 @@ class ProviderTests(unittest.TestCase):
             [("call_1", "read", '{"path":"a.py"}')],
         )
         self.assertEqual(reply.finish_reason, "tool_calls")
+
+    def test_responses_completed_output_without_arguments_uses_streamed_ones(
+        self,
+    ) -> None:
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '{"path":"a.py"}',
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "call_1",
+                            "name": "read",
+                        }
+                    ],
+                },
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+
+                def handler(request: httpx2.Request) -> httpx2.Response:
+                    return httpx2.Response(
+                        200,
+                        headers={"Content-Type": "text/event-stream"},
+                        content=body,
+                    )
+
+                provider = OpenAICompatibleProvider(
+                    name="responses",
+                    config={
+                        "base_url": "https://provider.test/v1",
+                        "protocol": "openai_responses",
+                        "stream": stream,
+                    },
+                    model="model-r",
+                    thinking="none",
+                    transport=httpx2.MockTransport(handler),
+                )
+                try:
+                    reply = provider.stream_chat([{"role": "user", "content": "go"}])
+                finally:
+                    provider.close()
+                self.assertEqual(
+                    [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+                    [("call_1", "read", '{"path":"a.py"}')],
+                )
 
     def test_endpoint_keeps_a_configured_query_string(self) -> None:
         provider = OpenAICompatibleProvider(

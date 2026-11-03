@@ -393,7 +393,28 @@ class ResponsesProtocolMixin:
             if on_text is not None:
                 on_text(text)
 
-        tool_calls = output_calls
+        states = [
+            state
+            for state in call_states.values()
+            if state["name"] and state["arguments"]
+        ]
+        tool_calls: list[ToolCall] = []
+        for call in output_calls:
+            if call.arguments in {"", "{}"}:
+                # The completed output may repeat a call whose arguments were
+                # already streamed, sometimes with an empty string. Falling
+                # back to the assembled state keeps the tool call usable.
+                match = next(
+                    (state for state in states if state["id"] == call.id),
+                    None,
+                )
+                if match is None:
+                    by_name = [state for state in states if state["name"] == call.name]
+                    if len(by_name) == 1:
+                        match = by_name[0]
+                if match is not None:
+                    call.arguments = match["arguments"]
+            tool_calls.append(call)
         if not tool_calls:
             for index, state in enumerate(call_states.values()):
                 if not state["name"]:
@@ -598,7 +619,25 @@ class ResponsesProtocolMixin:
                 else None
             )
             if reply is not None:
-                tool_calls = reply.tool_calls or stream_calls
+                tool_calls = list(reply.tool_calls)
+                if tool_calls:
+                    for call in tool_calls:
+                        if call.arguments not in {"", "{}"}:
+                            continue
+                        match = next(
+                            (item for item in stream_calls if item.id == call.id),
+                            None,
+                        )
+                        if match is None:
+                            by_name = [
+                                item for item in stream_calls if item.name == call.name
+                            ]
+                            if len(by_name) == 1:
+                                match = by_name[0]
+                        if match is not None:
+                            call.arguments = match.arguments
+                else:
+                    tool_calls = stream_calls
                 finish_reason = reply.finish_reason
                 if tool_calls and not reply.tool_calls:
                     # The tool call came from SSE events rather than `output`, so

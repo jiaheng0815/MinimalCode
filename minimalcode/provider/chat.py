@@ -202,12 +202,12 @@ class ChatProtocolMixin:
                                 and previous_id
                                 and incoming_id != previous_id
                             ):
-                                index = len(calls)
+                                index = max(calls, default=-1) + 1
                             else:
                                 index = (
                                     last_call_index
                                     if last_call_index >= 0
-                                    else len(calls)
+                                    else max(calls, default=-1) + 1
                                 )
                         else:
                             # A non-conforming server can reuse an index for a
@@ -222,7 +222,7 @@ class ChatProtocolMixin:
                                 and existing["id"]
                                 and incoming_id != existing["id"]
                             ):
-                                index = len(calls)
+                                index = max(calls, default=-1) + 1
                         last_call_index = index
                         entry = calls.setdefault(
                             index,

@@ -75,7 +75,9 @@ class VisionClientTests(unittest.TestCase):
 
         client = _describe_client(handler)
         try:
-            text = client.describe("image/png", PNG_BYTES, question="What is this?")
+            # The caller-supplied type is advisory; the bytes select the MIME
+            # type actually put into the data URL.
+            text = client.describe("image/jpeg", PNG_BYTES, question="What is this?")
         finally:
             client.close()
         self.assertEqual(text, "A tiny PNG.")

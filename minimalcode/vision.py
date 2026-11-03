@@ -160,7 +160,8 @@ class ProviderVisionClient:
                 f"image is too large: {len(data)} bytes exceeds "
                 f"vision.max_image_bytes ({self.max_image_bytes})"
             )
-        if image_media_type(data) is None:
+        actual_type = image_media_type(data)
+        if actual_type is None:
             raise ToolError(
                 f"image data is not one of the supported formats "
                 f"({SUPPORTED_IMAGE_FORMATS})"
@@ -181,7 +182,7 @@ class ProviderVisionClient:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{media_type};base64,{encoded}",
+                                "url": f"data:{actual_type};base64,{encoded}",
                                 "detail": self.detail,
                             },
                         },
