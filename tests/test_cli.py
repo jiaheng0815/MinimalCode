@@ -1300,6 +1300,37 @@ class CliTests(unittest.TestCase):
         finally:
             stream.close()
 
+    def test_buffered_partial_line_is_not_treated_as_a_message(self) -> None:
+        from minimalcode import cli
+
+        class FakeStdin:
+            def __init__(self, fd: int, lines: list[str]) -> None:
+                self.fd = fd
+                self.lines = lines
+
+            def fileno(self) -> int:
+                return self.fd
+
+            def readline(self) -> str:
+                return self.lines.pop(0)
+
+        read_fd, write_fd = os.pipe()
+        fake = FakeStdin(read_fd, ["half", " line\n"])
+        previous_fragment = cli._INPUT_FRAGMENT
+        cli._INPUT_FRAGMENT = ""
+        try:
+            with patch.object(sys, "stdin", fake):
+                self.assertIsNone(cli._read_buffered_line())
+                self.assertEqual(cli._INPUT_FRAGMENT, "half")
+                self.assertEqual(cli._read_buffered_line(), "half line\n")
+            cli._INPUT_FRAGMENT = "half"
+            with patch("builtins.input", return_value=" line"):
+                self.assertEqual(cli._read_input_line(), "half line")
+        finally:
+            cli._INPUT_FRAGMENT = previous_fragment
+            os.close(read_fd)
+            os.close(write_fd)
+
 
 if __name__ == "__main__":
     unittest.main()

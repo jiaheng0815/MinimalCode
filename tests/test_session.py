@@ -91,6 +91,31 @@ class SessionTests(unittest.TestCase):
             assert latest is not None
             self.assertEqual(latest.session_id, session.session_id)
 
+    def test_prune_keeps_the_provider_from_a_later_meta_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="alpha", model="m1", save=True)
+            assert session.path is not None
+            session.append_event({"type": "meta", "provider": "beta", "model": "m2"})
+            filler = "x" * 40_000
+            for index in range(6):
+                session.append_message({"role": "user", "content": f"{filler}{index}"})
+            session.replace_messages(
+                [{"role": "user", "content": filler}],
+                summary="summary",
+                dropped_messages=6,
+            )
+
+            # The compact rewrite used to keep only the first meta line, so a
+            # session that switched providers resumed on the original one.
+            loaded = store.load(session.path)
+            self.assertEqual((loaded.provider, loaded.model), ("beta", "m2"))
+            first = json.loads(session.path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first["session_id"], session.session_id)
+
     def test_small_session_compaction_stays_append_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

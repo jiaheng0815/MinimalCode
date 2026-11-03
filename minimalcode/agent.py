@@ -379,6 +379,10 @@ class Agent:
         # appended after the request (the new user turn and tool results) are
         # not in the provider-reported prompt size yet.
         self._prompt_session_count = 0
+        # Number of messages at the last failed compaction. Retrying the same
+        # summary request before every turn can dominate the bill when the
+        # provider is down; wait for the history to grow instead.
+        self._compact_blocked_at: int | None = None
         self.estimated_turns = 0
         self._system_prompt: str | None = None
         self._plain_sanitizer = TerminalSanitizer()
@@ -819,6 +823,8 @@ class Agent:
         self.error_output.flush()
 
     def should_compact(self) -> bool:
+        if self._compact_blocked_at == len(self.session.messages):
+            return False
         threshold = float(self.settings.get("context.compact_at", 0.8))
         window = max(1, self.provider.context_window)
         # Re-serializing the whole history on every turn is O(n^2) over a long
@@ -884,9 +890,11 @@ class Agent:
         except ProviderError:
             if force:
                 raise
+            self._compact_blocked_at = len(self.session.messages)
             self._activity("[compact] skipped: provider request failed")
             return False
         if not summary:
+            self._compact_blocked_at = len(self.session.messages)
             return False
 
         replacement = [
@@ -905,6 +913,7 @@ class Agent:
             summary=summary,
             dropped_messages=len(old_messages),
         )
+        self._compact_blocked_at = None
         self.last_prompt_tokens = 0
         self._prompt_session_count = 0
         self._activity(f"[compact] {len(old_messages)} messages -> summary")
@@ -999,6 +1008,7 @@ class Agent:
         self.tool_schemas = schemas
         self.last_prompt_tokens = 0
         self._prompt_session_count = 0
+        self._compact_blocked_at = None
         self.estimated_turns = 0
         self._system_prompt = None
         self.total_usage = dict.fromkeys(self.total_usage, 0)
@@ -1029,6 +1039,7 @@ class Agent:
         self.tool_schemas = schemas
         self.last_prompt_tokens = 0
         self._prompt_session_count = 0
+        self._compact_blocked_at = None
         # A resumed session must continue with the provider that was active
         # when the switch happened, not the one recorded at creation.
         self.session.provider = provider.name

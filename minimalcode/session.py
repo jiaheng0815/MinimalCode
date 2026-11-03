@@ -19,6 +19,11 @@ from .config import Settings
 # file that already holds that history doubles the file. Past this size the
 # rewrite pays for itself; below it the append-only file is left alone.
 _PRUNE_MIN_BYTES = 64 * 1024
+# Fields that identify the session itself. A later meta event may switch
+# provider/model, but it must not rewrite the session's identity during a prune.
+_HEADER_IDENTITY_KEYS = frozenset(
+    {"type", "session_id", "workspace", "created_at", "version"}
+)
 
 
 def _utc_now() -> str:
@@ -148,21 +153,35 @@ class Session:
         return self._rewrite(header + _compact_json(state) + "\n")
 
     def _header_line(self) -> str | None:
-        """Return the session's meta line, or None when it has none."""
+        """Return the session header, with later provider switches applied.
+
+        ``/model`` appends a second meta event. ``SessionStore.load`` lets the
+        last one win, so pruning must merge those fields instead of keeping
+        only line one, or ``--continue`` resumes on the wrong provider.
+        """
         if self.path is None:
             return None
+        header: dict[str, Any] | None = None
         try:
             with self.path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-                line = handle.readline()
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "meta":
+                        continue
+                    if header is None:
+                        header = dict(event)
+                        continue
+                    for key, value in event.items():
+                        if key not in _HEADER_IDENTITY_KEYS:
+                            header[key] = value
         except OSError:
             return None
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+        if header is None:
             return None
-        if not isinstance(event, dict) or event.get("type") != "meta":
-            return None
-        return line if line.endswith("\n") else line + "\n"
+        return _compact_json(header) + "\n"
 
     def _rewrite(self, text: str) -> bool:
         """Atomically replace the session file with ``text``."""

@@ -789,6 +789,9 @@ _PASTE_MAX_CHARS = 1_000_000
 # file descriptor. They are drained here so a POSIX multi-line paste does not
 # submit only its first line.
 _INPUT_LINES: list[str] = []
+# A non-blocking read can return the beginning of a line that has not arrived
+# completely. Keep it here instead of treating the fragment as a message.
+_INPUT_FRAGMENT = ""
 
 
 def _terminal_can_paste() -> bool:
@@ -853,12 +856,15 @@ def _read_paste(line: str) -> str:
 
 
 def _read_buffered_line() -> str | None:
-    """Try to read a line already buffered inside ``sys.stdin``.
+    """Try to read a complete line already buffered inside ``sys.stdin``.
 
     ``select`` only observes the file descriptor; ``input()`` may have read a
     whole paste into TextIOWrapper's decoded buffer. A non-blocking ``readline``
-    returns that line without waiting for the terminal.
+    returns that line without waiting for the terminal. A line without its
+    newline is a fragment, not a submitted message, so it is retained and
+    prepended to the next read.
     """
+    global _INPUT_FRAGMENT
     try:
         fd = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
@@ -873,7 +879,14 @@ def _read_buffered_line() -> str | None:
             os.set_blocking(fd, True)
     except (OSError, ValueError):
         return None
-    return line or None
+    if not line:
+        return None
+    line = _INPUT_FRAGMENT + line
+    _INPUT_FRAGMENT = ""
+    if not line.endswith("\n"):
+        _INPUT_FRAGMENT = line
+        return None
+    return line
 
 
 def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
@@ -929,10 +942,16 @@ def _input_pending(timeout: float = _PASTE_SETTLE_SECONDS) -> bool:
 
 def _read_input_line(prompt: str = "") -> str:
     """Return a buffered line when one exists, else read from the terminal."""
+    global _INPUT_FRAGMENT
     if _INPUT_LINES:
-        line = _INPUT_LINES.pop(0).removesuffix("\n")
-        return line.removesuffix("\r")
-    return input(prompt)
+        line = _INPUT_FRAGMENT + _INPUT_LINES.pop(0)
+        _INPUT_FRAGMENT = ""
+    else:
+        line = input(prompt)
+        if _INPUT_FRAGMENT:
+            line = _INPUT_FRAGMENT + line
+            _INPUT_FRAGMENT = ""
+    return line.removesuffix("\n").removesuffix("\r")
 
 
 def _read_message(prompt: str = "> ") -> str:
@@ -1059,9 +1078,16 @@ def _chat_loop(
     while True:
         try:
             text = _read_message("> ")
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print()
             return 0
+        except KeyboardInterrupt:
+            # Ctrl-C cancels the current input or an unterminated paste; it
+            # must not end the session with a success status.
+            _INPUT_LINES.clear()
+            _INPUT_FRAGMENT = ""
+            print("\ncancelled", file=sys.stderr)
+            continue
         image: tuple[str, bytes] | None = None
         if not text.strip():
             # A terminal cannot carry an image through its paste shortcut, so
@@ -1077,9 +1103,14 @@ def _chat_loop(
             )
             try:
                 text = _read_message("> ")
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
                 print()
                 return 0
+            except KeyboardInterrupt:
+                _INPUT_LINES.clear()
+                _INPUT_FRAGMENT = ""
+                print("\ncancelled", file=sys.stderr)
+                continue
         text = text.strip()
         if not text and image is None:
             continue

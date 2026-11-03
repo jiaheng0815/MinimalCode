@@ -1201,6 +1201,43 @@ class AgentTests(unittest.TestCase):
                 self.assertFalse(agent.should_compact())
             estimate.assert_called_once()
 
+    def test_failed_compaction_is_not_retried_until_history_grows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            for index in range(30):
+                session.messages.append(
+                    {"role": "user", "content": f"message {index} " + "x" * 200}
+                )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            agent.last_prompt_tokens = 90_000
+            with patch.object(
+                agent, "_complete_text", side_effect=ProviderError("down")
+            ) as complete:
+                self.assertFalse(agent._compact(force=False))
+            complete.assert_called_once()
+            # The next turn must not send the same failed summary request.
+            self.assertFalse(agent.should_compact())
+            session.messages.append({"role": "user", "content": "new work"})
+            self.assertTrue(agent.should_compact())
+
     def test_write_summary_creates_the_workspace_agents_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
