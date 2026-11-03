@@ -454,6 +454,18 @@ class HighlightTests(unittest.TestCase):
         self.assertIn(_PALETTES["dark"]["h1"], stream.getvalue())
         self.assertNotIn("# Heading", stream.getvalue())
 
+    def test_external_newline_keeps_an_open_code_fence(self) -> None:
+        # A reasoning block can interrupt the answer stream mid-fence. Resetting
+        # fence state there swallowed the closing marker and rendered every
+        # later answer line as code.
+        stream = io.StringIO()
+        highlighter = MarkdownHighlighter(stream, color=True)
+        highlighter.feed("```python\nx = 1\n")
+        highlighter.note_external_newline()
+        highlighter.feed("y = 2\n```\n")
+        highlighter.finish()
+        self.assertEqual(strip_ansi(stream.getvalue()), "x = 1\ny = 2\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -628,7 +628,9 @@ class MarkdownHighlighter(CodeHighlightMixin):
         self._heading_level = 0
         self._inline_mode = None
         self._line_indent = 0
-        self._in_fence = False
+        # Fence state is deliberately kept: the external newline belongs to a
+        # reasoning block printed between two answer deltas, not to the answer
+        # stream, so the answer is still inside the code block it opened.
         self._reset_code_line()
 
     def _flush_unparsed(
