@@ -824,7 +824,9 @@ class ToolTests(unittest.TestCase):
         self.tools.write("a:33:b.txt", "needle\n")
         result = self.tools.grep("needle", path="a:33:b.txt")
         self.assertEqual(len(result["matches"]), 1)
-        expected = str(self.workspace / "a:33:b.txt")
+        # The tool resolves the workspace, and on macOS the temp root is a
+        # symlink (``/var`` -> ``/private/var``), so compare the resolved path.
+        expected = str((self.workspace / "a:33:b.txt").resolve())
         self.assertTrue(
             result["matches"][0].startswith(expected + ":1:"), result["matches"]
         )

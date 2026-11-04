@@ -1300,6 +1300,9 @@ class CliTests(unittest.TestCase):
         finally:
             stream.close()
 
+    @unittest.skipUnless(
+        hasattr(os, "set_blocking"), "os.set_blocking needs Python 3.12 on Windows"
+    )
     def test_buffered_partial_line_is_not_treated_as_a_message(self) -> None:
         from minimalcode import cli
 
@@ -1328,6 +1331,20 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli._read_input_line(), "half line")
         finally:
             cli._INPUT_FRAGMENT = previous_fragment
+            os.close(read_fd)
+            os.close(write_fd)
+
+    def test_buffered_line_degrades_without_set_blocking(self) -> None:
+        # Windows before Python 3.12 has no ``os.set_blocking``; the console
+        # probe uses ``msvcrt.kbhit`` there, so peeking must return "nothing
+        # buffered" instead of raising AttributeError.
+        from minimalcode import cli
+
+        read_fd, write_fd = os.pipe()
+        try:
+            with patch.object(cli.os, "set_blocking", None):
+                self.assertIsNone(cli._read_buffered_line())
+        finally:
             os.close(read_fd)
             os.close(write_fd)
 

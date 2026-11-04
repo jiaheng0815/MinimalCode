@@ -869,14 +869,20 @@ def _read_buffered_line() -> str | None:
         fd = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
         return None
+    set_blocking = getattr(os, "set_blocking", None)
+    if set_blocking is None:
+        # ``os.set_blocking`` only reached Windows in Python 3.12, and the
+        # console branch of ``_input_pending`` probes with ``msvcrt.kbhit``
+        # instead, so an older interpreter has nothing to peek at here.
+        return None
     try:
-        os.set_blocking(fd, False)
+        set_blocking(fd, False)
         try:
             line = sys.stdin.readline()
         except (BlockingIOError, OSError, ValueError):
             return None
         finally:
-            os.set_blocking(fd, True)
+            set_blocking(fd, True)
     except (OSError, ValueError):
         return None
     if not line:
