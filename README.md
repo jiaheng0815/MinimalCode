@@ -4,13 +4,13 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.4.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.4.1`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
 - **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。Windows 上会跳过 `C:\Windows\System32\bash.exe`（WSL 启动器），它看起来像 bash，但会把命令送进 Linux 命名空间。
-- **聚焦工具集**：`read`、`write`、`edit`、`shell`、`grep`、`find`、`subagent` 七个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
-- **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
+- **聚焦工具集**：`read`、`read_range`、`write`、`append_file`、`edit`、`shell`、`grep`、`find`、`subagent` 九个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`edit` 默认按行号替换区间，`append_file` 负责在 EOF 追加，写入 Python 时会校验并回滚坏改动。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
+- **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
 - **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。同一轮里相邻的只读工具会并发执行（上限 `tools.max_parallel`，默认 4），结果仍按请求顺序写回；只读调用旁边出现 `write` / `shell` / `subagent` 时保持严格顺序。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
 - **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。压缩后如果文件比保留的状态大一倍以上（且超过 64 KiB），会原子重写成「meta + 压缩状态」，避免把同一段历史存两遍；小会话保持纯追加。
@@ -42,6 +42,10 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.4.0 升级到 1.4.1
+
+1.4.1 是缺陷修复版本，同时补了两个工具，没有删除任何公开名字、CLI 参数、配置键、JSON 字段或工具 schema，升级不需要改代码。新增 `read_range`（按行号读取窗口）与 `append_file`（EOF 追加，保留既有换行风格），`edit` 增加行号参数：`path` + `new_text` 是必填项，`old_text` 作为精确文本兜底保留，两者不能混用。`write` / `edit` / `append_file` 写入 Python 文件后会运行 `py_compile`，装有时再跑 `ruff`，出现新诊断就回滚。可观察的行为变化都是修正错误行为：`read` 结果多出 `line_ending` 字段；`settings.json` 只保存用户改过的键，升级后新增的默认值不再被旧文件里的全量副本掩盖；`--read-only` 的只读集合包含 `read_range`。其余修复（沙箱网络策略识别、搜索窗口、渲染状态、流式工具调用、配置脱敏）只改变出错场景下的结果。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.3.2 升级到 1.4.0
 
@@ -189,9 +193,11 @@ JSON 输出字段：
 
 | 工具 | 作用 | 主要参数 |
 |---|---|---|
-| `read` | 按行范围读取 UTF-8 文本，输出带行号；非 UTF-8 内容会带 `warnings` 提示 | `path`、`start_line`、`end_line` |
+| `read` | 按行范围读取 UTF-8 文本，输出带行号并报告 `line_ending`；非 UTF-8 内容会带 `warnings` 提示 | `path`、`start_line`、`end_line` |
+| `read_range` | 读取显式行区间（带行号），用于行号编辑前确认目标 | `path`、`start_line`、`end_line` |
 | `write` | 创建或整体覆盖文件 | `path`、`content` |
-| `edit` | 精确文本替换，匹配不唯一时失败 | `path`、`old_text`、`new_text`、`replace_all` |
+| `append_file` | 在 EOF 追加文本，文件不存在时创建，保留既有换行风格 | `path`、`content` |
+| `edit` | 按行号替换区间，`end_line = start_line - 1` 表示在该行前插入；`old_text` 是精确文本兜底，两者不能混用 | `path`、`start_line`、`end_line`、`new_text`、`old_text`、`replace_all` |
 | `shell` | 在配置的 shell 中执行命令 | `command`、`timeout`、`cwd` |
 | `grep` | 正则搜索文本，返回 `path:line:text` | `pattern`、`path`、`glob`、`max_results` |
 | `find` | 按 glob 查找文件 | `pattern`、`path`、`max_results` |
@@ -204,7 +210,9 @@ JSON 输出字段：
 
 `tools.allow` 给出允许的工具名列表（例如 `["read", "grep", "find"]`），`--read-only` 是它的一种预设。两者取交集，且被禁用的工具不会出现在请求的 `tools` 里；即使模型仍然发起调用（恢复的旧会话、忽略 schema 的供应商），`dispatch` 也会返回形如 `tool 'write' is disabled by --read-only` 的错误。只读模式下列表以外的工具一律不可用，包括 `subagent`（它会启动一个能写文件的子进程）。
 
-`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
+`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
+
+`write`、`edit`、`append_file` 写入 Python 文件后会先跑 `py_compile`，装有时再跑 `ruff`；出现新诊断就原子回滚并返回文件、行号和源码预览。改动前已经存在的 lint 问题不会阻塞无关编辑。
 
 ### 图像理解
 
@@ -487,7 +495,7 @@ minimalcode/
 ├── tools/           # 工作区工具
 │   ├── runtime.py       #   共享状态与工具分派
 │   ├── schemas.py       #   工具定义
-│   ├── files.py         #   read / write / edit
+│   ├── files.py         #   read / read_range / write / append_file / edit
 │   ├── search.py        #   子进程搜索与输出解析
 │   ├── search_tools.py  #   grep / find
 │   ├── process.py       #   shell / subagent

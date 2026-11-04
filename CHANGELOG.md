@@ -1,5 +1,38 @@
 # 更新日志
 
+## 1.4.1 - 2026-11-04
+
+### 新增
+
+- `read_range` 与 `append_file`：前者按行号读取显式窗口并带行号，后者在 EOF 追加（文件不存在时创建）并沿用既有换行风格，避免用 `edit` 猜文件尾部。两者都进入工具名集合与只读集合，`--read-only` / `tools.allow` 同样覆盖。
+- `edit` 改为行号定位：传 `start_line`、`end_line`、`new_text`，`end_line = start_line - 1` 表示在该行前插入；行号与 `old_text` 同时出现按参数错误拒绝。`old_text` 保留为精确文本兜底，未命中时返回最相似的区间与 diff，超长相似片段会被截断。
+- 写入后校验：`write` / `edit` / `append_file` 写入 Python 文件后运行 `py_compile`，装有 `ruff` 时再运行一次；出现新诊断就原子回滚并返回文件、行号与源码预览，改动前已存在的 lint 问题不阻塞无关编辑。
+- `read` 报告检测到的 `line_ending`（`LF`、`CRLF`、`CR`、`none`），写入保留目标文件既有风格；混合换行文件按主导风格处理。
+- PowerShell 下提前拒绝 bash heredoc 并给出改写提示；引号内与 PowerShell here-string 内的 `<<EOF` 不再误判，`<<\EOF` 仍识别。
+
+### 修复
+
+- 文件：EOF 没有尾随换行时插入不再与最后一行粘连；`replace_all` 累计行数；只读目标返回 `ToolError` 且不留临时文件；`write` / `edit` 不再意外保留 setuid/setgid 位；过长 `mkstemp` 临时名不再抛异常；`read` 恰好到达行长上限时不再误判截断；非 UTF-8 文件不再对请求范围外的字节误报。
+- 配置：写盘只写用户改动的增量，不再把整套默认值固化进 `settings.json`，升级后新增默认值照常生效；软链接配置文件不再被原子写替换成普通文件；任意字符串里的 `${VAR}` 都会展开，未设置时点名变量；自定义 `headers` 与 `*env` 字段中的凭据在输出中脱敏；`import-pi` 不再覆盖内置供应商，覆盖时整条替换而非深合并，旧密钥不会残留；`vision` 补上尺寸校验，`web` / `vision` 继承父级认证头。
+- 渲染：流末尾的无换行表格分隔符（`| --- |`）不再让 Markdown 渲染游标原地打转，行首分支加安全阀防止异常输入耗尽 CPU；`ThinkingRenderer` 写换行后同步重置 Markdown 状态，标题与代码块不再错乱；空列表项（`- `）不再吞掉换行；thinking 与正文交界处的外部换行不再重置代码块状态。
+- 沙箱：重组 `sh -c` 等内联命令时保留分隔符，堵住网络策略绕过；解码 PowerShell `-EncodedCommand`（无法解码时 fail-closed）；折叠 `cmd` 的 caret 转义；`find -exec` 与进程启动器里的真实命令同样被检查；`curl --resolve` / `--connect-to` / `--proxy` / `--socks5*` / `-x` 的目标参与 `allowlist`；`WindowsApps\bash.exe` 不再被当作原生 shell；`grep` / `find` 的 glob 匹配器不再指数级回溯；`run_bounded_command` 在孙进程占住管道时也能按时退出；敏感文件名单补充 `.pypirc`、`.docker/config` 等，Windows 尾点/空格与 ADS 路径不再绕过；审计日志脱敏 `access_token=` 与 `-u user:pass`。
+- 搜索：ripgrep 搜单个文件时补上 `--with-filename`，不再静默丢弃唯一匹配；结果路径里形如 `:数字` 的部分不再被当成截断；敏感路径过滤吃满读取窗口时扩大窗口重试；Python 回退支持 `{py,txt}` 与 `!*.py` 形式。
+- 会话 / CLI / Agent：压缩重写时合并尾部的 `meta`，`/model` 的切换不会丢失；`--continue` 保留通过 `/model` 选定的 provider/model；压缩失败只在历史增长后重试；半行读取不再当作完整消息；Ctrl-C 取消未闭合的 bracketed paste。
+- 协议 / 视觉：Chat 流式工具调用使用稀疏 index 时不再互相覆盖；Responses 的最终输出缺少 `arguments` 时回退到流式参数；`read_image` 使用字节检测出的真实 MIME 类型。
+- `subagent`：PowerShell 子进程无法启动时返回 1，不再报告成功。
+### 变更
+
+- 版本号升级到 1.4.1。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 工具 schema 变化：`edit` 的必填项从 `old_text` 改为 `new_text`（行号模式），新增 `read_range`、`append_file`，`read` 结果多出 `line_ending`。
+- 可观察的行为变化：`edit` 默认按行号替换；写入因新增语法或 lint 诊断回滚；`settings.json` 只保存用户增量；`--read-only` 与只读集合包含 `read_range`。
+
+### 文档
+
+- README 工具表补充 `read_range`、`append_file`、行号 `edit` 与写入校验，升级指南增加 1.4.0 → 1.4.1；`docs/configuration.md` 补充增量写盘、凭据脱敏与沙箱内联命令解析；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.4.1 的公开面。
+
+### 测试
+
+- 新增回归测试：行号 `edit` 的区间替换、插入、CRLF、越界提示与“行号 + `old_text`”拒绝，`read_range` / `append_file`、写入回滚（语法错误、ruff、既有 lint 不阻塞）、换行风格主导与 EOF 插入、配置增量写盘与 `${VAR}`、`import-pi` 整条覆盖、凭据脱敏、Markdown 死循环与 thinking 状态同步、沙箱内联/`EncodedCommand`/caret/代理目标、glob 线性、搜索单文件与窗口重试、会话压缩重写、Chat/Responses 流式工具调用、vision MIME 与 subagent 退出码。
 ## 1.4.0 - 2026-11-01
 
 ### 新增

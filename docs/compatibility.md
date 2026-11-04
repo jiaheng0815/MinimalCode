@@ -1,9 +1,10 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.4.0. The 0.6 → 0.7 migration below still
-describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2, and
-1.4.0 added no further breaking import changes (`minimalcode.httpclient` and
-`minimalcode.clipboard` are new modules, not renamed ones).
+Applies to MinimalCode 1.4.1. The 0.6 → 0.7 migration below still
+describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
+1.4.0, and 1.4.1 added no further breaking import changes
+(`minimalcode.httpclient` and `minimalcode.clipboard` are new modules, not
+renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
@@ -15,6 +16,26 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.4.1 changed
+
+Additive: no public `__all__` name, CLI flag, configuration key, JSON output
+field, or session format was removed, and no import path moved. New surfaces:
+
+- `read_range` and `append_file`; both join `READ_ONLY_TOOLS`.
+- `edit` accepts `start_line`, `end_line`, and `new_text`; `old_text` remains as
+  the exact-text fallback.
+- `read` results report the detected `line_ending`.
+
+Behavior changes, all corrections:
+
+- `edit` replaces a line range unless `old_text` is used, and rejects mixing the
+  two modes.
+- `write`, `edit`, and `append_file` roll back a Python write that introduces a
+  `py_compile` error or a new `ruff` diagnostic.
+- `settings.json` stores only the keys the user changed, so defaults added by a
+  later release still apply.
+- `--read-only` keeps `read_range` enabled.
 
 ## What 1.4.0 changed
 
