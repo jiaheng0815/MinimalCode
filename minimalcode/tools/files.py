@@ -86,7 +86,9 @@ _VALIDATION_TIMEOUT_SECONDS = 30
 def _source_preview(text: str, line: int | None) -> str:
     if line is None:
         return ""
-    lines = text.splitlines()
+    # Same physical-line definition as `read`, so the previewed source is the
+    # line the validator actually reported.
+    lines = _physical_lines(text)
     if line < 1 or line > len(lines):
         return ""
     source = lines[line - 1].rstrip()
@@ -176,10 +178,17 @@ def _closest_fragment(original: str, needle: str) -> tuple[int, int, float, str]
     and the candidate count is bounded so this stays a repair aid rather than a
     second full-file scan.
     """
-    needle_lines = _normalize_newlines(needle, "\n").splitlines()
+    # Physical lines, not `splitlines`: the latter also breaks on FF/VT/NEL and
+    # U+2028, which would report line numbers `read` never showed.
+    needle_lines = [
+        line.rstrip("\n") for line in _physical_lines(_normalize_newlines(needle, "\n"))
+    ]
     if not needle_lines:
         return None
-    file_lines = _normalize_newlines(original, "\n").splitlines()
+    file_lines = [
+        line.rstrip("\n")
+        for line in _physical_lines(_normalize_newlines(original, "\n"))
+    ]
     if not file_lines:
         return None
     count = len(needle_lines)
@@ -908,6 +917,10 @@ class FileToolsMixin:
         """
         if not isinstance(new_text, str):
             raise ToolError("new_text must be a string")
+        if "\x00" in new_text:
+            # `read` and `append_file` reject NUL bytes as binary, so accepting
+            # one here would produce a file the agent can never read back.
+            raise ToolError("binary files are not supported by edit")
         if not isinstance(replace_all, bool):
             raise ToolError("replace_all must be a boolean")
         for name, value in (("start_line", start_line), ("end_line", end_line)):
@@ -917,7 +930,11 @@ class FileToolsMixin:
                 raise ToolError(f"{name} must be an integer or null")
         target = self._path(path, operation="write")
         original, default_newline = self._read_for_edit(target)
-
+        bom = "\ufeff" if original.startswith("\ufeff") else ""
+        if bom:
+            # `read` strips the BOM, so line 1 must match what the model saw and
+            # the marker is written back verbatim instead of being dropped.
+            original = original[1:]
         line_mode = start_line is not None or end_line is not None
         if line_mode:
             if old_text is not None:
@@ -955,7 +972,10 @@ class FileToolsMixin:
             end_index = end_line
             prefix = "".join(lines[:start_index])
             span = "".join(lines[start_index:end_index])
-            span_newline = _detect_newline(span) if span else default_newline
+            # An unterminated last line carries no ending of its own, so it
+            # inherits the file's; `_detect_newline` would fall back to LF and
+            # write LF lines into a CRLF file.
+            span_newline = _detect_newline_optional(span) or default_newline
             replacement = _normalize_newlines(new_text, span_newline)
             if replacement:
                 if (
@@ -1046,6 +1066,8 @@ class FileToolsMixin:
                 count = 1
                 lines_removed = len(first.group(0).splitlines())
                 lines_added = len(replacement.splitlines())
+        if bom:
+            updated = bom + updated
         try:
             encoded = updated.encode("utf-8")
         except UnicodeEncodeError as exc:
@@ -1056,7 +1078,8 @@ class FileToolsMixin:
                 f"tools.max_file_bytes ({self.max_file_bytes})"
             )
         mode = target.stat().st_mode & 0o777
-        original_bytes = original.encode("utf-8")
+        # The rollback image has to be the original bytes, BOM included.
+        original_bytes = (bom + original).encode("utf-8")
         before, _ = self._python_diagnostics(target)
         self._write_atomic(target, updated, mode=mode)
         warnings = self._validate_python_write(

@@ -42,7 +42,15 @@ def _workspace_key(cwd: Path) -> str:
 
 
 def _compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate (an unpaired ``\udXXX`` escape from the provider) has
+        # no UTF-8 encoding. Escape it instead of letting the append raise,
+        # which would drop the message that produced it.
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
 
 
 @dataclass(slots=True)
@@ -63,21 +71,34 @@ class Session:
             # ``--session <path>`` once accepted any existing file, so a typo
             # appended JSONL to README.md. A session is only ever a .jsonl file.
             raise ValueError(f"session file must end in .jsonl: {self.path}")
+        parent_created = not self.path.parent.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.path.parent.chmod(0o700)
-        except OSError:
-            pass
+        if parent_created:
+            # Tighten only a directory this call created: `--session <path>` may
+            # point at a user directory that has to keep its own permissions.
+            try:
+                self.path.parent.chmod(0o700)
+            except OSError:
+                pass
         line = _compact_json(event) + "\n"
         # Create session files with restrictive permissions from the first
         # byte instead of tightening them after conversation content is
         # already on disk.
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        needs_newline = False
+        if os.fstat(fd).st_size:
+            os.lseek(fd, -1, os.SEEK_END)
+            needs_newline = os.read(fd, 1) != b"\n"
         with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:
             try:
                 os.chmod(self.path, 0o600)
             except OSError:
                 pass
+            if needs_newline:
+                # A file whose last line lost its terminator (a torn write, or a
+                # file handed to `--session`) would otherwise fuse with this
+                # event into one unparseable line and lose both.
+                handle.write("\n")
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())

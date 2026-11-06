@@ -588,10 +588,24 @@ class AnthropicProtocolMixin:
                     delta = event.get("delta")
                     if isinstance(delta, dict) and delta.get("stop_reason"):
                         stop_reason = delta["stop_reason"]
-                    # The final message_delta usage is cumulative; message_start
-                    # only carries the initial input counts.
-                    if isinstance(event.get("usage"), dict):
-                        usage_raw.update(event["usage"])
+                    # `message_delta.usage` is cumulative for the output count,
+                    # but a gateway may repeat `input_tokens: 0` here; a zero
+                    # placeholder must not erase what `message_start` reported.
+                    usage = event.get("usage")
+                    if isinstance(usage, dict):
+                        usage_raw.update(
+                            {
+                                key: value
+                                for key, value in usage.items()
+                                if value
+                                or key
+                                not in (
+                                    "input_tokens",
+                                    "cache_read_input_tokens",
+                                    "cache_creation_input_tokens",
+                                )
+                            }
+                        )
                     continue
                 if event_type == "message_stop":
                     saw_message_stop = True

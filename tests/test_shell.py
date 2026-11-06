@@ -60,6 +60,31 @@ class ShellTests(unittest.TestCase):
         # a heredoc the active PowerShell shell has to execute.
         self.assertIsNone(powershell_heredoc_delimiter('$t = @"\nsee <<EOF below\n"@'))
 
+    def test_heredoc_marks_inside_multiline_strings_and_comments_are_ignored(
+        self,
+    ) -> None:
+        # Both used to be refused: the scan reset its quote state on every line
+        # and did not treat `#` as starting a comment.
+        self.assertIsNone(
+            powershell_heredoc_delimiter('$m = "see:\n<<EOF\ndone"\nWrite-Output $m')
+        )
+        self.assertIsNone(
+            powershell_heredoc_delimiter("# note: cat <<EOF is a bash feature")
+        )
+        # A real heredoc after an ordinary line is still reported.
+        self.assertEqual(
+            powershell_heredoc_delimiter("Write-Output hi\ncat <<DONE\nx\nDONE"),
+            "DONE",
+        )
+
+    def test_cmd_exe_is_rejected_instead_of_silently_doing_nothing(self) -> None:
+        # `cmd -c` prints its banner and exits 0, so the command never ran.
+        with (
+            patch("minimalcode.shell.shutil.which", return_value="C:/cmd.exe"),
+            self.assertRaisesRegex(ShellError, "not supported"),
+        ):
+            detect_shell("cmd.exe")
+
     @unittest.skipUnless(os.name == "nt", "Windows shell aliases only")
     def test_windowsapps_bash_alias_is_not_a_native_shell(self) -> None:
         from minimalcode.shell import _is_wsl_bash_stub

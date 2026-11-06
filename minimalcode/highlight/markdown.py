@@ -80,6 +80,10 @@ class MarkdownHighlighter(CodeHighlightMixin):
             # `_consume_code` only emits a token when a boundary character arrives,
             # so the identifier ending the final line is still buffered here.
             self._flush_code_word(segments)
+            if self._cursor >= len(self._pending) and self._line_indent:
+                # Indentation is held until the line kind is known; at the end of
+                # the stream it is ordinary trailing text and must not vanish.
+                self._flush_indent(segments)
             self._write(self._render_segments(segments))
         self._reset_stream_state()
 
@@ -354,6 +358,13 @@ class MarkdownHighlighter(CodeHighlightMixin):
                         return
                     # A lone trailing backslash is still text; dropping it would
                     # silently lose the final character of the answer.
+                    self._append(segments, char, style)
+                    self._advance(1)
+                    continue
+                if text[start + 1] in "\r\n":
+                    # A backslash before a line ending is literal text. Emitting
+                    # the pair skipped `_end_line`, so every later line was
+                    # parsed in the wrong block state.
                     self._append(segments, char, style)
                     self._advance(1)
                     continue

@@ -85,6 +85,43 @@ class ImporterTests(unittest.TestCase):
             self.assertNotIn("api_key", provider)
             self.assertIn("api_key_env", provider)
 
+    def test_derived_api_key_names_are_unique_and_exportable(self) -> None:
+        # `a-b` and `a_b` slug to the same variable, and a non-ASCII provider
+        # name produced a name no shell can set.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_home = root / "pi"
+            pi_home.mkdir()
+            source = {
+                "providers": {
+                    name: {
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "api": "openai-chat",
+                        "apiKey": "secret",
+                        "models": [{"id": "m1", "contextWindow": 1000}],
+                    }
+                    for name in ("a-b", "a_b", "通义")
+                }
+            }
+            settings_source = {"defaultProvider": "a-b", "defaultModel": "m1"}
+            (pi_home / "models.json").write_text(json.dumps(source), encoding="utf-8")
+            (pi_home / "settings.json").write_text(
+                json.dumps(settings_source), encoding="utf-8"
+            )
+            destination = root / ".MinimalCode"
+            import_pi_settings(
+                destination_home=destination,
+                pi_home=pi_home,
+                include_secrets=False,
+            )
+            settings = load_settings(destination, require_file=True)
+            providers = settings.raw["providers"]
+            names = [providers[name]["api_key_env"] for name in ("a-b", "a_b", "通义")]
+            self.assertEqual(len(set(names)), 3)
+            for name in names:
+                with self.subTest(name=name):
+                    self.assertRegex(name, r"^[A-Z0-9_]+_API_KEY$")
+
     def test_reimporting_an_existing_provider_explains_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

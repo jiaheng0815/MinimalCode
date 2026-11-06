@@ -23,6 +23,12 @@ _SECRET_PATTERNS = (
     ),
     re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
     re.compile(r"(?i)(\s(?:-u|--user|-b|--cookie|-H|--header)\s+)[^\s'\"]+"),
+    # `https://user:password@host` puts the credential in the URL itself, which
+    # none of the option-shaped patterns above reach.
+    re.compile(r"(?i)(://[^/\s:@'\"]+:)[^/\s@'\"]+(?=@)"),
+    # `net use \\server\share /user:name password` passes the secret as a
+    # separate, positionally paired argument.
+    re.compile(r"(?i)(/user:\S+\s+)[^\s'\"]+"),
 )
 _MAX_TARGET_CHARS = 500
 

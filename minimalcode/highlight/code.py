@@ -194,9 +194,9 @@ class CodeHighlightMixin:
 
         # '#' starts a comment only at a token boundary; '#include' after
         # whitespace qualifies, but a URL fragment should not swallow the line.
-        comment_start = (
-            char == "#" and (not self._code_last or self._code_last.isspace())
-        ) or text.startswith("//", start)
+        # '//' follows the same rule so `http://x` keeps its path unstyled.
+        at_boundary = not self._code_last or self._code_last.isspace()
+        comment_start = at_boundary and (char == "#" or text.startswith("//", start))
         if comment_start:
             self._flush_code_word(segments)
             token = "#" if char == "#" else "//"

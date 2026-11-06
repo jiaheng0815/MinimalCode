@@ -629,6 +629,59 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertEqual(reply.finish_reason, "stop")
         self.assertEqual(reply.usage["completion_tokens"], 2)
 
+    def test_message_delta_zero_input_tokens_does_not_erase_message_start(
+        self,
+    ) -> None:
+        # Some gateways repeat the input counters as zeros in `message_delta`;
+        # overwriting `message_start` made prompt tokens collapse to the cached
+        # count and fed the context-window accounting a wrong number.
+        events = [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_9",
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 100,
+                        "cache_read_input_tokens": 50,
+                        "output_tokens": 1,
+                    },
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "ok"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 0, "output_tokens": 10},
+            },
+            {"type": "message_stop"},
+        ]
+        provider = _anthropic_provider(
+            lambda request: httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=_sse(events),
+            ),
+            stream=True,
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+        self.assertEqual(reply.usage["prompt_tokens"], 150)
+        self.assertEqual(reply.usage["completion_tokens"], 10)
+        self.assertEqual(reply.usage["cached_tokens"], 50)
+
     def test_partial_provider_content_falls_back_to_tool_calls(self) -> None:
         seen: dict[str, object] = {}
 

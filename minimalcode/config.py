@@ -902,7 +902,10 @@ def save_settings(
     `config set-*` command actually changes.
     """
     document = _deep_merge(copy.deepcopy(settings.raw or {}), updates)
-    return write_settings_document(document, home)
+    # Fall back to the home the settings were loaded from: defaulting to
+    # `home_dir(None)` elsewhere would write a different file than the one
+    # these settings came from.
+    return write_settings_document(document, home or settings.home)
 
 
 def ensure_config(
@@ -1011,8 +1014,11 @@ def redact_config(value: Any) -> Any:
                 and not (isinstance(item, str) and _ENV_REFERENCE_RE.fullmatch(item))
             ):
                 # An `*_env` key is only safe when its value is a variable
-                # name; a literal secret under that name must not print.
-                result[key] = "<redacted>" if item else item
+                # name; a literal secret under that name must not print. A
+                # non-string value is a setting (`trust_env`), not a name.
+                result[key] = (
+                    "<redacted>" if isinstance(item, str) else redact_config(item)
+                )
             elif _is_sensitive_key(key):
                 # An `*_env` entry holds the *name* of a variable, which is
                 # safe and useful to print; any other shape is a value.

@@ -246,10 +246,14 @@ def post_json(
         if not isinstance(data, dict):
             raise ToolError(f"provider {label} request returned an invalid response")
         return data
+    if attempts == 0:
+        # The budget was already spent before the first POST; reporting
+        # "after 0 attempts: None" hid that and printed a literal None.
+        raise ToolError(
+            f"provider {label} request timed out before the first attempt: "
+            "the request budget was already spent"
+        )
     if last_error is None and last_status is not None:
-        # The only reason the loop ended after a status retry is that the
-        # remaining budget was spent on the backoff sleep. Reporting a
-        # connection error here would say "None" and drop the HTTP status.
         raise ToolError(
             f"provider {label} request failed with HTTP {last_status} "
             "and no time was left to retry"

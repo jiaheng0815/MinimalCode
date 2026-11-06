@@ -379,6 +379,45 @@ class SessionTests(unittest.TestCase):
                 stat.S_IMODE(session.path.parent.stat().st_mode) & 0o077, 0
             )
 
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
+    def test_external_session_directory_keeps_its_permissions(self) -> None:
+        # `--session <path>` may point at a directory the user owns; appending
+        # must not silently tighten it.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            external = root / "shared"
+            external.mkdir()
+            external.chmod(0o755)
+            path = external / "chat.jsonl"
+            session = Session(session_id="chat", path=path, cwd=root)
+            session.append_message({"role": "user", "content": "hi"})
+            self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode) & 0o077, 0)
+
+    def test_a_file_without_a_trailing_newline_is_not_fused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "chat.jsonl"
+            path.write_text('{"type":"meta","session_id":"chat"}', encoding="utf-8")
+            session = Session(session_id="chat", path=path, cwd=root)
+            session.append_message({"role": "user", "content": "hi"})
+            loaded = SessionStore(load_settings(root / ".MinimalCode")).load(path)
+            self.assertEqual(loaded.messages, [{"role": "user", "content": "hi"}])
+
+    def test_a_lone_surrogate_does_not_abort_the_append(self) -> None:
+        # A provider can emit an unpaired `\udXXX` escape; it has no UTF-8
+        # encoding, and raising here dropped the message that produced it.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "chat.jsonl"
+            session = Session(session_id="chat", path=path, cwd=root)
+            session.append_message({"role": "assistant", "content": "a\ud800b"})
+            self.assertEqual(len(session.messages), 1)
+            loaded = SessionStore(load_settings(root / ".MinimalCode")).load(path)
+            self.assertEqual(
+                loaded.messages, [{"role": "assistant", "content": "a\ud800b"}]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

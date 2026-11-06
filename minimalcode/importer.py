@@ -59,6 +59,14 @@ def _valid_base_url(value: Any) -> bool:
         return False
 
 
+def _env_slug(name: str) -> str:
+    """Return an upper-case, shell-setable fragment of a provider name."""
+    # `isalnum` also accepts non-ASCII letters, which no shell can export.
+    return "".join(
+        char if char.isascii() and char.isalnum() else "_" for char in name
+    ).upper()
+
+
 def _choose_model(
     provider_name: str,
     provider: dict[str, Any],
@@ -180,13 +188,20 @@ def import_pi_settings(
         if include_secrets and isinstance(api_key, str) and api_key:
             provider_config["api_key"] = api_key
         elif isinstance(api_key, str) and api_key:
-            env_name = (
-                "MINIMALCODE_"
-                + "".join(
-                    char if char.isalnum() else "_" for char in provider_name
-                ).upper()
-                + "_API_KEY"
-            )
+            used = {
+                config.get("api_key_env")
+                for config in imported_configs.values()
+                if config.get("api_key_env")
+            }
+            env_name = "MINIMALCODE_" + _env_slug(provider_name) + "_API_KEY"
+            suffix = 2
+            while env_name in used:
+                # Names that differ only in punctuation (`a-b` / `a_b`) would
+                # otherwise share one variable and silently swap credentials.
+                env_name = (
+                    "MINIMALCODE_" + _env_slug(provider_name) + f"_{suffix}_API_KEY"
+                )
+                suffix += 1
             provider_config["api_key_env"] = env_name
         imported.append((provider_name, provider_config, model_id))
         imported_configs[provider_name] = provider_config

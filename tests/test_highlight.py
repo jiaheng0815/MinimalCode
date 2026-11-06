@@ -163,6 +163,19 @@ class HighlightTests(unittest.TestCase):
         text = "\x9b31mred\x9b0m\x9d0;title\x9cvisible"
         self.assertEqual(sanitize_terminal_text(text), "redvisible")
 
+    def test_escape_sequences_with_intermediate_bytes_do_not_leak(self) -> None:
+        # `ESC ( B` is what `tput sgr0` writes; consuming only the intermediate
+        # byte printed its final byte as ordinary text.
+        from minimalcode.highlight.sanitize import TerminalSanitizer
+
+        for text in ("\x1b(B", "\x1b#8", "\x1b)0", "\x1b%G", "\x1b F"):
+            with self.subTest(text=text):
+                self.assertEqual(sanitize_terminal_text(f"a{text}b"), "ab")
+        # An unterminated sequence is held instead of leaking its prefix.
+        sanitizer = TerminalSanitizer()
+        self.assertEqual(sanitizer.feed("a\x1b("), "a")
+        self.assertEqual(sanitizer.feed("B\n"), "\n")
+
     def test_thinking_renderer_resets_a_fully_held_block(self) -> None:
         stream = io.StringIO()
         renderer = ThinkingRenderer(stream, theme="dark", color=True)
@@ -282,6 +295,24 @@ class HighlightTests(unittest.TestCase):
                     highlighter.feed(sample[index : index + size])
                 highlighter.finish()
                 self.assertEqual(strip_ansi(stream.getvalue()), sample)
+
+    def test_backslash_before_a_newline_keeps_the_block_state(self) -> None:
+        # The pair used to be emitted as one "escape", which swallowed the
+        # newline and left every later line parsed in the wrong block state.
+        sample = "see C:\\path\\\n```bash\nls\n```\n# Real heading\nplain\n"
+        expected = "see C:\\path\\\nls\nReal heading\nplain\n"
+        for size in (1, 2, 3, len(sample)):
+            with self.subTest(size=size):
+                rendered = _render(sample, io.StringIO(), color=True, size=size)
+                self.assertEqual(strip_ansi(rendered), expected)
+                self.assertNotIn("bash", rendered)
+
+    def test_trailing_indentation_is_not_dropped_at_the_end_of_a_stream(self) -> None:
+        stream = io.StringIO()
+        highlighter = MarkdownHighlighter(stream, color=True)
+        highlighter.feed("text\n  ")
+        highlighter.finish()
+        self.assertEqual(strip_ansi(stream.getvalue()), "text\n  ")
 
     def test_fence_lines_are_hidden(self) -> None:
         sample = "before\n\n```python\nprint(1)\nprint(2)\n```\n\nafter\n"

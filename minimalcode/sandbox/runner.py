@@ -109,8 +109,13 @@ class SandboxRunner:
         allow_outside: bool = False,
     ) -> bool:
         """Non-raising variant used to filter bulk search results."""
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            # A relative candidate belongs to the tool workspace, not to the
+            # process's own working directory.
+            candidate = self.policy.workspace / candidate
         try:
-            resolved = Path(path).resolve(strict=False)
+            resolved = candidate.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return False
         if not allow_outside and not self.policy.contains(resolved):
@@ -119,6 +124,9 @@ class SandboxRunner:
 
     def summary(self) -> dict[str, Any]:
         """Return the sandbox status payload shown by the CLI."""
+        # One audit snapshot keeps the counter and the history consistent even
+        # when worker threads record denials at the same time.
+        audit = self.audit.summary()
         return {
             "enabled": self.policy.enabled,
             "backend": self.backend.name,
@@ -132,11 +140,9 @@ class SandboxRunner:
             "max_output_chars": self.policy.max_output_chars,
             "max_memory_mb": self.policy.max_memory_mb,
             "max_processes": self.policy.max_processes,
-            "total_denials": self.audit.total_denials,
-            "recent_denials": [
-                denial.as_dict() for denial in self.audit.denials()[-5:]
-            ],
-            "notes": self.audit.notes()[-5:],
+            "total_denials": audit["total_denials"],
+            "recent_denials": audit["recent"][-5:],
+            "notes": audit["notes"][-5:],
             "last_temp_cleaned": self.last_temp_cleaned,
         }
 

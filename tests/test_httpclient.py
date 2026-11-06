@@ -198,6 +198,33 @@ class RetryPolicyTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_expired_budget_reports_a_timeout_instead_of_attempt_zero(self) -> None:
+        # The loop broke before the first attempt, so the final message
+        # interpolated `last_error` as the literal string "None".
+        client = build_client(
+            base_url="https://provider.test/v1",
+            headers={"x-api-key": "secret"},
+            timeout=5,
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(200, json={"ok": True})
+            ),
+        )
+        try:
+            with self.assertRaises(ToolError) as context:
+                post_json(
+                    client,
+                    "https://provider.test/v1/tools",
+                    {},
+                    label="web",
+                    timeout=5,
+                    deadline=0.0,
+                )
+        finally:
+            client.close()
+        message = str(context.exception)
+        self.assertIn("timed out before the first attempt", message)
+        self.assertNotIn("None", message)
+
 
 if __name__ == "__main__":
     unittest.main()

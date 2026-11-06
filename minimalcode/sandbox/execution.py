@@ -344,9 +344,12 @@ def _execute(
                     daemon=True,
                 ),
             ]
-            for reader in readers:
-                reader.start()
             try:
+                # A reader that cannot start (thread exhaustion) must still
+                # terminate the child: an exception raised here used to escape
+                # while the process tree kept running.
+                for reader in readers:
+                    reader.start()
                 returncode = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 _terminate_tree(process)

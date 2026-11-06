@@ -215,7 +215,11 @@ class ProviderWebClient:
         title = data.get("title")
         if title is None:
             title = ""
-        content = data.get("content", "")
+        content = data.get("content")
+        if content is None:
+            # An explicit JSON null means "no readable content", the same way a
+            # null title is tolerated above.
+            content = ""
         if not isinstance(title, str):
             raise ToolError("provider web fetch title must be a string")
         if not isinstance(content, str):

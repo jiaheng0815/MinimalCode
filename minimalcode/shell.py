@@ -96,6 +96,13 @@ def _resolve_override(preferred: str) -> ShellSpec:
             resolved = str(candidate)
     if resolved is None:
         raise ShellError(f"configured shell not found: {preferred}")
+    if Path(resolved).stem.lower() in {"cmd", "command"}:
+        # cmd.exe does not accept `-c`, so it would print its banner, exit 0 and
+        # never run the command: refuse instead of failing silently.
+        raise ShellError(
+            f"configured shell is not supported: {resolved}; "
+            "use pwsh, powershell, bash, or zsh"
+        )
     kind, label = _kind_for_executable(resolved)
     if kind == "bash" and _is_wsl_bash_stub(resolved):
         raise ShellError(
@@ -195,16 +202,23 @@ def select_shell(
                     unusable.append(f"{name}: {reason}")
                     continue
             return shell
-    message = "no supported shell found (tried pwsh, powershell/bash/sh)"
+    message = f"no supported shell found (tried {'/'.join(candidates)})"
     if unusable:
         message = f"{message}: {'; '.join(unusable)}"
     raise ShellError(message)
 
 
-def _unquoted_heredoc_marks(line: str) -> list[int]:
-    """Return ``<<`` offsets that are outside PowerShell string literals."""
+def _unquoted_heredoc_marks(
+    line: str, quote: str | None = None
+) -> tuple[list[int], str | None]:
+    """Return ``<<`` offsets outside string literals, and the open quote.
+
+    ``quote`` carries an unterminated literal in from the previous line, because
+    a PowerShell string may span lines: scanning line by line reported a
+    ``<<WORD`` inside a multi-line string as a bash heredoc and refused the
+    command. ``#`` starts a comment and ends the scan of its line.
+    """
     positions: list[int] = []
-    quote: str | None = None
     index = 0
     while index < len(line):
         char = line[index]
@@ -216,6 +230,8 @@ def _unquoted_heredoc_marks(line: str) -> list[int]:
                 quote = None
             index += 1
             continue
+        if char == "#":
+            break
         if char in {"'", '"'}:
             quote = char
             index += 1
@@ -229,7 +245,7 @@ def _unquoted_heredoc_marks(line: str) -> list[int]:
             index += 2
             continue
         index += 1
-    return positions
+    return positions, quote
 
 
 def powershell_heredoc_delimiter(command: str) -> str | None:
@@ -240,8 +256,10 @@ def powershell_heredoc_delimiter(command: str) -> str | None:
     active shell is PowerShell; bash/zsh heredocs remain valid there.
     """
     command = _HERE_STRING_RE.sub("", command)
+    quote: str | None = None
     for line in command.splitlines():
-        for index in _unquoted_heredoc_marks(line):
+        positions, quote = _unquoted_heredoc_marks(line, quote)
+        for index in positions:
             match = _HEREDOC_RE.match(line, index)
             if match is not None:
                 return match.group("delimiter")

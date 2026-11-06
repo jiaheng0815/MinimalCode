@@ -163,7 +163,17 @@ print(json.dumps({"matches": matches, "truncated": False}))
 
 def smart_case_ignore(pattern: str) -> bool:
     """Return True when ripgrep's --smart-case would ignore case."""
-    literal = re.sub(r"\\[A-Za-z]", "", pattern)
+    literal: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern[index] == "\\" and index + 1 < len(pattern):
+            # An escaped character carries no case of its own. Skipping the
+            # pair keeps `\\D` (an escaped backslash plus a literal `D`) visible
+            # to the check, which stripping every letter escape hid.
+            index += 2
+            continue
+        literal.append(pattern[index])
+        index += 1
     return not any(char.isupper() for char in literal)
 
 

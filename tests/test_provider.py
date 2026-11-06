@@ -852,6 +852,116 @@ class ProviderTests(unittest.TestCase):
                     [("call_1", "read", '{"path":"a.py"}')],
                 )
 
+    def test_responses_done_item_without_id_updates_the_streamed_call(self) -> None:
+        # `output_item.done` used to key by output_index, opening a second state
+        # for a call whose deltas were already accumulated under its item id.
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '{"path":"a.py"}',
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": '{"path":"a.py"}',
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": True,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+        self.assertEqual(
+            [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+            [("call_1", "read", '{"path":"a.py"}')],
+        )
+
+    def test_responses_object_arguments_done_event_is_not_discarded(self) -> None:
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_1",
+                "arguments": {"path": "a.py"},
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n" for event in events)
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body,
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": True,
+            },
+            model="model-r",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+        self.assertEqual(
+            [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+            [("call_1", "read", '{"path":"a.py"}')],
+        )
+
     def test_endpoint_keeps_a_configured_query_string(self) -> None:
         provider = OpenAICompatibleProvider(
             name="azure",

@@ -598,7 +598,14 @@ class Agent:
                 while end < len(calls) and calls[end].name in READ_ONLY_TOOLS:
                     end += 1
                 limit = self.tools.max_parallel
-            if limit <= 1 or end - index == 1:
+            if limit <= 1:
+                # A group larger than the limit still has to answer every call:
+                # taking only the first one left the rest unexecuted and
+                # unanswered, and a provider rejects an unpaired tool call on
+                # the next turn.
+                for call in calls[index:end]:
+                    results.append(self._execute_tool(call.name, call.arguments))
+            elif end - index == 1:
                 results.append(self._execute_tool(name, calls[index].arguments))
             else:
                 results.extend(self._execute_group(calls[index:end], limit))
@@ -961,7 +968,10 @@ class Agent:
             except OSError as exc:
                 raise ToolError(f"cannot read {target}: {exc}") from exc
         merged = merge_agents_summary(existing, self.summarize())
-        self.tools.write(str(target), merged)
+        # Dispatch instead of calling `write` directly: `--read-only` and
+        # `tools.allow` are enforced there, and `/summary` must not be a way
+        # around them.
+        self.tools.dispatch("write", {"path": str(target), "content": merged})
         return target
 
     def _transcript(self, messages: list[dict[str, Any]]) -> str:

@@ -338,17 +338,20 @@ class ResponsesProtocolMixin:
                         )
                         key = output_keys.get(raw_key, raw_key)
                         state = state_for(key)
-                        # Only the string form is accepted here, matching the
-                        # delta event above; object arguments arrive via items.
-                        arguments = event.get("arguments")
-                        if isinstance(arguments, str):
-                            merge_arguments(state, arguments)
+                        # `merge_arguments` handles both forms: a finished JSON
+                        # string replaces the deltas, and an object payload is
+                        # serialized the same way an item's arguments are.
+                        merge_arguments(state, event.get("arguments"))
                         continue
                     if event_type == "response.output_item.done":
                         item = event.get("item")
                         if not isinstance(item, dict):
                             continue
-                        key = str(item.get("id") or event.get("output_index", "0"))
+                        raw_key = str(item.get("id") or event.get("output_index", "0"))
+                        # Resolve through `output_keys`: an item that repeats the
+                        # call without an `id` must update the state its deltas
+                        # were accumulated into instead of opening a second one.
+                        key = output_keys.get(raw_key, raw_key)
                         if "output_index" in event:
                             output_keys[str(event["output_index"])] = key
                         if item.get("type") == "function_call":

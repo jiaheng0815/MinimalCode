@@ -384,6 +384,28 @@ class ToolTests(unittest.TestCase):
         self.tools.edit("classic.txt", "one\ntwo", "one\nTWO")
         self.assertEqual(target.read_bytes(), b"one\rTWO\rthree\r")
 
+    def test_line_edit_of_an_unterminated_last_line_keeps_the_file_style(self) -> None:
+        # The replaced span is the last line and has no terminator of its own,
+        # so the patch's newlines inherit the file's CRLF instead of LF.
+        target = self.workspace / "tail.txt"
+        target.write_bytes(b"a=1\r\nb=2")
+        self.tools.edit("tail.txt", start_line=2, end_line=2, new_text="x\ny")
+        self.assertEqual(target.read_bytes(), b"a=1\r\nx\r\ny")
+
+    def test_edit_rejects_a_nul_byte(self) -> None:
+        # `read` treats NUL as binary; accepting it here produced a file that
+        # no later tool could open.
+        self.tools.write("text.txt", "one\n")
+        with self.assertRaisesRegex(ToolError, "binary"):
+            self.tools.edit("text.txt", start_line=1, end_line=1, new_text="a\x00b")
+        self.assertEqual((self.workspace / "text.txt").read_bytes(), b"one\n")
+
+    def test_edit_keeps_a_utf8_bom_in_place(self) -> None:
+        target = self.workspace / "bom.txt"
+        target.write_bytes(b"\xef\xbb\xbffirst\nsecond\n")
+        self.tools.edit("bom.txt", start_line=1, end_line=1, new_text="FIRST")
+        self.assertEqual(target.read_bytes(), b"\xef\xbb\xbfFIRST\nsecond\n")
+
     @unittest.skipIf(os.name == "nt", "POSIX permission bits only")
     def test_edit_and_write_preserve_file_mode(self) -> None:
         script = self.workspace / "run.sh"
@@ -588,6 +610,27 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(braced_names, {"a.py", "b.txt"})
         self.assertIn("b.txt", excluded_names)
         self.assertNotIn("a.py", excluded_names)
+
+    def test_python_find_expands_every_brace_group(self) -> None:
+        # Only the first `{...}` group was expanded, so `{a,b}.{py,txt}` stayed
+        # literal and matched nothing.
+        self.tools.write("a.py", "value = 1\n")
+        self.tools.write("b.txt", "two\n")
+        self.tools.write("c.md", "three\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            result = self.tools.find("{a,b}.{py,txt}")
+        names = {Path(path).name for path in result["files"]}
+        self.assertEqual(names, {"a.py", "b.txt"})
+
+    def test_python_grep_keeps_an_escaped_backslash_literal_case_sensitive(
+        self,
+    ) -> None:
+        # `\\D` is an escaped backslash plus a literal `D`, which --smart-case
+        # treats as uppercase; stripping every letter escape hid that.
+        self.tools.write("escaped.py", "pattern = r'\\\\d'\n")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            sensitive = self.tools.grep(r"\\D")
+        self.assertEqual(sensitive["matches"], [])
 
     def test_line_edit_inserts_at_unterminated_eof(self) -> None:
         path = self.workspace / "eof.txt"

@@ -85,7 +85,23 @@ class TerminalSanitizer:
         # print a stray character where the sequence used to be. A control byte
         # after ESC cannot be a two-byte final, so only the ESC is removed —
         # otherwise an isolated ESC before a newline would join two lines.
-        return 2 if 0x20 <= ord(marker) <= 0x7E else 1
+        code = ord(marker)
+        if 0x20 <= code <= 0x2F:
+            # ``ESC`` plus intermediate bytes runs up to a final byte in
+            # 0x30-0x7E (``ESC ( B`` from `tput sgr0`). Consuming only the
+            # intermediate byte printed that final byte as ordinary text.
+            index = start + 1
+            while index < len(data):
+                current = ord(data[index])
+                if 0x20 <= current <= 0x2F:
+                    index += 1
+                    continue
+                if 0x30 <= current <= 0x7E:
+                    return index + 1 - start
+                # A control byte cannot be a final byte: drop the prefix only.
+                return index - start
+            return None
+        return 2 if 0x20 <= code <= 0x7E else 1
 
     def feed(self, text: str) -> str:
         """Consume a delta and return the safe text that is complete so far."""

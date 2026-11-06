@@ -531,6 +531,59 @@ class AgentTests(unittest.TestCase):
         self.assertIn("alpha", tool_messages[0]["content"])
         self.assertIn("beta", tool_messages[1]["content"])
 
+    def test_a_group_larger_than_the_limit_still_runs_every_call(self) -> None:
+        # `max_parallel: 1` used to run only the first call of an adjacent
+        # group and skip the rest, leaving their tool messages missing.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["tools"]["max_parallel"] = 1
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            tools.write("a.txt", "alpha\n")
+            provider = DelegatingProvider(
+                [
+                    ToolCall(
+                        id="call_a",
+                        name="read",
+                        arguments=json.dumps({"path": "a.txt"}),
+                    ),
+                    ToolCall(
+                        id="call_b",
+                        name="read",
+                        arguments=json.dumps({"path": "a.txt"}),
+                    ),
+                ]
+            )
+            agent = Agent(
+                settings=settings,
+                provider=provider,
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("read twice")
+        self.assertTrue(result.completed)
+        tool_messages = [
+            message for message in session.messages if message["role"] == "tool"
+        ]
+        self.assertEqual(
+            [message["tool_call_id"] for message in tool_messages],
+            ["call_a", "call_b"],
+        )
+        self.assertIn("alpha", tool_messages[0]["content"])
+        self.assertIn("alpha", tool_messages[1]["content"])
+
     def test_a_write_between_reads_keeps_them_sequential(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1268,6 +1321,35 @@ class AgentTests(unittest.TestCase):
             text = target.read_text(encoding="utf-8")
             self.assertIn("summary", text)
             self.assertNotIn("add a test", text)
+
+    def test_write_summary_is_refused_in_a_read_only_session(self) -> None:
+        # The summary used to call `tools.write` directly, which bypassed the
+        # `--read-only` and `tools.allow` enforcement in `dispatch`.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            session.append_message({"role": "user", "content": "add a test"})
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell, read_only=True),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            with self.assertRaisesRegex(ToolError, "disabled by --read-only"):
+                agent.write_summary()
+            self.assertFalse((workspace / "AGENTS.md").exists())
 
     def test_write_summary_replaces_a_previous_block_and_keeps_prose(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

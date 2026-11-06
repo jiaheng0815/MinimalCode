@@ -84,7 +84,13 @@ def _run(command: list[str], *, label: str) -> subprocess.CompletedProcess[bytes
 
 
 def _first_error_line(completed: subprocess.CompletedProcess[bytes]) -> str:
-    text = completed.stderr.decode("utf-8", errors="replace").strip()
+    # Only the Windows reader uses this, and redirected PowerShell stderr is
+    # written in the console code page rather than UTF-8; decoding it as UTF-8
+    # turned every non-ASCII character of a localized message into U+FFFD.
+    import locale
+
+    encoding = locale.getpreferredencoding(False) or "utf-8"
+    text = completed.stderr.decode(encoding, errors="replace").strip()
     if not text:
         return f"exit code {completed.returncode}"
     return text.splitlines()[0][:200]

@@ -38,6 +38,10 @@ _NETWORK_COMMANDS = frozenset(
         "invoke-restmethod",
         "start-bitstransfer",
         "bitsadmin",
+        # `npx`/`bunx` always resolve a package before running it, which reaches
+        # the registry even though neither name looks like a download client.
+        "npx",
+        "bunx",
     }
 )
 # Programs whose subcommand, not name, decides whether they reach the network.
@@ -145,10 +149,8 @@ _HOST_OPTION_RE = re.compile(
     r"--socks5-hostname|--url|-x)(?:=|\s+)(?P<value>\S+)",
     re.IGNORECASE,
 )
-_ENCODED_COMMAND_FLAGS = frozenset({"-enc", "-encodedcommand"})
 _POWERSHELL_KINDS = frozenset({"powershell", "pwsh"})
 _FIND_COMMAND_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:\\\\=-]+")
 # Control operators that end a command. They are only separators outside quotes:
 # splitting the raw string turned `rg 'nc|netcat'` into two commands and denied
 # an ordinary source search.
@@ -320,6 +322,34 @@ def _is_inline_flag(token: str) -> bool:
     )
 
 
+def _is_encoded_command_flag(token: str) -> bool:
+    """Return True for PowerShell's ``-EncodedCommand`` and its abbreviations."""
+    if not token.startswith("-"):
+        return False
+    name = token.lower().lstrip("-")
+    if not name:
+        return False
+    # pwsh accepts any prefix of `-EncodedCommand` (even `-e`) plus the
+    # initialism `-ec`; every other spelling is left to the inline flags.
+    return "encodedcommand".startswith(name) or name == "ec"
+
+
+def _inline_command_text(
+    segment: str, words: list[tuple[str, int, int]], position: int
+) -> str:
+    """Return one inline command argument, keeping its quoted body intact.
+
+    The argument runs to the end of the segment because PowerShell's
+    ``-Command`` takes the rest of the line, but the quoted head must be
+    unquoted: slicing up to the closing quote left the quotes in place, so
+    ``sh -c "iwr http://x" arg0`` reduced to the host ``x`` instead of the
+    ``iwr`` head and the gate never saw the client.
+    """
+    _value, start, end = words[position]
+    head = _strip_outer_quotes(segment[start:end])
+    return (head + segment[end:]).strip()
+
+
 def _segments(command: str) -> list[str]:
     """Split a command on unquoted control operators.
 
@@ -349,9 +379,17 @@ def _segments(command: str) -> list[str]:
     return segments
 
 
+_WINDOWS_SCRIPT_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+
+
 def _head_name(token: str) -> str:
     """Return a bare, lowercase executable name from a command token."""
-    return token.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for suffix in _WINDOWS_SCRIPT_SUFFIXES:
+        if name.endswith(suffix):
+            # `curl.cmd` and `wget.ps1` resolve to the same client as `curl`.
+            return name[: -len(suffix)]
+    return name
 
 
 def _head_variants(token: str) -> list[str]:
@@ -362,8 +400,7 @@ def _head_variants(token: str) -> list[str]:
     resolve, and a quote/escape-free spelling is added when it differs.
     """
     raw = _head_name(token)
-    collapsed = token.translate(_ESCAPE_CHARS)
-    name = collapsed.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    name = _head_name(token.translate(_ESCAPE_CHARS))
     return [raw] if name == raw else [raw, name]
 
 
@@ -425,16 +462,15 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                     if tokens[position].lower() not in _FIND_COMMAND_FLAGS:
                         continue
                     heads.append(tokens[position + 1])
-                    inner = _strip_outer_quotes(segment[words[position + 1][1] :])
+                    inner = _inline_command_text(segment, words, position + 1)
                     if inner:
                         inline.append(inner)
                     break
             if any(name in _INLINE_COMMAND_SHELLS for name in program_names):
+                is_powershell = any(name in _POWERSHELL_KINDS for name in program_names)
                 for position in range(index + 1, len(tokens)):
                     flag = tokens[position].lower()
-                    encoded = flag in _ENCODED_COMMAND_FLAGS and any(
-                        name in _POWERSHELL_KINDS for name in program_names
-                    )
+                    encoded = is_powershell and _is_encoded_command_flag(flag)
                     if not encoded and not _is_inline_flag(tokens[position]):
                         continue
                     if position + 1 >= len(tokens):
@@ -442,7 +478,6 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                             opaque = True
                         break
                     value = tokens[position + 1]
-                    heads.append(value)
                     if encoded:
                         decoded = _decode_powershell_command(value)
                         if decoded is None:
@@ -450,7 +485,10 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                         elif decoded.strip():
                             inline.append(decoded)
                     else:
-                        inner = _strip_outer_quotes(segment[words[position + 1][1] :])
+                        # The inline command is rescanned on its own, so adding
+                        # its first token as a head only made `sh -c "rm ./curl"`
+                        # look like a call to curl.
+                        inner = _inline_command_text(segment, words, position + 1)
                         if inner:
                             inline.append(inner)
                     break
@@ -518,7 +556,9 @@ def _network_subcommand(program: str, arguments: list[str]) -> bool:
 def _sequence_detected(command: str, depth: int = 0) -> bool:
     """Check network subcommands at command positions, including `sh -c`."""
     if depth > _MAX_NESTED_COMMANDS:
-        return False
+        # A command nested past the budget is opaque, not clean: failing open
+        # here let one extra `sh -c` layer hide a download.
+        return True
     for segment in _segments(command):
         tokens = _command_tokens(segment)
         if not tokens:

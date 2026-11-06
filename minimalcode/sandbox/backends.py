@@ -211,6 +211,15 @@ class DockerBackend(SandboxBackend):
             raise SandboxUnavailable(
                 "the docker sandbox backend can only run shell commands"
             )
+        if request.shell_kind in {"pwsh7", "windows_powershell"}:
+            # The command is handed to `/bin/sh` inside the container. Passing a
+            # PowerShell command string to it silently mis-executes the command
+            # instead of failing, so refuse the combination.
+            raise SandboxUnavailable(
+                "the docker sandbox backend runs commands with a POSIX shell, "
+                f"which cannot execute {request.shell_label or request.shell_kind} "
+                "syntax"
+            )
         image = request.policy.docker_image
         if not image:
             raise SandboxUnavailable("sandbox.docker_image must not be empty")

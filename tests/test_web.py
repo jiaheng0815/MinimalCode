@@ -386,6 +386,26 @@ class WebToolTests(unittest.TestCase):
         self.assertEqual(result["title"], "")
         self.assertEqual(result["content"], "body")
 
+    def test_fetch_accepts_null_content(self) -> None:
+        # An explicit JSON null is what an empty or blocked page returns; it used
+        # to fail the type check `title: null` is already excused from.
+        client = ProviderWebClient(
+            "custom",
+            _web_config(),
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    json={"title": "x", "content": None},
+                )
+            ),
+        )
+        try:
+            result = client.fetch("https://example.com")
+        finally:
+            client.close()
+        self.assertEqual(result["title"], "x")
+        self.assertEqual(result["content"], "")
+
     def test_fetch_truncates_a_long_title(self) -> None:
         client = ProviderWebClient(
             "custom",

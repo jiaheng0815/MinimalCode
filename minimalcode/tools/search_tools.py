@@ -330,9 +330,9 @@ class SearchToolsMixin:
             index = end
         return tuple(tokens)
 
-    @staticmethod
+    @classmethod
     @lru_cache(maxsize=256)
-    def _expand_braces(glob_pattern: str) -> tuple[str, ...]:
+    def _expand_braces(cls, glob_pattern: str) -> tuple[str, ...]:
         """Expand the simple ``{py,txt}`` alternation ripgrep accepts."""
         start = glob_pattern.find("{")
         if start < 0:
@@ -345,7 +345,13 @@ class SearchToolsMixin:
             return (glob_pattern,)
         prefix = glob_pattern[:start]
         suffix = glob_pattern[end + 1 :]
-        return tuple(prefix + choice + suffix for choice in choices)
+        # A pattern can hold more than one group (`{a,b}.{py,txt}`); leaving a
+        # later group in place matched nothing at all.
+        return tuple(
+            expanded
+            for choice in choices
+            for expanded in cls._expand_braces(prefix + choice + suffix)
+        )
 
     @classmethod
     def _matches_glob(cls, file_path: Path, root: Path, glob_pattern: str) -> bool:
