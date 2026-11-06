@@ -1,5 +1,35 @@
 # 更新日志
 
+## 1.4.2 - 2026-11-06
+
+### 修复
+
+- 沙箱网络策略：内联命令取到段尾却保留了开头的引号，带尾随参数时 `sh -c "curl …" arg0`、`pwsh -Command "iwr …" x` 只看得到主机名，`deny` / `allowlist` 都放行；现在按词边界切片，主机前面的真实命令名能被识别。反方向的误判也一并修掉：引号内的整段命令不再被当成命令头，`bash -c "rm -f ./curl"`、`sh -c "cat /usr/bin/wget"` 不再被当成联网命令拒绝。
+- 沙箱网络策略：PowerShell 的 `-ec` / `-e` / `-en` 等 `-EncodedCommand` 缩写按前缀识别并解码，`pwsh -ec <base64>` 不再绕过检查；嵌套层数超出预算改为 fail-closed；`npx` / `bunx` 与 `curl.cmd` / `wget.ps1` 这类 Windows 脚本名计入联网程序。
+- 沙箱：审计日志补上 URL userinfo（`https://user:pass@host`）与 `net use /user:name password` 的脱敏，普通端口/路径不受影响；子进程读线程启动失败时也终止进程树，不再把仍在运行的命令留在临时目录被删之后；docker 后端拒绝 PowerShell 命令而不是交给 `/bin/sh` 静默误执行；`/status` 的拒绝计数改为同一把锁下的一次快照。
+- 工具循环：`tools.max_parallel` / `subagent.max_parallel` 配成 1 时，一组相邻调用只执行第一个、其余既没执行也没有工具结果，下一轮请求因此把未配对的 tool_call 发给供应商；现在按顺序逐个执行。
+- 文件：`edit` 保留 UTF-8 BOM，不再在改第 1 行时静默丢掉编码标记；拒绝写入 NUL 字节（否则会产出所有文件工具都读不了的文件）；被替换区间是没有尾随换行的最后一行时，补丁的行尾跟随文件风格而不是回退成 LF；未命中提示与校验预览按物理行编号。
+- 会话：`--session` 指向用户自己的目录时不再每次追加就把该目录 `chmod 700`（只收紧本次创建的目录）；最后一行缺少换行的文件先补换行再追加，不再把两条事件粘成一行而整条丢失；含孤立代理对（`\udXXX`）的内容无法编码为 UTF-8 时转义写入，不再让这一次追加抛异常、把已经付费的回复丢掉。
+- 渲染：行尾反斜杠不再吞掉换行导致后续所有行的块状态错位（Windows 路径后紧跟代码块时尤其明显）；`ESC` 加 intermediate 字节的转义（`tput sgr0` 的 `ESC ( B`）连同终止字节一起消费，不再漏出一个可见字符；流结束时挂起的缩进不再被丢弃；`//` 只在 token 边界处当作注释，带端口/路径的 URL 不再整段变成注释色。
+- 供应商协议：Responses 的 `output_item.done` 通过 `output_keys` 归一化 key，省略 `id` 的重放不再为同一个调用开出第二份状态并把它执行两遍；`function_call_arguments.done` 接受对象形式的参数；Anthropic 的 `message_delta` 里 `input_tokens: 0` 之类的占位不再覆盖 `message_start` 报的输入计数。
+- Shell：多行字符串里的 `<<WORD` 与 `#` 注释里的 `<<WORD` 不再被当成 bash heredoc 拒绝（引号状态跨行延续，`#` 后按注释跳过）；显式配置 `cmd.exe` 时直接报错，而不是用 `-c` 启动它（cmd 会打印横幅、退出 0、什么都不执行）。
+- 搜索：`smart_case_ignore` 按转义对跳过，`\\D` 之类的字面量大写不会再被当成忽略大小写；`find` 的 `{a,b}.{py,txt}` 展开所有花括号组。
+- HTTP / 网页 / 剪贴板 / 配置：预算在第一次尝试前就耗尽时报告超时，而不是 `after 0 attempts: None`；`content: null` 与 `title: null` 一样按空处理；Windows 剪贴板错误按控制台代码页解码；`import-pi` 派生的 `api_key_env` 只含 ASCII 且同名冲突时加序号；`config show` 不再把布尔项 `trust_env` 显示成 `<redacted>`；`save_settings` 回退到设置自身的 home，而不是默认目录。
+- `/summary` 走 `dispatch` 写 `AGENTS.md`：`--read-only` 与 `tools.allow` 下会被拒绝，不再绕过工具策略。
+
+### 变更
+
+- 版本号升级到 1.4.2。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema，升级不需要改代码。
+- 可观察的行为变化（均为收紧或纠错）：`edit` 拒绝 NUL 字节；未终止末行按文件主导换行补丁；显式配置 `cmd.exe` 作为 shell 直接报错；docker 后端拒绝 PowerShell 命令；`local` 基线下 `npx` / `bunx` 与 `curl.cmd` / `wget.ps1` 视为联网命令，超深嵌套命令按 fail-closed 处理；`/summary` 在 `--read-only` 或 `tools.allow` 未放行 `write` 时被拒绝；`save_settings` 未指定 `home` 时写入设置自身的 `home`。
+
+### 文档
+
+- `README.md` 更新当前版本与 1.4.1 → 1.4.2 升级说明，并补充 `shell.path` 指向 `cmd.exe` 会被拒绝的原因；`docs/configuration.md` 补充 `-EncodedCommand` 缩写、`npx` / Windows 脚本名与 docker 后端拒绝非 POSIX shell；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.4.2 的兼容说明。
+
+### 测试
+
+- 新增回归测试：内联命令的头识别与误判、`-EncodedCommand` 缩写、`npx` / Windows 脚本名、审计脱敏、`max_parallel: 1` 的整组执行、`edit` 的 BOM / NUL / 未终止末行、会话目录权限 / 缺换行 / 孤立代理对、反斜杠换行与 intermediate 转义、Responses 的 `output_item.done` 与对象参数、Anthropic 的 `message_delta` 零值、heredoc 误判与 `cmd.exe` 拒绝、跨组花括号、转义反斜杠的 smart-case、`content: null`、预算已耗尽、`/summary` 的只读拒绝、`is_allowed` 的相对路径解析。
+
 ## 1.4.1 - 2026-11-04
 
 ### 新增

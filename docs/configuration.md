@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.4.1.
+Applies to MinimalCode 1.4.2.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -165,7 +165,9 @@ apply while the execution layer is enabled:
   (`curl`, `wget`, `ssh`, `git clone`, `pip install`, package managers, ...).
   Nested `sh -c` / `pwsh -Command` strings are inspected with their separators
   intact, PowerShell `-EncodedCommand` payloads are decoded (an undecodable one
-  fails closed), and `cmd` caret escapes are folded before inspection.
+  fails closed, and the `-ec`/`-e`/`-en` abbreviations are recognized), and
+  `cmd` caret escapes are folded before inspection. `npx`/`bunx` count as
+  network clients, and `curl.cmd`/`wget.ps1` are matched by their stem.
 - `allowlist`: named hosts are checked against `allowed_hosts`; commands whose
   target host cannot be determined are refused. At least one host is required.
   `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
@@ -184,11 +186,12 @@ execution is gated by the backend.
 with the rest of the filesystem read-only. `firejail` adds a private temp
 directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies
 network traffic for `deny`. `docker` runs `sh -lc` in the configured image with
-the workspace mounted and no host environment; it refuses argv-based search
-children, so `grep`/`find` use the Python scanner: in-process with a deadline
-alarm on the main thread, or a trusted host child interpreter when that guard is
-unavailable (a worker thread or Windows). The `docker` backend is POSIX-host
-only (Docker Desktop cannot consume the
+the workspace mounted and no host environment, so it refuses a PowerShell shell
+kind instead of handing its syntax to `/bin/sh`; it also refuses argv-based
+search children, so `grep`/`find` use the Python scanner: in-process with a
+deadline alarm on the main thread, or a trusted host child interpreter when that
+guard is unavailable (a worker thread or Windows). The `docker` backend is
+POSIX-host only (Docker Desktop cannot consume the
 `C:\ws:C:\ws` mount this backend builds) and runs the container as the invoking
 `uid:gid`, so workspace files do not end up owned by root.
 

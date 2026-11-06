@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.4.1`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.4.2`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
@@ -42,6 +42,19 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.4.1 升级到 1.4.2
+
+1.4.2 是缺陷修复版本，没有新增或删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，升级不需要改代码。修复覆盖安全闸门、工具循环、文件编辑、渲染与协议解析，其中几处会改变出错场景下的结果，需要留意：
+
+- 沙箱网络策略更准也更严。内联命令现在按词边界切片，`sh -c "curl …" arg0`、`pwsh -Command "iwr …" x` 这类带尾随参数的写法不再漏检；PowerShell 的 `-ec` / `-e` / `-en` 等 `-EncodedCommand` 缩写会解码检查；`npx` / `bunx` 与 `curl.cmd` / `wget.ps1` 计入联网命令；嵌套层数超出预算按 fail-closed 处理。反方向的误报也修掉了：`bash -c "rm -f ./curl"` 这类引号内提到命令名的普通命令不再被拒绝。用 `allowlist` 时可能发现此前被放行的命令现在被拒，那正是修复的目标。
+- `tools.max_parallel` 或 `subagent.max_parallel` 设为 1 时，一组相邻工具调用现在会逐个全部执行；此前只执行第一个，其余既没执行也没有工具结果，下一轮请求会把未配对的 `tool_call` 发给供应商。
+- 文件工具：`edit` 保留 UTF-8 BOM、拒绝 NUL 字节，替换没有尾随换行的末行时按文件主导换行补丁。
+- 会话：`--session` 指向用户自己的目录时不再改动该目录权限；末行缺少换行的会话文件会先补换行再追加；含孤立代理对的内容转义写入而不是让追加失败。
+- 显式把 `shell.path` 配成 `cmd.exe` 现在直接报错；docker 后端拒绝 PowerShell 命令，而不是把它交给 `/bin/sh` 静默误执行。
+- `/summary` 走工具策略写 `AGENTS.md`，在 `--read-only` 或 `tools.allow` 未放行 `write` 时会被拒绝。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.4.0 升级到 1.4.1
 
@@ -243,7 +256,7 @@ JSON 输出字段：
 - **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。`--no-sandbox` 只关闭执行层（后端包装、网络策略、资源限制），工作区与敏感文件边界照旧生效。
 - **沙箱执行层**：`sandbox.enabled` 默认关闭（等同默认 `--no-sandbox`），`--sandbox` 或任意 `--sandbox-*` 选项会开启它；开启后默认后端 `local`（跨平台策略与子进程限制基线），可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。开启时路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
 - **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --no-config --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义和相同的 glob 语义（`*` 不跨目录、`**/` 可匹配零层、大小写敏感），都不解析 `.gitignore`，也都不受 `RIPGREP_CONFIG_PATH` 影响；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。两条路径的输出都再经过一次敏感文件策略过滤，被沙箱截断产生的标记行不会作为匹配返回。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
-- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash` → `zsh` → `sh`（Windows 为 `powershell` → Git Bash）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。Windows 上 `System32\bash.exe` 与 `WindowsApps\bash.exe`（WSL 或应用商店启动器）不会作为原生 shell 候选，`pwsh-preview` / `powershell-preview` 按对应的 PowerShell 处理。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
+- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash` → `zsh` → `sh`（Windows 为 `powershell` → Git Bash）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。Windows 上 `System32\bash.exe` 与 `WindowsApps\bash.exe`（WSL 或应用商店启动器）不会作为原生 shell 候选，`pwsh-preview` / `powershell-preview` 按对应的 PowerShell 处理。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell；`cmd.exe` 会被直接拒绝，因为它不接受 `-c`，用 `-c` 启动只会打印横幅、退出 0 而什么都不执行。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
 - **误报网络命令**：`local` 基线的 `deny` 基于命令字符串识别，只读的 `python -m pip show/list`、`pip --version` 会被放行，`pip install/download` 等会触网子命令才会被拒绝。
 - **资源限制**：POSIX 下对子进程设置 `RLIMIT_CORE` 和按超时推算的 `RLIMIT_CPU`；Linux 的 `RLIMIT_AS`（`sandbox.max_memory_mb`）和 `RLIMIT_NPROC`（`sandbox.max_processes`）默认关闭，因为 `RLIMIT_AS` 限制的是预留地址空间而非实际占用，2 GB 的默认值会让 .NET（pwsh）、JVM、Go 子进程在真正运行前就报 `Out of memory`。
 - **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾用空值安全的 `exit` 保留子进程真实退出码（无法启动时返回 1）。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。

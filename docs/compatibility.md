@@ -1,8 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.4.1. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.4.2. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, and 1.4.1 added no further breaking import changes
+1.4.0, 1.4.1, and 1.4.2 added no further breaking import changes
 (`minimalcode.httpclient` and `minimalcode.clipboard` are new modules, not
 renamed ones).
 
@@ -16,6 +16,31 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.4.2 changed
+
+No public `__all__` name, CLI flag, configuration key, JSON output field, session
+format, or import path changed; nothing was added or removed either. Every
+change is a defect fix, and the observable differences only appear in cases
+that used to be wrong:
+
+- The network gate inspects inline `sh -c` / `pwsh -Command` strings with their
+  real command head, decodes every `-EncodedCommand` abbreviation, treats
+  `npx`/`bunx` and `curl.cmd`/`wget.ps1` as network clients, and fails closed
+  past the nesting budget. Quoted command names inside an ordinary inline
+  command no longer trigger a false denial.
+- A tool group larger than `tools.max_parallel` / `subagent.max_parallel` runs
+  every call; a limit of 1 used to execute only the first one.
+- `edit` keeps a UTF-8 BOM, rejects NUL bytes, and patches an unterminated last
+  line with the file's own line ending.
+- A session file whose last line lost its terminator gets one before the next
+  append; a lone surrogate is escaped instead of failing the append; a
+  `--session` directory outside the store keeps its permissions.
+- A `shell.path` of `cmd.exe` is rejected instead of silently running nothing,
+  and the `docker` backend refuses a PowerShell command rather than handing its
+  syntax to `/bin/sh`.
+- `/summary` writes through the tool policy, so `--read-only` and
+  `tools.allow` now apply to it.
 
 ## What 1.4.1 changed
 
