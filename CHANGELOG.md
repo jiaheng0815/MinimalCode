@@ -29,6 +29,7 @@
 ### 测试
 
 - 新增回归测试：内联命令的头识别与误判、`-EncodedCommand` 缩写、`npx` / Windows 脚本名、审计脱敏、`max_parallel: 1` 的整组执行、`edit` 的 BOM / NUL / 未终止末行、会话目录权限 / 缺换行 / 孤立代理对、反斜杠换行与 intermediate 转义、Responses 的 `output_item.done` 与对象参数、Anthropic 的 `message_delta` 零值、heredoc 误判与 `cmd.exe` 拒绝、跨组花括号、转义反斜杠的 smart-case、`content: null`、预算已耗尽、`/summary` 的只读拒绝、`is_allowed` 的相对路径解析。
+- 测试自身修正：`os.set_blocking` 降级用例改用 `patch.object(..., create=True)`。Windows + Python 3.11 上该属性本就不存在（正是用例要覆盖的场景），原来的写法在 `patch` 进入时就抛 `AttributeError`，导致 CI 在 3.11 / Windows 组合上失败。
 
 ## 1.4.1 - 2026-11-04
 

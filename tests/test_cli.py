@@ -1337,12 +1337,13 @@ class CliTests(unittest.TestCase):
     def test_buffered_line_degrades_without_set_blocking(self) -> None:
         # Windows before Python 3.12 has no ``os.set_blocking``; the console
         # probe uses ``msvcrt.kbhit`` there, so peeking must return "nothing
-        # buffered" instead of raising AttributeError.
+        # buffered" instead of raising AttributeError. ``create=True`` because
+        # the attribute is absent on exactly the platforms this guards.
         from minimalcode import cli
 
         read_fd, write_fd = os.pipe()
         try:
-            with patch.object(cli.os, "set_blocking", None):
+            with patch.object(cli.os, "set_blocking", None, create=True):
                 self.assertIsNone(cli._read_buffered_line())
         finally:
             os.close(read_fd)
