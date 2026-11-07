@@ -1,6 +1,37 @@
 # 更新日志
 
+## 1.4.3 - 2026-11-07
+
+### 修复
+
+- 沙箱网络策略：`env -S 'curl …'` / `env --split-string 'wget …'` 曾整体放行。`-S` / `--split-string` 的值本身就是待执行命令，`_WRAPPER_ARGUMENTS["env"]` 却把它当普通取值选项跳过，于是 `deny` 与 `allowlist` 都只看到一个无害的 `env`；现在该值被取出并作为内联命令重新扫描。
+- 沙箱网络策略：`py -3 -m pip install …`、`py -m pip install …`、`python -mpip install …`、`python -m pip3 install …` 不被识别为装包。原来的序列正则只认 `python[0-9.]*\s+-m\s+pip`，漏掉 Windows 的 `py` 启动器、版本选择器、紧贴拼写和带版本号的模块名；这几种写法都能在 `deny` 下从索引装上任意包。
+- 沙箱网络策略：内联脚本里的间接网络调用不可见。`_NESTED_NETWORK_API` 只覆盖 `requests` / `urllib` / `httpx` / `socket` 等名字，`pwsh -c "IEX (New-Object Net.WebClient).DownloadString('http://…')"` 与 `powershell -Command "(New-Object Net.WebClient).DownloadFile(…)"` 这种 Windows 上最常见的落地写法不含任何客户端名，检查完全没有触发；现在 `webclient` / `downloadstring` / `downloadfile` 计入嵌套网络 API。
+- 沙箱网络策略：`copy \\host\share\x out.txt`、`type \\host\share\s.txt` 这类 UNC 路径不产生任何网络信号。它们走 SMB，命令行里既没有客户端名也没有 URL scheme，`deny` 放行外发与拉取，`allowlist` 也因为拿不到主机名而无法判定；现在 UNC 主机同时作为检测信号与 `allowed_hosts` 的比对来源。
+- 沙箱审计：紧贴标志的凭据以明文进入拒绝记录。脱敏正则要求 `-u` / `--user` 与值之间有空格，`curl -uadmin:hunter2`、`curl --user=admin:hunter2`、`mysql -phunter2` 原样写进 `SandboxDenial.target`，再由 `/status` 的 `recent_denials` 输出，审计环缓冲变成了凭证明文副本。现在 `-u` / `--user` / `--password` / `-b` / `--cookie` / `-H` / `--header` 的紧贴与 `=` 形式都脱敏；`-p` 只在值紧贴标志时脱敏，`docker run -p 8080:80` 的端口映射保持可读。
+- 文件：`write` 静默丢掉文件原有的 UTF-8 BOM。`read` 用 `utf-8-sig` 解码，`edit` 会保留 BOM，只有 `write` 按裸 `utf-8` 编码，`read` → `write` 往返就改变了整个文件的编码标记；现在原文件带 BOM 时写回同样的 BOM。
+- 文件：校验器自身失败被当成“新内容有错”。`_ruff_diagnostics` 在 ruff 退出码非 0 且无可解析诊断时（工作区的 `pyproject.toml` 含未知 `select`、ruff 版本不支持某项配置）合成一条 `ruff [exit]` 诊断，新建文件的前置诊断为空，于是被判为新增诊断，刚写好的文件被 `unlink` 删除并报 `validation failed … rolled back`；现在 `exit` / `unavailable` / `timeout` 走 `warnings`，不参与回滚判定。
+- 搜索：`glob` 含 `/` 且 `path` 不是 `.` 时，装有 `rg` 的默认路径静默返回空结果。`rg` 以工作区为 `cwd` 启动却按绝对路径搜索，`--glob` 是相对 `cwd` 匹配的，`find("deep/*.py", path="sub")`、`grep(needle, path="sub", glob="deep/*.py")` 命中 0 条，而 Python 回退引擎能找到——同一查询的结果取决于是否装了 `rg`，模型会把“没找到”当成事实；现在 glob 按搜索根锚定到 `cwd` 相对形式。
+- 搜索：`{a,b}` 花括号展开是无限笛卡尔积。`_expand_braces` 递归展开每个组且没有上限，`{a,b}` 重复 20 次时一条 pattern 就能让 `find` 的 Python 回退挂住数分钟；现在超过 256 个变体时按字面量匹配。
+- 搜索：`grep` 结果被行内换页符切断。sandbox 分支（即使 `sandbox.enabled=false` 也走）用 `str.splitlines()` 解析 `rg` 输出，它在 `\x0c`、U+2028 和孤立 CR 上也会断行，尾部片段因为没有 `path:N:` 前缀被当成噪声丢弃，`truncated` 仍为 `False`；现在只按 `\n` 分行并去掉 CR。
+- 供应商：连接重试不受 `timeout_seconds` 约束。`_open` 的退避睡眠不计入预算，`timeout_seconds=1` 时退避合计 55.5 秒、11 次请求，默认 120 秒配置最坏约 275 秒（2.3 倍超时）；`Retry-After` 的等待同样可能超出。现在截止时间覆盖重试与状态重试的等待。
+- 供应商：Anthropic 兼容网关用 `data: [DONE]` 收尾（而非 `message_stop`）时，已经收到 `stop_reason` 的完整回答被判为 `incomplete`，其工具调用被整组丢弃、写入错误工具结果。现在 `[DONE]` 在已报告停止原因时视为正常结束，未报告时仍按截断处理。
+
+### 变更
+
+- 版本号升级到 1.4.3。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema，升级不需要改代码。
+- 可观察的行为变化（均为收紧或纠错）：`deny` 下 `env -S`/`--split-string`、`py`/`python` 装包、PowerShell `WebClient` 下载、UNC 路径现在被拒绝；`allowlist` 下 UNC 主机参与比对；审计记录中紧贴标志的凭据被脱敏；`write` 保留 BOM；校验器不可用不再回滚新文件；`grep` / `find` 的 `glob` 按搜索根匹配（此前返回空的查询现在能命中）；供应商重试在 `timeout_seconds` 内结束。
+
+### 文档
+
+- `README.md` 更新当前版本与 1.4.2 → 1.4.3 升级说明；`docs/configuration.md` 补充 `env -S`、`py`/`-mpip`、`WebClient` 与 UNC 的识别范围；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.4.3 的兼容说明。
+
+### 测试
+
+- 新增回归测试：`env -S` / `--split-string` 的内联命令、`py` 启动器与 `-mpip` / `pip3`、`WebClient` 下载桩、UNC 检测与 `allowlist` 比对、紧贴标志的凭据脱敏（并保证端口映射不被脱敏）、`write` 的 BOM 保留、校验器不可用不删除新文件、非根 `path` 下的路径 glob（`find` 与 `grep` 各一条）、行内换页符、连接重试预算、Anthropic 的 `[DONE]` 收尾。
+
 ## 1.4.2 - 2026-11-06
+
 
 ### 修复
 

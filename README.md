@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.4.2`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.4.3`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
@@ -42,6 +42,21 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+### 从 1.4.2 升级到 1.4.3
+
+1.4.3 是缺陷修复版本，没有新增或删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，升级不需要改代码。修复集中在安全闸门与搜索，其中几处会改变出错场景下的结果，需要留意：
+
+- 沙箱网络策略补上四种此前完全看不见的写法：`env -S 'curl …'` / `--split-string`（该选项的值本身就是命令，旧版把它当普通选项值跳过）、`py -3 -m pip install …` / `python -mpip install …` / `python -m pip3 install …`（Windows 的 `py` 启动器与紧贴拼写）、PowerShell 内联的 `(New-Object Net.WebClient).DownloadString/DownloadFile`，以及 `\\host\share` 形式的 UNC 路径（SMB，不出现任何客户端名或 URL）。`deny` 下这些命令现在会被拒绝；`allowlist` 下 UNC 主机也会参与比对。
+- 审计脱敏覆盖紧贴标志的凭据：`curl -uadmin:pw`、`--user=admin:pw`、`mysql -phunter2` 此前以明文写入拒绝记录，现在被标记为 `<redacted>`。`docker run -p 8080:80` 这类普通端口映射不受影响。
+- `write` 保留文件原有的 UTF-8 BOM（此前只有 `edit` 保留，重写会静默改变整个文件的编码）。
+- 校验器自身跑不起来（ruff 配置损坏、超时、工具缺失）时不再算作“内容有错”，新建的 Python 文件不会被回滚删除，改为在 `warnings` 里报告。
+- `grep` / `find` 的 `glob` 现在按搜索根锚定：`find("deep/*.py", path="sub")`、`grep(..., glob="src/*.py")` 此前在装有 `rg` 时返回空结果（无 `rg` 的 Python 回退却能找到），模型会把“没找到”当成事实。含多次 `{a,b}` 的花括号展开也加了上限，不再指数级挂死。
+- `grep` 结果不再被行内换页符、U+2028 或孤立 CR 切断并丢弃尾部文本。
+- 供应商重试受 `timeout_seconds` 约束：此前连接退避会跑完整轮（1 秒超时实际可耗约 55 秒）。
+- 兼容 Anthropic 的网关用 `data: [DONE]` 收尾时按正常结束处理，完整回答与工具调用不再被判为 `incomplete` 丢弃。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.4.1 升级到 1.4.2
 

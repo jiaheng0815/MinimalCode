@@ -1,9 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.4.2. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.4.3. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, and 1.4.2 added no further breaking import changes
-(`minimalcode.httpclient` and `minimalcode.clipboard` are new modules, not
+1.4.0, 1.4.1, 1.4.2, and 1.4.3 added no further breaking import changes
 renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
@@ -16,6 +15,40 @@ Within the 1.x series (from 1.0.0 onward), the public names in each package's
 format remain compatible. Removals and behavior changes are recorded in
 `CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
 any release; import them from the module that defines them, as listed below.
+
+## What 1.4.3 changed
+
+No public `__all__` name, CLI flag, configuration key, JSON output field, session
+format, or import path changed; nothing was added or removed either. Every
+change is a defect fix, and the observable differences only appear in cases
+that used to be wrong:
+
+- The network gate sees four spellings it used to miss entirely: `env -S` /
+  `env --split-string` (the option's value is the command, and it was skipped as
+  an ordinary option value), the `py` launcher and attached `-m` spelling of a
+  `pip` install (`py -3 -m pip install`, `python -mpip install`), PowerShell's
+  `(New-Object Net.WebClient).DownloadString/DownloadFile` inside an inline
+  command, and `\\host\share` UNC paths, which reach SMB with no client name and
+  no URL scheme. Under `allowlist` a UNC host is also compared against
+  `allowed_hosts`.
+- Audit records redact credentials attached to their flag (`-uadmin:pw`,
+  `--user=admin:pw`, `mysql -phunter2`); `-p` is only masked when a value is
+  attached, so `docker run -p 8080:80` stays readable.
+- `write` keeps a file's UTF-8 BOM, matching what `edit` and `read` already did.
+- A validator that cannot run (broken ruff configuration, timeout, missing tool)
+  no longer counts as a new diagnostic, so it cannot roll back and delete a
+  freshly written Python file; it is reported in `warnings` instead.
+- A `glob` containing `/` is matched relative to the search root. `find` and
+  `grep` used to return no results for it whenever `rg` was installed, while the
+  Python fallback found the files.
+- `{a,b}` expansion is capped, so a pathological pattern can no longer hang a
+  search; and a match line is no longer split on a form feed, U+2028, or a lone
+  CR, which silently dropped the tail of the match.
+- Provider connection retries, including the `Retry-After` wait, now stay inside
+  `timeout_seconds`.
+- An Anthropic-compatible gateway that ends a stream with `data: [DONE]` instead
+  of `message_stop` is treated as a clean finish once the stop reason arrived,
+  so a completed answer and its tool calls are no longer dropped as incomplete.
 
 ## What 1.4.2 changed
 

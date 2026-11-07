@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.4.2.
+Applies to MinimalCode 1.4.3.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -167,12 +167,18 @@ apply while the execution layer is enabled:
   intact, PowerShell `-EncodedCommand` payloads are decoded (an undecodable one
   fails closed, and the `-ec`/`-e`/`-en` abbreviations are recognized), and
   `cmd` caret escapes are folded before inspection. `npx`/`bunx` count as
-  network clients, and `curl.cmd`/`wget.ps1` are matched by their stem.
+  network clients, and `curl.cmd`/`wget.ps1` are matched by their stem. Four
+  spellings that used to slip through are inspected as well: `env -S` /
+  `env --split-string` (its value is the command to run), the `py` launcher and
+  attached `-m` form of a package install (`py -3 -m pip install`,
+  `python -mpip install`), PowerShell's `(New-Object Net.WebClient)
+  .DownloadString`/`DownloadFile` inside an inline command, and `\\host\share`
+  UNC paths, which reach SMB without naming a client or a URL.
 - `allowlist`: named hosts are checked against `allowed_hosts`; commands whose
   target host cannot be determined are refused. At least one host is required.
   `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
   `--socks5*`, `-x`) contribute their targets, so an allowed URL cannot be
-  redirected to another host.
+  redirected to another host, and a UNC path contributes its host.
 - `allow`: no network restriction.
 
 Backends are probed at execution time, which only happens when the layer is
