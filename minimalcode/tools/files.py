@@ -81,6 +81,10 @@ class _Diagnostic:
 _PYTHON_SUFFIXES = frozenset({".py", ".pyi"})
 _MAX_REPORTED_DIAGNOSTICS = 8
 _VALIDATION_TIMEOUT_SECONDS = 30
+# Codes that mean "the validator itself did not run" (missing tool, broken
+# config, timeout) rather than "the new content is wrong". Counting them as
+# content diagnostics rolled a fresh write back and deleted the new file.
+_VALIDATOR_FAILURES = frozenset({"exit", "unavailable", "timeout"})
 
 
 def _source_preview(text: str, line: int | None) -> str:
@@ -710,7 +714,20 @@ class FileToolsMixin:
         if target.suffix.lower() not in _PYTHON_SUFFIXES:
             return []
         after, warnings = self._python_diagnostics(target)
-        remaining = Counter(diagnostic.key for diagnostic in after)
+        failures = [
+            diagnostic for diagnostic in after if diagnostic.code in _VALIDATOR_FAILURES
+        ]
+        if failures:
+            warnings = [
+                *warnings,
+                *(f"{item.validator}: {item.message}" for item in failures),
+            ]
+        checked = [
+            diagnostic
+            for diagnostic in after
+            if diagnostic.code not in _VALIDATOR_FAILURES
+        ]
+        remaining = Counter(diagnostic.key for diagnostic in checked)
         remaining.subtract(Counter(diagnostic.key for diagnostic in before))
         new_keys = {key for key, count in remaining.items() if count > 0}
         if not new_keys:
@@ -763,6 +780,10 @@ class FileToolsMixin:
             # Keep the file's physical style instead of letting a model's LF
             # payload churn every line of a CRLF checkout.
             content = _normalize_newlines(content, newline)
+        if original_bytes is not None and original_bytes.startswith(b"\xef\xbb\xbf"):
+            # `read` decodes with utf-8-sig, so a rewrite must put the BOM back:
+            # dropping it silently changed the encoding of the whole file.
+            content = "\ufeff" + content
         try:
             encoded = content.encode("utf-8")
         except UnicodeEncodeError as exc:

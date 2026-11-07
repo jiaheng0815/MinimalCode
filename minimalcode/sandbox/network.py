@@ -125,7 +125,11 @@ _SUBCOMMAND_OPTION_VALUES["pip3"] = _SUBCOMMAND_OPTION_VALUES["pip"]
 # `rg "pip install"` from matching.
 _COMMAND_SEQUENCES = (
     re.compile(
-        r"\bpython[0-9.]*\s+-m\s+pip\b[^|;&\n]*?\b(?:install|download|search|index)\b",
+        # `py -3 -m pip`, `python3 -mpip`, and `python -m pip3` all reach the
+        # index; the version selector and the attached `-m` spelling were the
+        # gaps that let a deny policy install packages.
+        r"\b(?:python[0-9.]*|py(?:\.exe)?)(?:\s+-[0-9.]+)*\s+-\s*m\s*pip[0-9.]*\b"
+        r"[^|;&\n]*?\b(?:install|download|search|index)\b",
         re.IGNORECASE,
     ),
     re.compile(r"\bpython[0-9.]*\s+-m\s+(?:http\.server|requests)\b", re.IGNORECASE),
@@ -134,9 +138,16 @@ _COMMAND_SEQUENCES = (
 # script. It is searched only in nested command strings, never in the outer
 # command, so `rg "urllib.request"` is not misread as a network call.
 _NESTED_NETWORK_API = re.compile(
-    r"\b(?:requests|urllib3?|httpx|http\.client|ftplib|socket|urlopen|urlretrieve)\b",
+    r"\b(?:requests|urllib3?|httpx|http\.client|ftplib|socket|urlopen|urlretrieve"
+    # PowerShell's download stubs: `(New-Object Net.WebClient).DownloadString()`
+    # is the common Windows one-liner, and it names no network client at all.
+    r"|webclient|downloadstring|downloadfile"
+    r")\b",
     re.IGNORECASE,
 )
+# A Universal Naming Convention path (`\\host\share`) is an SMB request even
+# though the command line names no network client and no URL scheme.
+_UNC_PATTERN = re.compile(r"\\\\[A-Za-z0-9._-]+\\(?![\\?])")
 _URL_PATTERN = re.compile(
     r"\b(?:https?|ftps?)://(?:[^/@\s'\"`?#]*@)?"
     r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)",
@@ -286,6 +297,29 @@ def _shell_words(segment: str) -> list[tuple[str, int, int]]:
     if start is not None:
         words.append(("".join(buffer), start, len(segment)))
     return words
+    return words
+
+
+def _env_split_command(tokens: list[str], index: int) -> str | None:
+    """Return the command string ``env -S``/``--split-string`` will execute.
+
+    The value is a command, not an ordinary option argument: skipping it made
+    ``env -S 'curl http://x'`` look like a harmless ``env`` call and slipped
+    past the network gate entirely.
+    """
+    position = index + 1
+    arguments = _WRAPPER_ARGUMENTS["env"]
+    while position < len(tokens):
+        token = tokens[position]
+        lowered = token.lower()
+        if lowered in {"-s", "--split-string"}:
+            return tokens[position + 1] if position + 1 < len(tokens) else None
+        if lowered.startswith("--split-string="):
+            return token.split("=", 1)[1] or None
+        if not lowered.startswith("-"):
+            return None
+        position += 1 + arguments.get(token, 0)
+    return None
 
 
 def _skip_wrapper(tokens: list[str], index: int, wrapper: str) -> int:
@@ -441,6 +475,10 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                 index += 1  # VAR=value prefix
                 continue
             if lowered in _WRAPPERS:
+                if lowered == "env":
+                    split_command = _env_split_command(tokens, index)
+                    if split_command:
+                        inline.append(split_command)
                 index = _skip_wrapper(tokens, index, lowered)
                 continue
             if lowered in _PREFIX_WORDS:
@@ -655,6 +693,9 @@ def _network_hosts(command: str) -> list[str]:
                 add(candidate)
         else:
             add(_host_from_value(value))
+    for match in _UNC_PATTERN.finditer(command):
+        add(match.group(0).strip("\\").split("\\", 1)[0])
+    return hosts
     return hosts
 
 
@@ -675,7 +716,8 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
         else command
     )
     hosts = _network_hosts(normalized)
-    detected = False
+    # An SMB share is a network request with no client name and no scheme.
+    detected = _UNC_PATTERN.search(normalized) is not None
     for head in _all_command_heads(normalized):
         # Compare bare executable names so `/usr/bin/curl`, `curl.exe`, and
         # `c\url` all match the same entry.

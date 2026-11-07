@@ -556,7 +556,51 @@ class AnthropicProviderTests(unittest.TestCase):
             provider.close()
 
         self.assertEqual(reply.content, "half")
+        self.assertEqual(reply.content, "half")
         self.assertEqual(reply.finish_reason, "incomplete")
+
+    def test_done_sentinel_ends_a_stream_that_reported_its_stop_reason(self) -> None:
+        # An Anthropic-compatible gateway may close with the OpenAI `[DONE]`
+        # sentinel instead of `message_stop`; the finished answer was reported
+        # as incomplete and its tool calls were discarded.
+        events = [
+            {
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 2, "output_tokens": 1}},
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "done"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 1},
+            },
+        ]
+
+        provider = _anthropic_provider(
+            lambda request: httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=_sse(events) + b"data: [DONE]\n\n",
+            ),
+            stream=True,
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "hello"}])
+        finally:
+            provider.close()
+
+        self.assertEqual(reply.content, "done")
+        self.assertEqual(reply.finish_reason, "stop")
 
     def test_stream_falls_back_to_a_json_response(self) -> None:
         def handler(request: httpx2.Request) -> httpx2.Response:

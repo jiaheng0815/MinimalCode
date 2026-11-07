@@ -22,7 +22,15 @@ _SECRET_PATTERNS = (
         r"[^\s'\"]+"
     ),
     re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
-    re.compile(r"(?i)(\s(?:-u|--user|-b|--cookie|-H|--header)\s+)[^\s'\"]+"),
+    re.compile(
+        # The value may be attached (`-uadmin:pw`), `=`-joined
+        # (`--user=admin:pw`), or a separate argument.
+        r"(?i)(\s(?:-u|--user|--password|-b|--cookie|-H|--header)"
+        r"(?:\s+|=\s*|(?=[^-])))[^\s'\"]+"
+    ),
+    # `mysql -phunter2` only attaches its password; a bare `-p` flag such as
+    # `docker run -p 8080:80` must keep its argument readable.
+    re.compile(r"(?i)(\s-p(?=[^\s-]))[^\s'\"]+"),
     # `https://user:password@host` puts the credential in the URL itself, which
     # none of the option-shaped patterns above reach.
     re.compile(r"(?i)(://[^/\s:@'\"]+:)[^/\s@'\"]+(?=@)"),

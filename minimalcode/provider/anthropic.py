@@ -489,8 +489,17 @@ class AnthropicProtocolMixin:
                 if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
-                if not data or data == "[DONE]":
+                if not data:
                     continue
+                if data == "[DONE]":
+                    # Some Anthropic-compatible gateways end the stream with the
+                    # OpenAI sentinel instead of `message_stop`. Reading that as
+                    # a truncation reported a finished answer as incomplete and
+                    # threw away its tool calls. It only counts as a clean end
+                    # once the stop reason has actually been reported.
+                    if stop_reason is not None:
+                        saw_message_stop = True
+                    break
                 try:
                     event = json.loads(data)
                 except json.JSONDecodeError:

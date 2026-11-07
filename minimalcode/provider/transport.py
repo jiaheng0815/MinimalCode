@@ -76,6 +76,9 @@ class TransportMixin:
         # Letting httpx2 read a non-streaming body internally would bypass it.
         stream = True
         last_error: ProviderError | None = None
+        # Retries share the request's time budget: without it a 1s timeout could
+        # still spend ~55s in connection backoff before giving up.
+        deadline = time.monotonic() + self.timeout_seconds
         # Counts failures, not requests: the status retry below is charged outside
         # this budget, so one call issues at most httpclient.CONNECTION_ATTEMPTS + 1 requests.
         connection_failures = 0
@@ -94,7 +97,14 @@ class TransportMixin:
                     or not isinstance(exc, httpclient.RETRYABLE_CONNECTION_ERRORS)
                 ):
                     break
-                delay = httpclient.connection_backoff(connection_failures - 1)
+                delay = min(
+                    httpclient.connection_backoff(connection_failures - 1),
+                    deadline - time.monotonic(),
+                )
+                if delay <= 0:
+                    # The budget is spent; retrying now would exceed
+                    # `timeout_seconds` instead of reporting the failure.
+                    break
                 if self.notify is not None:
                     self.notify(
                         "[retry] provider did not respond; attempt "
@@ -102,6 +112,7 @@ class TransportMixin:
                         f"in {delay:g}s ({exc})"
                     )
                 time.sleep(delay)
+                continue
                 continue
             if 200 <= response.status_code < 300:
                 # The per-read timeout only bounds a single socket read; this
@@ -153,6 +164,10 @@ class TransportMixin:
                 delay = min(max(requested_delay, 0.2), 5.0)
             except ValueError:
                 delay = 1.0
+            if delay >= deadline - time.monotonic():
+                # Honouring Retry-After is not worth exceeding the caller's
+                # timeout; report the status instead of stalling.
+                break
             time.sleep(delay)
         if last_error is None:  # pragma: no cover - defensive
             raise ProviderError("provider request failed")

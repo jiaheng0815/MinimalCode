@@ -29,6 +29,9 @@ _GREP_RESULT_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):")
 # only filtered paths must be retried with a wider window. The cap keeps one
 # pathological search from scanning an unbounded number of lines.
 _MAX_GREP_SCAN_LINES = 20_000
+# `{a,b}{c,d}...` expands to 2**n patterns. A cap keeps a pathological glob
+# from turning `find`/`grep` into an hour-long loop.
+_MAX_GLOB_VARIANTS = 256
 
 
 class SearchToolsMixin:
@@ -75,7 +78,7 @@ class SearchToolsMixin:
                 "--max-columns-preview",
             ]
             if glob:
-                command.extend(["--glob", glob])
+                command.extend(["--glob", self._anchor_glob(glob, target)])
             # Exclusions must follow the positive glob: ripgrep uses the last
             # matching --glob, so this order stays exclusion-only.
             for ignored_glob in self._ignore_globs(target):
@@ -140,6 +143,30 @@ class SearchToolsMixin:
         if self.sandbox.policy.allow_sensitive_files:
             return ()
         return SENSITIVE_SEARCH_GLOBS
+
+    def _anchor_glob(self, glob_pattern: str, target: Path) -> str:
+        """Anchor a path-bearing glob the way ripgrep matches ``--glob``.
+
+        ripgrep compares a glob against the candidate path relative to its
+        working directory (absolute only outside it), so a glob from the
+        caller — which is relative to the *search root* — never matched when
+        the two differed. `src/*.py` searched from `.` silently returned no
+        files while the Python fallback found them. Globs without a separator
+        keep matching the file name at any depth.
+        """
+        if "/" not in glob_pattern:
+            return glob_pattern
+        negated = glob_pattern.startswith("!")
+        body = glob_pattern[1:] if negated else glob_pattern
+        if body.startswith("/") or (len(body) > 1 and body[1] == ":"):
+            return glob_pattern
+        try:
+            prefix = target.relative_to(self.cwd).as_posix()
+        except ValueError:
+            # A root outside the workspace has no cwd-relative form.
+            prefix = target.as_posix()
+        anchored = body if prefix in {"", "."} else f"{prefix.rstrip('/')}/{body}"
+        return f"!{anchored}" if negated else anchored
 
     def _allowed_result_path(self, raw: str) -> bool:
         """Return True when one search result may be shown for this workspace."""
@@ -334,6 +361,32 @@ class SearchToolsMixin:
     @lru_cache(maxsize=256)
     def _expand_braces(cls, glob_pattern: str) -> tuple[str, ...]:
         """Expand the simple ``{py,txt}`` alternation ripgrep accepts."""
+        if cls._brace_variants(glob_pattern) > _MAX_GLOB_VARIANTS:
+            # Matching the pattern literally beats an exponential expansion.
+            return (glob_pattern,)
+        return cls._expand_braces_uncapped(glob_pattern)
+
+    @staticmethod
+    def _brace_variants(glob_pattern: str) -> int:
+        """Count the alternatives the brace groups would expand to."""
+        count = 1
+        index = 0
+        while True:
+            start = glob_pattern.find("{", index)
+            if start < 0:
+                return count
+            end = glob_pattern.find("}", start + 1)
+            if end < 0:
+                return count
+            choices = len(glob_pattern[start + 1 : end].split(","))
+            if choices > 1:
+                count *= choices
+                if count > _MAX_GLOB_VARIANTS:
+                    return count
+            index = end + 1
+
+    @classmethod
+    def _expand_braces_uncapped(cls, glob_pattern: str) -> tuple[str, ...]:
         start = glob_pattern.find("{")
         if start < 0:
             return (glob_pattern,)
@@ -449,7 +502,7 @@ class SearchToolsMixin:
                 "--no-ignore",
                 "--no-follow",
                 "--glob",
-                pattern,
+                self._anchor_glob(pattern, target),
             ]
             for ignored_glob in self._ignore_globs(target):
                 command.extend(["--glob", ignored_glob])

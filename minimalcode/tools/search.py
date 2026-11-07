@@ -264,7 +264,14 @@ def run_bounded_command(
                 result.get("message") or result.get("stderr") or "search failed"
             )
             raise ToolError(detail)
-        lines = str(result.get("stdout") or "").splitlines()
+        # `str.splitlines()` also breaks on form feeds, U+2028, and a lone CR
+        # inside a matched line, so the tail of the line was dropped as if it
+        # were noise. Search output is newline-delimited.
+        lines = [
+            line.rstrip("\r")
+            for line in str(result.get("stdout") or "").split("\n")
+            if line
+        ]
         truncated = bool(result.get("truncated")) or len(lines) > limit
         stderr = str(result.get("stderr") or "").strip()
         return int(result.get("exit_code", 0) or 0), lines[:limit], truncated, stderr

@@ -328,7 +328,42 @@ class ToolTests(unittest.TestCase):
             "legacy.py", start_line=2, end_line=2, new_text="value = 2"
         )
         self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "success")
         self.assertIn("import os", target.read_text(encoding="utf-8"))
+
+    def test_write_keeps_a_utf8_bom(self) -> None:
+        target = self.workspace / "bom.txt"
+        target.write_bytes(b"\xef\xbb\xbfhello\n")
+        self.tools.write("bom.txt", "hello\n")
+        self.assertEqual(target.read_bytes(), b"\xef\xbb\xbfhello\n")
+
+    def test_a_validator_that_cannot_run_does_not_delete_the_file(self) -> None:
+        # A broken ruff config makes the checker exit without a diagnostic. That
+        # says nothing about the new content, but it was counted as one and the
+        # just-created file was rolled back (deleted).
+        def broken_ruff() -> list[str]:
+            return [sys.executable, "-c", "import sys; sys.exit(2)"]
+
+        with patch.object(self.tools, "_ruff_invocation", broken_ruff):
+            result = self.tools.write("fresh.py", "value = 1\n")
+        self.assertEqual(result["status"], "success")
+        self.assertTrue((self.workspace / "fresh.py").exists())
+        self.assertTrue(any("exit" in item for item in result["warnings"]))
+
+    def test_path_glob_finds_files_below_a_non_root_search_path(self) -> None:
+        (self.workspace / "sub" / "deep").mkdir(parents=True)
+        (self.workspace / "sub" / "deep" / "d.py").write_text("needle\n")
+        found = self.tools.find("deep/*.py", path="sub")
+        self.assertEqual(len(found["files"]), 1, found)
+        self.assertTrue(found["files"][0].endswith("d.py"))
+        matches = self.tools.grep("needle", path="sub", glob="deep/*.py")
+        self.assertEqual(len(matches["matches"]), 1, matches)
+
+    def test_grep_keeps_text_after_a_form_feed_in_a_line(self) -> None:
+        (self.workspace / "ff.txt").write_bytes(b"needle-before\x0cneedle-after\n")
+        result = self.tools.grep("needle", path=".")
+        self.assertEqual(len(result["matches"]), 1, result)
+        self.assertIn("needle-after", result["matches"][0])
 
     def test_ambiguous_edit_fails(self) -> None:
         self.tools.write("duplicate.txt", "same\nsame\n")

@@ -30,6 +30,44 @@ class ProviderTests(unittest.TestCase):
         finally:
             provider.close()
 
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            raise httpx2.ConnectError("no route to provider")
+
+        class Clock:
+            """A clock whose sleeps move time forward without waiting."""
+
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.now += seconds
+
+        clock = Clock()
+        provider = OpenAICompatibleProvider(
+            name="dead",
+            config={
+                "base_url": "https://provider.test/v1",
+                "api_key": "secret",
+                "timeout_seconds": 0.5,
+            },
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                patch("minimalcode.provider.transport.time", clock),
+                self.assertRaises(ProviderError),
+            ):
+                provider.stream_chat([{"role": "user", "content": "hi"}])
+        finally:
+            provider.close()
+        self.assertGreater(clock.now, 0.0, "a connection error should be retried")
+        self.assertLessEqual(clock.now, provider.timeout_seconds)
+
     def test_empty_assistant_reply_keeps_a_string_content(self) -> None:
         from minimalcode.provider import ProviderReply
 
