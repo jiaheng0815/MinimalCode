@@ -482,13 +482,10 @@ class AnthropicProtocolMixin:
             return state
 
         try:
-            for line in self._checked_lines(lines):
-                line = strip_sse_bom(line)
-                if not line or line.startswith((":", "event:")):
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
+            for data in self._sse_events(lines):
+                # The assembler strips a line-leading BOM; a payload that
+                # carries one after `data: ` is stripped here.
+                data = strip_sse_bom(data).strip()
                 if not data:
                     continue
                 if data == "[DONE]":

@@ -123,13 +123,10 @@ class ChatProtocolMixin:
         usage: dict[str, int] = {}
 
         try:
-            for line in self._checked_lines(lines):
-                line = strip_sse_bom(line)
-                if not line or line.startswith((":", "event:")):
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
+            for data in self._sse_events(lines):
+                # The assembler strips a line-leading BOM; a payload that
+                # carries one after `data: ` is stripped here.
+                data = strip_sse_bom(data).strip()
                 if not data:
                     continue
                 if data == "[DONE]":
@@ -188,27 +185,31 @@ class ChatProtocolMixin:
                             index = int(raw_call["index"])
                         except (KeyError, TypeError, ValueError):
                             # Some OpenAI-compatible servers omit `index`. A
-                            # fragment without one belongs to the call that is
-                            # already open; a new id starts the next call.
+                            # fragment belongs to the call whose id it repeats,
+                            # so two interleaved parallel calls must be matched
+                            # by id: opening a new entry per fragment left the
+                            # earlier call with half its arguments and dropped
+                            # the rest with the unnamed entry.
                             incoming_id = str(raw_call.get("id") or "")
-                            previous_id = (
-                                calls.get(last_call_index, {}).get("id", "")
-                                if last_call_index >= 0
-                                else ""
+                            matched = next(
+                                (
+                                    position
+                                    for position, state in calls.items()
+                                    if incoming_id and state["id"] == incoming_id
+                                ),
+                                None,
                             )
-                            if (
+                            if matched is not None:
+                                index = matched
+                            elif (
                                 last_call_index >= 0
-                                and incoming_id
-                                and previous_id
-                                and incoming_id != previous_id
+                                and not calls[last_call_index]["id"]
                             ):
-                                index = max(calls, default=-1) + 1
+                                # The first fragment of this call carried no id;
+                                # this one supplies it.
+                                index = last_call_index
                             else:
-                                index = (
-                                    last_call_index
-                                    if last_call_index >= 0
-                                    else max(calls, default=-1) + 1
-                                )
+                                index = max(calls, default=-1) + 1
                         else:
                             # A non-conforming server can reuse an index for a
                             # new call id. Treat that as a new call instead of
@@ -236,12 +237,19 @@ class ChatProtocolMixin:
                                 entry["name"] = str(function["name"])
                             arguments = function.get("arguments")
                             if isinstance(arguments, str):
+                                if entry.get("object_arguments"):
+                                    # The call was already completed as an
+                                    # object; appending a stray fragment would
+                                    # produce `{"a":1}{"a":1}`.
+                                    continue
                                 entry["arguments"] += arguments
-                            elif arguments is not None and not entry["arguments"]:
+                            elif arguments is not None:
                                 # A whole-object argument value is complete on
-                                # its own; do not replace a partial string that
-                                # earlier chunks already accumulated.
+                                # its own, so it replaces any partial string
+                                # earlier chunks accumulated: keeping the
+                                # fragment left invalid JSON behind.
                                 entry["arguments"] = tool_arguments(arguments)
+                                entry["object_arguments"] = True
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
                     saw_terminal = True

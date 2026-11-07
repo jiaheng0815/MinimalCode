@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.4.3.
+Applies to MinimalCode 1.5.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -155,6 +155,12 @@ directions and excluded from bulk searches; `.env.example` and similar templates
 remain readable. Search results are re-checked against the same policy, so a
 sensitive path cannot appear in `grep` / `find` output even when its spelling
 (such as an upper-case `.PEM` suffix) is not covered by the exclusion globs.
+Since 1.5.0 the same rule inspects a `shell` command string: an unquoted word
+that names a sensitive path (`type .env`, `cat ~/.ssh/id_rsa`) is refused, and a
+quoted inline command (`cmd /c "type .env"`, `pwsh -Command "Get-Content .env"`)
+is scanned in turn. Quoted data such as `git commit -m "document .env"` is not a
+path and stays allowed. Credential files are also recognized in their YAML/TOML
+spellings (`secrets.yaml`, `credentials.toml`), `.envrc`, and `.git/config`.
 
 `network_policy`, the command timeout/output caps, and the resource limits only
 apply while the execution layer is enabled:
@@ -178,7 +184,10 @@ apply while the execution layer is enabled:
   target host cannot be determined are refused. At least one host is required.
   `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
   `--socks5*`, `-x`) contribute their targets, so an allowed URL cannot be
-  redirected to another host, and a UNC path contributes its host.
+  redirected to another host, and a UNC path contributes its host. A backend that
+  isolates the network (`bwrap`, `firejail`, `sandbox-exec`, `docker`) removes it
+  under `allowlist` exactly as under `deny`, because a container cannot enforce a
+  host allowlist; only `allow` opens the network for those backends.
 - `allow`: no network restriction.
 
 Backends are probed at execution time, which only happens when the layer is
@@ -186,8 +195,9 @@ enabled. `auto` picks the first available of `bwrap`, `firejail`,
 `sandbox-exec`, then `local`; the default is `local`. Selecting a backend that is
 not installed refuses to run the command (it never silently downgrades). Path and
 sensitive-file policy is enforced in-process, so file tools stay usable even when
-the execution layer is off or a command backend is unavailable; only command
-execution is gated by the backend.
+directory and `--net=none` for `deny` and `allowlist`. `sandbox-exec` uses a
+profile that denies network traffic for both. `docker` runs `sh -lc` in the
+configured image with
 `bwrap` isolates namespaces and mounts the workspace/allowed roots read-write
 with the rest of the filesystem read-only. `firejail` adds a private temp
 directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies

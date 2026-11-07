@@ -1,23 +1,51 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.4.3. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.5.0. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, and 1.4.3 added no further breaking import changes
+1.4.0, 1.4.1, 1.4.2, 1.4.3, and 1.5.0 added no further breaking import changes
+(`minimalcode.httpclient` and `minimalcode.clipboard` are new modules, not
 renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
-## 1.0 compatibility promise
+No `__all__` name, CLI flag, configuration key, JSON output field, session
+format, or import path was removed in 1.5.0. `SandboxPolicy.isolates_network` is
+a new read-only property; it is additive, and the existing `network_policy`
+values keep their meaning for the agent-facing gate.
 
-Within the 1.x series (from 1.0.0 onward), the public names in each package's
-`__all__`, CLI flags, configuration keys, JSON output fields, and session file
-format remain compatible. Removals and behavior changes are recorded in
-`CHANGELOG.md`. Private helpers and module paths outside `__all__` may move in
-any release; import them from the module that defines them, as listed below.
+## What 1.5.0 changed
+
+Every change is a defect fix, and most make the sandbox stricter in a case that
+used to be silently wrong:
+
+- A `shell` command string is now checked against the sensitive-file policy. An
+  unquoted word naming `.env`, `~/.ssh/id_rsa`, `.git/config`, and the rest of
+  the list is refused before the command runs, in every sandbox mode, including
+  the default `sandbox.enabled: false` where `read` and `write` already refuse
+  the same paths. A quoted inline command (`cmd /c "type .env"`,
+  `pwsh -Command "Get-Content .env"`) is scanned recursively; quoted data
+  (`git commit -m "document .env"`) is left alone.
+- The sensitive-path list recognizes `.envrc`, `secrets.yaml`/`.yml`/`.toml`,
+  `credentials.yaml`/`.yml`/`.toml`, and `.git/config`. `secrets.py` and
+  `credentials.py` stay readable, and the search exclusion globs list the new
+  names individually so a source file is not hidden from `grep` either.
+- `network_policy: allowlist` now isolates the network on the namespace and
+  container backends (`bwrap` `/ `firejail` / `sandbox-exec` / `docker`) exactly
+  as `deny` does. Treating it as `allow` gave the backend process unrestricted
+  egress and left the string gate as the only control.
+- A `data:` payload split across several SSE lines is reassembled before
+  parsing, for the Chat, Responses, and Anthropic parsers. Streams that put one
+  complete payload per `data:` line with no blank separator keep working.
+- A Chat server that omits `index` and interleaves two tool calls now matches
+  each fragment by call id, so both calls keep their arguments; an object-form
+  `arguments` value replaces a partially received string instead of being
+  ignored.
+- Captured child output that is not valid UTF-8 is decoded with the active
+  Windows console/OEM code page (then the locale encoding) instead of being
+  turned into U+FFFD.
 
 ## What 1.4.3 changed
-
 No public `__all__` name, CLI flag, configuration key, JSON output field, session
 format, or import path changed; nothing was added or removed either. Every
 change is a defect fix, and the observable differences only appear in cases

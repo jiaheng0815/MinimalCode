@@ -3,11 +3,57 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import httpx2
 
 from ..errors import ProviderError
+
+
+def _is_json(text: str) -> bool:
+    """Return True when ``text`` is a complete JSON value."""
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
+def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:
+    """Yield one payload per SSE event, joining multi-line `data:` fields.
+
+    The event stream format allows a single event's payload to be split across
+    several `data:` lines. Parsing one line at a time made `json.loads` fail on
+    every fragment and dropped the event silently, so a gateway that wraps long
+    JSON produced an empty reply with no error at all.
+
+    Two framings are in the wild: a blank line terminates the event, and some
+    gateways simply put one complete payload on each `data:` line with no blank
+    separator. A buffer that already parses as complete JSON is therefore
+    yielded before the next line is appended.
+    """
+    buffer = ""
+    for raw in lines:
+        line = strip_sse_bom(raw).rstrip("\r\n")
+        if not line.strip():
+            if buffer:
+                yield buffer
+                buffer = ""
+            continue
+        if not line.startswith("data:"):
+            # `event:`, `id:`, `retry:`, and comments carry no JSON payload.
+            continue
+        payload = line[5:].removeprefix(" ")
+        if not payload:
+            continue
+        if buffer and _is_json(buffer):
+            yield buffer
+            buffer = ""
+        buffer = f"{buffer}\n{payload}" if buffer else payload
+    if buffer:
+        yield buffer
+
 
 _USAGE_KEYS = frozenset(
     {

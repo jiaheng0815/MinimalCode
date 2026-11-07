@@ -10,6 +10,7 @@ import httpx2
 
 from .. import httpclient
 from ..errors import ProviderError
+from .common import iter_sse_data
 
 # The policy itself lives in ``minimalcode.httpclient`` so the web and vision
 # clients cannot drift from the protocol client. ``time`` stays imported here
@@ -40,6 +41,10 @@ class TransportMixin:
                     f"({self.timeout_seconds:g}s)"
                 )
             yield line
+
+    def _sse_events(self, lines):
+        """Yield one payload per SSE event, joined across `data:` lines."""
+        yield from iter_sse_data(self._checked_lines(lines))
 
     def _read_body(self, response: httpx2.Response) -> bytes:
         """Read a response body under the same whole-request deadline.

@@ -24,6 +24,9 @@ SENSITIVE_DIRECTORY_NAMES = frozenset(
 SENSITIVE_FILE_NAMES = frozenset(
     {
         ".env",
+        # direnv exports real tokens from `.envrc`, one character away from the
+        # `.env` that is already blocked.
+        ".envrc",
         ".netrc",
         ".npmrc",
         ".pgpass",
@@ -44,6 +47,11 @@ SENSITIVE_FILE_NAMES = frozenset(
         "id_ed25519_sk",
     }
 )
+# Credential files are just as often YAML/TOML (`secrets.yaml`,
+# `credentials.toml`); matching only the bare and `.json` spellings left the
+# most common compose/Ansible layout readable.
+SENSITIVE_FILE_STEMS = ("credentials", "secrets")
+SENSITIVE_STEM_SUFFIXES = (".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".env")
 SENSITIVE_KEY_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
 SENSITIVE_SUFFIXES = (
     ".pem",
@@ -56,6 +64,9 @@ SENSITIVE_SUFFIXES = (
     ".p8",
     ".kdbx",
 )
+# `.git/config` often carries a remote URL with an embedded token, while the
+# rest of `.git/` (HEAD, refs) is harmless and useful to read.
+SENSITIVE_PATH_SUFFIXES = ((".git", "config"),)
 SAFE_ENV_TEMPLATES = frozenset(
     {".env.example", ".env.sample", ".env.template", ".env.dist"}
 )
@@ -68,6 +79,7 @@ SAFE_ENV_TEMPLATES = frozenset(
 SENSITIVE_SEARCH_GLOBS: tuple[str, ...] = (
     "!**/.env",
     "!**/.env-*",
+    "!**/.envrc",
     "!**/.netrc",
     "!**/.npmrc",
     "!**/.pgpass",
@@ -79,8 +91,17 @@ SENSITIVE_SEARCH_GLOBS: tuple[str, ...] = (
     "!**/.yarnrc.yml",
     "!**/credentials",
     "!**/credentials.json",
+    # Listed individually: `credentials.*` would also hide `credentials.py`,
+    # which `is_sensitive_path` allows and `read` can still open.
+    "!**/credentials.yaml",
+    "!**/credentials.yml",
+    "!**/credentials.toml",
     "!**/secrets",
     "!**/secrets.json",
+    "!**/secrets.yaml",
+    "!**/secrets.yml",
+    "!**/secrets.toml",
+    "!**/.git/config",
     "!**/id_rsa*",
     "!**/id_dsa*",
     "!**/id_ecdsa*",
@@ -102,7 +123,95 @@ SENSITIVE_SEARCH_GLOBS: tuple[str, ...] = (
     "!**/.minimalcode/**",
     "!**/.docker/**",
     "!**/.password-store/**",
+    "!**/.password-store/**",
 )
+# Word separators and quote handling for `sensitive_command_paths`. The shell
+# gate only sees a string, so it needs its own minimal scanner.
+_COMMAND_WORD_BREAK = frozenset(" \t\r\n|;&(){}<>`")
+_COMMAND_QUOTES = frozenset("'\"")
+_COMMAND_WORD_TRIM = "=,:;|&" + "\"'`"
+# A quoted word after one of these is a command, not data: `cmd /c "type .env"`
+# and `pwsh -Command "Get-Content .env"` must be inspected like a bare command.
+_INLINE_FLAGS = frozenset(
+    {
+        "-c",
+        "/c",
+        "/k",
+        "-command",
+        "--command",
+        "-commandwithargs",
+        "-lc",
+        "-ic",
+    }
+)
+_MAX_INLINE_DEPTH = 3
+
+
+def _looks_sensitive_token(token: str) -> bool:
+    """Return True when one shell word names a sensitive path."""
+    candidate = token.split("=", 1)[-1] if "=" in token else token
+    candidate = candidate.strip(_COMMAND_WORD_TRIM)
+    if not candidate or candidate.startswith("-"):
+        return False
+    try:
+        return is_sensitive_path(Path(candidate).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _command_words(command: str) -> list[tuple[str, bool]]:
+    """Split a command line into ``(word, quoted)`` pairs."""
+    words: list[tuple[str, bool]] = []
+    word: list[str] = []
+    quote = ""
+    quoted = False
+    for char in command:
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                word.append(char)
+            continue
+        if char in _COMMAND_QUOTES:
+            quote = char
+            quoted = True
+            continue
+        if char in _COMMAND_WORD_BREAK:
+            if word:
+                words.append(("".join(word), quoted))
+            word = []
+            quoted = False
+            continue
+        word.append(char)
+    if word:
+        words.append(("".join(word), quoted))
+    return words
+
+
+def sensitive_command_paths(command: str, depth: int = 0) -> tuple[str, ...]:
+    """Return words in a shell command that name a sensitive path.
+
+    `read` and `write` refuse `.env` / `~/.ssh/id_rsa`, but the shell only took
+    a command string, so `type .env` and `cat ~/.ssh/id_rsa` returned the same
+    credentials the tools refuse. A word inside quotes is usually data
+    (`git commit -m "document .env"`), except when it is the command handed to
+    `sh -c` / `cmd /c` / `pwsh -Command`, which is scanned in turn.
+    """
+    words = _command_words(command)
+    hits: list[str] = []
+    previous = ""
+    for token, quoted in words:
+        if quoted:
+            if previous.lower() in _INLINE_FLAGS and depth < _MAX_INLINE_DEPTH:
+                for hit in sensitive_command_paths(token, depth + 1):
+                    if hit not in hits:
+                        hits.append(hit)
+            previous = token
+            continue
+        if _looks_sensitive_token(token) and token not in hits:
+            hits.append(token)
+        previous = token
+    return tuple(hits)
 
 
 def _normalized_parts(path: Path) -> list[str]:
@@ -139,5 +248,12 @@ def is_sensitive_path(path: Path) -> bool:
     if name.startswith((".env.", ".env-")):
         return True
     if name.startswith(SENSITIVE_KEY_PREFIXES) and not name.endswith(".pub"):
+        return True
+    for stem in SENSITIVE_FILE_STEMS:
+        if name == stem or (
+            name.startswith(stem + ".") and name.endswith(SENSITIVE_STEM_SUFFIXES)
+        ):
+            return True
+    if tuple(parts[-2:]) in SENSITIVE_PATH_SUFFIXES:
         return True
     return any(name.endswith(suffix) for suffix in SENSITIVE_SUFFIXES)

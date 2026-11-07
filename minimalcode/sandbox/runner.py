@@ -20,7 +20,22 @@ from .backends import (
 )
 from .execution import _child_env, _execute, _resource_limiter
 from .policy import SandboxPolicy
-from .sensitive import is_sensitive_path
+from .sensitive import is_sensitive_path, sensitive_command_paths
+
+
+def _sensitive_command_denial(command: str) -> str | None:
+    """Return a denial message for credentials a shell command names.
+
+    `read` and `write` already refuse `.env` / `~/.ssh/id_rsa`; without this the
+    same file came back through `type .env` or `cat ~/.ssh/id_rsa`.
+    """
+    hits = sensitive_command_paths(command)
+    if not hits:
+        return None
+    return (
+        f"sensitive path is blocked by sandbox policy: {', '.join(hits)} "
+        "(set sandbox.allow_sensitive_files=true to allow)"
+    )
 
 
 class SandboxRunner:
@@ -208,6 +223,19 @@ class SandboxRunner:
         except (TypeError, ValueError, OverflowError):
             requested_output = 1
         requested_output = max(1, requested_output)
+        requested_output = max(1, requested_output)
+
+        # The sensitive-file rule is a path policy, not an execution setting: it
+        # stays in force when the sandbox is disabled, exactly like `read` and
+        # `write`. Only shell strings are inspected; internal argv searches
+        # filter their own results through `is_allowed`.
+        if command is not None and not self.policy.allow_sensitive_files:
+            sensitive_reason = _sensitive_command_denial(command)
+            if sensitive_reason is not None:
+                self.audit.deny("shell", command, sensitive_reason)
+                return self._denied_result(
+                    shell_label=shell_label, message=sensitive_reason
+                )
 
         # With execution isolation disabled, still run through the same bounded
         # executor so timeouts and output caps behave consistently.

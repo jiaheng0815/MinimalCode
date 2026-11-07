@@ -1000,6 +1000,127 @@ class ProviderTests(unittest.TestCase):
             [("call_1", "read", '{"path":"a.py"}')],
         )
 
+    def test_parallel_tool_calls_without_index_keep_their_arguments(self) -> None:
+        # A server that omits `index` and interleaves two calls used to open a
+        # third, unnamed entry for the resumed fragment: the first call kept
+        # half its arguments and the rest were dropped with the unnamed one.
+        def chunk(calls, finish=None):
+            choice = {"delta": {"tool_calls": calls} if calls else {}}
+            if finish:
+                choice["finish_reason"] = finish
+            return {"choices": [choice]}
+
+        events = [
+            chunk(
+                [{"id": "call_a", "function": {"name": "read", "arguments": '{"pa'}}]
+            ),
+            chunk(
+                [{"id": "call_b", "function": {"name": "grep", "arguments": '{"pat'}}]
+            ),
+            chunk([{"id": "call_a", "function": {"arguments": 'th": "a.md"}'}}]),
+            chunk([{"id": "call_b", "function": {"arguments": 'tern": "x"}'}}]),
+            chunk([], finish="tool_calls"),
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+        provider = OpenAICompatibleProvider(
+            name="chat",
+            config={
+                "base_url": "https://provider.test/v1",
+                "stream": True,
+            },
+            model="model-c",
+            thinking="none",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body,
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+        self.assertEqual(
+            [(call.name, call.arguments) for call in reply.tool_calls],
+            [("read", '{"path": "a.md"}'), ("grep", '{"pattern": "x"}')],
+        )
+
+    def test_object_arguments_replace_a_partial_string(self) -> None:
+        # Re-sending the completed arguments as an object used to be ignored
+        # while a string fragment was already buffered, leaving invalid JSON.
+        def chunk(calls, finish=None):
+            choice = {"delta": {"tool_calls": calls} if calls else {}}
+            if finish:
+                choice["finish_reason"] = finish
+            return {"choices": [choice]}
+
+        events = [
+            chunk(
+                [
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "function": {"name": "read", "arguments": '{"pa'},
+                    }
+                ]
+            ),
+            chunk([{"index": 0, "function": {"arguments": {"path": "a.md"}}}]),
+            chunk([], finish="tool_calls"),
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+
+        provider = OpenAICompatibleProvider(
+            name="chat",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-c",
+            thinking="none",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body,
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+        self.assertEqual(
+            [call.arguments for call in reply.tool_calls], ['{"path":"a.md"}']
+        )
+
+    def test_sse_event_split_across_data_lines_is_not_dropped(self) -> None:
+        # The event stream format allows one event's JSON on several `data:`
+        # lines; parsing each line alone dropped the event silently.
+        event = {"choices": [{"delta": {"content": "hello"}, "finish_reason": "stop"}]}
+        rendered = json.dumps(event)
+        split = len(rendered) // 2
+        body = f"data: {rendered[:split]}\ndata: {rendered[split:]}\n\n"
+
+        provider = OpenAICompatibleProvider(
+            name="chat",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-c",
+            thinking="none",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body,
+                )
+            ),
+        )
+        try:
+            reply = provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+        self.assertEqual(reply.content, "hello")
+        self.assertEqual(reply.finish_reason, "stop")
+
     def test_endpoint_keeps_a_configured_query_string(self) -> None:
         provider = OpenAICompatibleProvider(
             name="azure",

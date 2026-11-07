@@ -218,6 +218,18 @@ class SandboxPolicy:
             roots.append(resolved_cwd)
         return tuple(roots)
 
+    @property
+    def isolates_network(self) -> bool:
+        """Return True when a backend must remove network access entirely.
+
+        ``allowlist`` isolates exactly like ``deny``. A container or network
+        namespace cannot enforce a host allowlist, so treating it as ``allow``
+        handed the backend's process unrestricted egress and left only the
+        string gate -- best-effort by design -- as the control. The host check
+        stays in `network_denial`; only ``allow`` opens the network.
+        """
+        return self.network_policy != "allow"
+
     def network_denial(self, command: str) -> str | None:
         """Return a denial reason, or None when the command may run."""
         if not self.enabled or self.network_policy == "allow":

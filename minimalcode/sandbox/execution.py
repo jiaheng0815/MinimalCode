@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import locale
 import math
 import os
 import signal
@@ -15,6 +17,29 @@ from pathlib import Path
 from typing import IO, Any
 
 from .policy import SandboxPolicy
+
+
+def _fallback_encodings() -> tuple[str, ...]:
+    """Return the code pages a child may have written instead of UTF-8.
+
+    Children are started with a UTF-8 environment, but a Windows console tool
+    that ignores it (cmd builtins, `type`, localized CLIs) still writes the
+    active ANSI or OEM code page.
+    """
+    encodings: list[str] = []
+    if os.name == "nt":
+        # `type` and cmd builtins write the console output code page.
+        for getter in ("GetConsoleOutputCP", "GetOEMCP"):
+            try:
+                code_page = int(getattr(ctypes.windll.kernel32, getter)())
+            except (AttributeError, OSError, ValueError):
+                continue
+            if code_page:
+                encodings.append(f"cp{code_page}")
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        encodings.append(preferred)
+    return tuple(dict.fromkeys(encodings))
 
 
 def truncate_text(text: str, limit: int) -> tuple[str, bool]:
@@ -184,11 +209,26 @@ def _terminate_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def _decode_output(data: bytes | str | None) -> str:
-    """Decode captured output defensively."""
+    """Decode captured output defensively.
+
+    UTF-8 is tried strictly first, so well-behaved output is untouched. Only
+    bytes that are not UTF-8 fall back to the local code page: a Windows
+    console tool that ignores `PYTHONIOENCODING` writes cp936/cp1252, and
+    decoding that as UTF-8 turned every non-ASCII character into U+FFFD.
+    """
     if data is None:
         return ""
     if isinstance(data, str):
         return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for encoding in _fallback_encodings():
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
     return data.decode("utf-8", errors="replace")
 
 

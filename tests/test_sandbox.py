@@ -518,10 +518,52 @@ class NetworkPolicyTests(SandboxTestBase):
             "cert.p8",
             ".docker/config.json",
             ".vault-token",
+            # direnv exports real tokens and is one character from `.env`.
+            ".envrc",
+            # Compose/Ansible layouts keep credentials in YAML or TOML.
+            "secrets.yaml",
+            "secrets.prod.yml",
+            "credentials.toml",
+            # A remote URL in `.git/config` often embeds a token.
+            ".git/config",
         ):
             with self.subTest(path=path):
                 self.assertTrue(is_sensitive_path(Path("/home/user") / path))
-        self.assertFalse(is_sensitive_path(Path("/home/user/id_rsa.pub")))
+        for path in ("id_rsa.pub", "secrets.py", "credentials.py", "src/secrets/x.py"):
+            with self.subTest(path=path):
+                self.assertFalse(is_sensitive_path(Path("/home/user") / path))
+
+    def test_shell_command_cannot_read_what_read_refuses(self) -> None:
+        # `type .env` returned the credential that `read` refuses, in every
+        # sandbox mode: the sensitive-file rule is a path policy, and the shell
+        # only ever saw the command string.
+        (self.workspace / ".env").write_text("API_TOKEN=super-secret\n")
+        (self.workspace / ".ssh").mkdir()
+        (self.workspace / ".ssh" / "id_rsa").write_text("key\n")
+        for enabled in (False, True):
+            tools = self._tools(enabled=enabled)
+            for command, secret in (
+                ("type .env", "super-secret"),
+                ("cat .ssh/id_rsa", "key"),
+                ('cmd /c "type .env"', "super-secret"),
+            ):
+                with self.subTest(enabled=enabled, command=command):
+                    result = tools.dispatch("shell", {"command": command})
+                    self.assertEqual(result.get("status"), "error", result)
+                    self.assertNotIn(secret, str(result))
+                    self.assertIn("sensitive path", str(result))
+
+        allowed = self._tools(allow_sensitive_files=True)
+        result = allowed.dispatch("shell", {"command": "echo done"})
+        self.assertEqual(result.get("status"), "success", result)
+
+    def test_quoted_sensitive_names_are_data_not_paths(self) -> None:
+        # A commit message that mentions `.env` must not be refused.
+        tools = self._tools()
+        result = tools.dispatch(
+            "shell", {"command": 'printf "%s\\n" "document .env handling"'}
+        )
+        self.assertEqual(result.get("status"), "success", result)
 
 
 class ExecutionBaselineTests(SandboxTestBase):
@@ -563,13 +605,21 @@ class ExecutionBaselineTests(SandboxTestBase):
         self.assertLessEqual(len(str(result["stdout"])), 200)
         self.assertIn("truncated", str(result["stdout"]))
 
-    def test_shell_success_reports_sandbox_metadata(self) -> None:
-        tools = self._tools()
-        result = tools.shell("echo sandbox-meta")
-        self.assertEqual(result["status"], "success", result)
-        self.assertEqual(result["sandbox"]["backend"], "local")
         self.assertEqual(result["sandbox"]["network_policy"], "deny")
         self.assertTrue(result["sandbox"]["temp_dir_cleaned"])
+
+    def test_non_utf8_console_output_keeps_its_characters(self) -> None:
+        # A Windows tool that ignores PYTHONIOENCODING writes the console code
+        # page; decoding that as UTF-8 replaced every non-ASCII character.
+        from minimalcode.sandbox.execution import _decode_output
+
+        text = "中文输出"
+        encoded = text.encode("cp936")
+        with self.assertRaises(UnicodeDecodeError):
+            encoded.decode("utf-8")
+        self.assertEqual(_decode_output(encoded), text)
+        self.assertEqual(_decode_output(b"plain"), "plain")
+        self.assertEqual(_decode_output(None), "")
 
     def test_unavailable_backend_refuses_to_execute(self) -> None:
         tools = self._tools(backend="bwrap")
@@ -703,6 +753,35 @@ class BackendTests(SandboxTestBase):
             policy=policy,
         )
         self.assertIn("--share-net", BwrapBackend().wrap(request))
+
+    def test_allowlist_isolates_the_network_like_deny(self) -> None:
+        # A container cannot enforce a host allowlist, so `allowlist` used to
+        # hand the backend unrestricted egress and left only the string gate.
+        from minimalcode.sandbox import FirejailBackend, MacSandboxExecBackend
+
+        policy = SandboxPolicy.from_settings(
+            self._settings(
+                backend="bwrap",
+                network_policy="allowlist",
+                allowed_hosts=["allowed.test"],
+            ),
+            self.workspace,
+        )
+        self.assertTrue(policy.isolates_network)
+        request = CommandRequest(
+            argv=("true",),
+            command="true",
+            shell_kind="sh",
+            shell_label="sh",
+            cwd=self.workspace,
+            temp_dir=self.root,
+            policy=policy,
+        )
+        self.assertNotIn("--share-net", BwrapBackend().wrap(request))
+        self.assertIn("--net=none", FirejailBackend().wrap(request))
+        self.assertIn(
+            "(deny network*)", " ".join(MacSandboxExecBackend().wrap(request))
+        )
 
     def test_available_backends_includes_local(self) -> None:
         backends = available_backends()

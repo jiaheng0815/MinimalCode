@@ -110,7 +110,7 @@ class BwrapBackend(SandboxBackend):
             "--proc",
             "/proc",
         ]
-        if request.policy.network_policy != "deny":
+        if not request.policy.isolates_network:
             argv.append("--share-net")
         for root in request.policy.write_roots(request.cwd):
             argv.extend(["--bind", str(root), str(root)])
@@ -137,7 +137,7 @@ class FirejailBackend(SandboxBackend):
             "--nosound",
             "--no3d",
         ]
-        if request.policy.network_policy == "deny":
+        if request.policy.isolates_network:
             argv.append("--net=none")
         argv.extend(["--", *request.argv])
         return argv
@@ -158,7 +158,7 @@ class MacSandboxExecBackend(SandboxBackend):
 
     def wrap(self, request: CommandRequest) -> list[str]:
         profile = "(version 1)\n(allow default)\n"
-        if request.policy.network_policy == "deny":
+        if request.policy.isolates_network:
             profile += "(deny network*)\n"
         return [
             shutil.which("sandbox-exec") or "sandbox-exec",
@@ -223,7 +223,7 @@ class DockerBackend(SandboxBackend):
         image = request.policy.docker_image
         if not image:
             raise SandboxUnavailable("sandbox.docker_image must not be empty")
-        network = "none" if request.policy.network_policy == "deny" else "bridge"
+        network = "none" if request.policy.isolates_network else "bridge"
         argv = [
             shutil.which("docker") or "docker",
             "run",

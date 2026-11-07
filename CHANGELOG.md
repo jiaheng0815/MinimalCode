@@ -1,5 +1,32 @@
 # 更新日志
 
+# 更新日志
+
+## 1.5.0 - 2026-11-07
+
+### 修复
+
+- 沙箱：`shell` 命令读到了 `read` 拒绝的凭据。敏感文件规则一直只作用于文件工具，`run_argv` 从不检查命令里出现的路径，因此 `type .env`、`cat ~/.ssh/id_rsa` 在任何后端下都返回明文，审计里只留下工具侧的一条拒绝；默认配置 `sandbox.enabled: false` 同样如此。现在命令串里未加引号的敏感路径会被拒绝并记入审计，`cmd /c "type .env"`、`pwsh -Command "Get-Content .env"` 的内联命令会递归扫描，而 `git commit -m "document .env"` 这类引号内的数据不受影响。
+- 沙箱敏感名单漏判：`.envrc`（direnv 惯例导出真实 token，与已拦截的 `.env` 只差一个字符）、`secrets.yaml` / `secrets.yml` / `secrets.toml`、`credentials.yaml` / `.yml` / `.toml`、`.git/config`（remote URL 常带 token）此前全部放行，`read` 与 `grep` 都能拿到。现在这些名字被拦截，搜索排除 glob 也逐条补上（`credentials.*` 会连带隐藏 `credentials.py`，所以按扩展名逐条列出）；`secrets.py`、`credentials.py` 仍然可读。
+- 沙箱：容器/命名空间后端的 `allowlist` 实际等同 `allow`。`bwrap` 加 `--share-net`、docker 用 `--network bridge`、firejail 不加 `--net=none`、`sandbox-exec` profile 不加 `(deny network*)`，于是 `allowlist` 下后端进程完全放行出口，唯一控制只剩可被绕过的字符串门禁。现在只有 `allow` 放开网络；`allowlist` 与 `deny` 一样隔离网络，主机比对仍在命令门禁里完成（新增 `SandboxPolicy.isolates_network` 只读属性表达这一点）。
+- 供应商：SSE 事件被拆成多行 `data:` 时整条丢弃。规范允许一个事件的 JSON 跨多个 `data:` 字段，逐行 `json.loads` 全部失败后 `continue`，内容不进 `content`：Chat 返回空回答且 `finish_reason='stop'`，Anthropic 直接抛 `provider returned an empty stream`。现在 Chat / Responses / Anthropic 三处共用 `iter_sse_data` 先按空行组装事件再解析，同时兼容“每条 `data:` 就是一条完整事件、没有空行分隔”的网关（这类流在缓冲已能解析为完整 JSON 时立即产出）。
+- 供应商：Chat 服务器省略 `index` 时并行工具调用串包。两个调用交错到达且每个片段都带 `id` 时，后一个调用的参数续片会被当成第 3 个调用、随后因没有名字被丢弃，第一个调用只剩半截 JSON；现在没有 `index` 的片段先按 `id` 反查已有调用，首个片段缺 `id` 时由后续片段补上。
+- 供应商：`arguments` 以对象形式到达时被丢弃。第 240 行的 `and not entry["arguments"]` 让完整对象在已有字符串片段时被忽略，最终留下 `{"path":` 这样的无效 JSON；对象形式现在是完整值，直接覆盖片段，并把该调用标记为已完成，避免后续杂散片段再拼接。
+- 沙箱：Windows 控制台输出解码成 U+FFFD。`_decode_output` 一律 `utf-8, errors="replace"`，而 `_child_env` 只给 Python 子进程设了 `PYTHONIOENCODING`；`cmd` 内建命令、`type`、本地化工具写出的 cp936 / cp1252 字节全部损坏且不可恢复。现在先严格按 UTF-8 解码，失败后再依次尝试当前控制台输出代码页、OEM 代码页与 locale 编码。
+
+### 变更
+
+- 版本号升级到 1.5.0。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema；`SandboxPolicy.isolates_network` 是新增的只读属性。
+- 可观察的行为变化（均为收紧或纠错）：`shell` 命令里的敏感路径被拒绝（`sandbox.allow_sensitive_files=true` 可放行）；`.envrc`、`secrets.yaml`、`credentials.toml`、`.git/config` 等被拦截；容器后端在 `allowlist` 下不再放行网络；跨行 `data:` 事件不再丢失；省略 `index` 的并行调用保留各自参数；非 UTF-8 的控制台输出按本地代码页解码。
+
+### 文档
+
+- `README.md` 更新当前版本与 1.4.3 → 1.5.0 升级说明；`docs/configuration.md` 补充 `shell` 命令的敏感路径检查、扩充后的敏感名单与 `allowlist` 的后端网络隔离语义；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.5.0 的兼容说明。
+
+### 测试
+
+- 新增回归测试：`type .env` / `cat .ssh/id_rsa` / `cmd /c "type .env"` 在开启与关闭沙箱两种模式下的拒绝、引号内 `.env` 不被误拒、`.envrc` 与 YAML/TOML 凭据文件与 `.git/config` 的判定（并保证 `secrets.py` 不被误判）、`allowlist` 在三种后端下隔离网络、跨行 `data:` 事件、省略 `index` 的交错并行调用、对象形式 `arguments` 覆盖片段、cp936 字节与普通 UTF-8 的解码。
+
 ## 1.4.3 - 2026-11-07
 
 ### 修复

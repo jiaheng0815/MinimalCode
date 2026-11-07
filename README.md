@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.4.3`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.5.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
@@ -42,6 +42,20 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
 
 ## 升级指南
+
+## 升级指南
+
+### 从 1.4.3 升级到 1.5.0
+
+1.5.0 没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，升级不需要改代码；`SandboxPolicy` 多了一个只读属性 `isolates_network`。这一版把此前几处“工具拦截、shell 放行”的口子堵上，其中一些会改变日常命令的结果：
+
+- `shell` 命令现在也受敏感文件策略约束。未加引号的 `.env`、`~/.ssh/id_rsa`、`.git/config` 等路径会被拒绝并记入审计，`cmd /c "type .env"` 这类引号内的内联命令同样会被扫描。这条规则在沙箱关闭（包括默认配置）时仍然生效，因为 `read` / `write` 本来就拒绝这些路径；需要放行时设 `sandbox.allow_sensitive_files: true`。`git commit -m "document .env"` 这种引号内的文字不会被误判。
+- 敏感名单新增 `.envrc`、`secrets.yaml` / `.yml` / `.toml`、`credentials.yaml` / `.yml` / `.toml` 与 `.git/config`，`grep` / `find` 也不再返回它们。`secrets.py`、`credentials.py` 仍可读写。
+- 使用 `bwrap` / `firejail` / `sandbox-exec` / `docker` 后端时，`allowlist` 现在与 `deny` 一样隔离网络：容器无法执行主机白名单，此前它把后端进程整个放行，只剩字符串门禁。需要在容器里联网就改用 `allow`。
+- 解析器会先按空行组装多行 `data:` 事件再解析，跨行长 JSON 不再被丢弃；省略 `index` 的并行工具调用按 `id` 归位，不再串包；`arguments` 以对象形式到达时覆盖已收到的片段。
+- 非 UTF-8 的 Windows 控制台输出按当前控制台/OEM 代码页解码，不再整段变成 `�`。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.4.2 升级到 1.4.3
 
