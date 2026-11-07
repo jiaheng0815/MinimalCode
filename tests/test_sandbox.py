@@ -617,9 +617,18 @@ class ExecutionBaselineTests(SandboxTestBase):
         encoded = text.encode("cp936")
         with self.assertRaises(UnicodeDecodeError):
             encoded.decode("utf-8")
-        self.assertEqual(_decode_output(encoded), text)
-        self.assertEqual(_decode_output(b"plain"), "plain")
-        self.assertEqual(_decode_output(None), "")
+        # Which code page is tried is a platform detail (a Linux host has no
+        # cp936 to fall back to), so the chain itself is pinned here.
+        with patch(
+            "minimalcode.sandbox.execution._fallback_encodings",
+            return_value=("cp936",),
+        ):
+            self.assertEqual(_decode_output(encoded), text)
+            self.assertEqual(_decode_output("中文".encode()), "中文")
+            self.assertEqual(_decode_output(b"plain"), "plain")
+            self.assertEqual(_decode_output(None), "")
+            # Undecodable bytes still produce text rather than an exception.
+            self.assertEqual(_decode_output(b"ok\xff\xfe"), "ok��")
 
     def test_unavailable_backend_refuses_to_execute(self) -> None:
         tools = self._tools(backend="bwrap")
