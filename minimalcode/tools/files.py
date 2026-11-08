@@ -264,6 +264,9 @@ def _range_hint(lines: list[str], start: int, end: int) -> str:
         return "the file is empty; write or append content instead"
     nearest_start = min(max(1, start), total)
     nearest_end = min(max(nearest_start, end), total)
+    # The preview is a hint, not a dump: `end_line=1000000` on a 200k-line file
+    # used to paste the whole file into the tool error and the next request.
+    shown_end = min(nearest_end, nearest_start + _MAX_DIAGNOSTIC_DIFF_LINES - 1)
 
     def visible(line: str) -> str:
         line = line.rstrip("\r\n")
@@ -273,10 +276,12 @@ def _range_hint(lines: list[str], start: int, end: int) -> str:
 
     preview = "".join(
         f"{number:>6}\t{visible(lines[number - 1])}\n"
-        for number in range(nearest_start, nearest_end + 1)
+        for number in range(nearest_start, shown_end + 1)
     )
     if preview and not preview.endswith(("\n", "\r")):
         preview += "\n"
+    if shown_end < nearest_end:
+        preview += f"... (lines {shown_end + 1}-{nearest_end} omitted) ...\n"
     return f"closest available range is lines {nearest_start}-{nearest_end}:\n{preview}"
 
 
@@ -770,6 +775,11 @@ class FileToolsMixin:
         except OSError as exc:
             raise ToolError(f"cannot create parent directory: {exc}") from exc
         existed = target.exists()
+        if existed and target.stat().st_size > self.max_file_bytes:
+            # `edit` and `append_file` refuse an oversized file; reading it to
+            # mirror the old bytes for validation rollback turned a legitimate
+            # truncate into a MemoryError that killed the process.
+            raise ToolError("file is too large for write")
         original_bytes = target.read_bytes() if existed else None
         newline = (
             _detect_newline_bytes(original_bytes)

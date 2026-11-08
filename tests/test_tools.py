@@ -1001,3 +1001,58 @@ class ToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolLimits151Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.home = self.root / ".MinimalCode"
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.settings = load_settings(self.home)
+        self.tools = ToolRuntime(self.settings, self.workspace, detect_shell())
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_out_of_range_edit_hint_is_bounded(self) -> None:
+        # A 1,000,000-line request used to paste the whole file into the tool
+        # error, which then went into the next provider request.
+        lines = "".join(f"line-{number}\n" for number in range(1, 400))
+        (self.workspace / "big.txt").write_text(lines, encoding="utf-8")
+        with self.assertRaises(ToolError) as caught:
+            self.tools.edit("big.txt", start_line=1, end_line=10_000_000, new_text="x")
+        message = str(caught.exception)
+        self.assertIn("closest available range", message)
+        self.assertIn("omitted", message)
+        self.assertLess(len(message.splitlines()), 60)
+        # The file was not modified by the refused edit.
+        self.assertEqual(
+            (self.workspace / "big.txt").read_text(encoding="utf-8"), lines
+        )
+
+    def test_write_refuses_an_oversized_existing_file(self) -> None:
+        self.settings.data["tools"]["max_file_bytes"] = 32
+        small = ToolRuntime(self.settings, self.workspace, detect_shell())
+        (self.workspace / "large.txt").write_text("x" * 64, encoding="utf-8")
+        with self.assertRaisesRegex(ToolError, "too large for write"):
+            small.write("large.txt", "small")
+        self.assertEqual(len((self.workspace / "large.txt").read_text("utf-8")), 64)
+
+    def test_single_file_grep_honours_the_glob_in_both_engines(self) -> None:
+        (self.workspace / "notes.txt").write_text("needle\n", encoding="utf-8")
+        self.assertEqual(
+            self.tools.grep("needle", path="notes.txt", glob="*.py")["matches"], []
+        )
+        self.assertEqual(
+            len(self.tools.grep("needle", path="notes.txt", glob="*.txt")["matches"]),
+            1,
+        )
+
+    def test_subagent_timeout_report_matches_the_shell_ceiling(self) -> None:
+        from minimalcode.shell import MAX_TIMEOUT_SECONDS
+        from minimalcode.tools.process import _clamp_timeout
+
+        self.assertEqual(_clamp_timeout(7200), MAX_TIMEOUT_SECONDS)
+        self.assertEqual(_clamp_timeout(5), 5)

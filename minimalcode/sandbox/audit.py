@@ -24,9 +24,13 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
     re.compile(
         # The value may be attached (`-uadmin:pw`), `=`-joined
-        # (`--user=admin:pw`), or a separate argument.
+        # (`--user=admin:pw`), quoted (`-b "session=abc"`), or a separate
+        # argument. The quoted branch matters: `[^\s'\"]` could never match a
+        # value that starts with a quote, so the credential was recorded in
+        # plaintext.
         r"(?i)(\s(?:-u|--user|--password|-b|--cookie|-H|--header)"
-        r"(?:\s+|=\s*|(?=[^-])))[^\s'\"]+"
+        r"(?:\s+|=\s*|(?=[^-])))"
+        r"(?:['\"][^'\"]*['\"]|[^\s'\"]+)"
     ),
     # `mysql -phunter2` only attaches its password; a bare `-p` flag such as
     # `docker run -p 8080:80` must keep its argument readable.

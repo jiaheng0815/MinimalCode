@@ -1352,3 +1352,61 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdioEncodingTests(unittest.TestCase):
+    def test_stdio_is_pinned_to_utf8_for_pipes(self) -> None:
+        # A Windows pipe defaults to the ANSI code page, which mangled every
+        # non-ASCII task piped into `-p` and every answer piped out.
+        recorded: list[dict[str, str]] = []
+
+        class Stream:
+            def reconfigure(self, **kwargs: str) -> None:
+                recorded.append(kwargs)
+
+        from minimalcode.cli import _configure_stdio
+
+        fake = Stream()
+        with (
+            patch.object(sys, "stdin", fake),
+            patch.object(sys, "stdout", fake),
+            patch.object(sys, "stderr", fake),
+        ):
+            _configure_stdio()
+        self.assertEqual(len(recorded), 3)
+        for kwargs in recorded:
+            self.assertEqual(kwargs, {"encoding": "utf-8", "errors": "replace"})
+
+
+class SlashLikePasteTests(unittest.TestCase):
+    def test_multiline_paste_starting_with_slash_reaches_the_model(self) -> None:
+        # `/dev/null 相关脚本` typed or pasted into the REPL used to be dropped
+        # as an unknown command instead of being sent to the model.
+        prompts: list[str] = []
+
+        class FakeAgent:
+            session = SimpleNamespace(path=None)
+
+            def run(self, text: str) -> AgentResult:
+                prompts.append(text)
+                return AgentResult(text="ok", completed=True)
+
+        args = SimpleNamespace(quiet=True, json_output=False, no_session=True)
+        from minimalcode.cli import _chat_loop
+
+        pasted = "/dev/null 说明\n第二行"
+        with (
+            patch(
+                "minimalcode.cli._read_message",
+                side_effect=[pasted, EOFError()],
+            ),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            _chat_loop(FakeAgent(), args, self._settings_for_agent(), None)
+        self.assertEqual(prompts, [pasted])
+
+    def _settings_for_agent(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return load_settings(Path(temp.name) / ".MinimalCode")

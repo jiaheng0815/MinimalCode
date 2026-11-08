@@ -90,8 +90,21 @@ class TransportMixin:
         status_retried = False
         while True:
             try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # The budget covers the attempts themselves, not only the
+                    # backoff: with a 20s connect timeout a second attempt could
+                    # overrun a 30s `timeout_seconds` and report much later.
+                    last_error = ProviderError(
+                        "provider request exceeded timeout_seconds "
+                        f"({self.timeout_seconds:g}s)"
+                    )
+                    break
                 request = self._client.build_request(
-                    "POST", self._endpoint(), json=payload
+                    "POST",
+                    self._endpoint(),
+                    json=payload,
+                    timeout=httpx2.Timeout(remaining, connect=min(20.0, remaining)),
                 )
                 response = self._client.send(request, stream=stream)
             except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
@@ -117,7 +130,6 @@ class TransportMixin:
                         f"in {delay:g}s ({exc})"
                     )
                 time.sleep(delay)
-                continue
                 continue
             if 200 <= response.status_code < 300:
                 # The per-read timeout only bounds a single socket read; this

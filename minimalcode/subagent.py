@@ -101,6 +101,11 @@ def child_env(depth: int, *, python_path: Path | None = None) -> dict[str, str]:
     return {
         DEPTH_ENV: str(max(0, int(depth))),
         "PYTHONPATH": os.pathsep.join(entries),
+        # The child is driven through pipes: the task arrives on stdin and the
+        # answer leaves on stdout. A Windows pipe defaults to the ANSI code page,
+        # so a Chinese task or answer was decoded as cp936/cp1252 on one side and
+        # corrupted (or replaced with `?`). UTF-8 mode pins both directions.
+        "PYTHONUTF8": "1",
     }
 
 

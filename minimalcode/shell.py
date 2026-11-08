@@ -13,6 +13,7 @@ from .errors import ShellError
 from .sandbox import SandboxRunner, truncate_text
 
 __all__ = [
+    "MAX_TIMEOUT_SECONDS",
     "ShellSpec",
     "detect_shell",
     "powershell_heredoc_delimiter",
@@ -21,6 +22,10 @@ __all__ = [
     "select_shell",
     "truncate_text",
 ]
+
+# Hard ceiling for one command. `subagent` reports the timeout it used, so the
+# clamp lives here and callers read it back instead of inventing their own cap.
+MAX_TIMEOUT_SECONDS = 3600.0
 
 # Bash heredoc starts with ``<<WORD``, ``<<-WORD``, or ``<<\WORD``. A PowerShell
 # bit shift such as ``$x << 2`` cannot match because the delimiter is a word.
@@ -312,7 +317,7 @@ def run_shell(
         return {"status": "error", "message": "timeout must be a number"}
     if math.isnan(requested_timeout):
         return {"status": "error", "message": "timeout must be a number"}
-    timeout = max(1.0, min(requested_timeout, 3600.0))
+    timeout = max(1.0, min(requested_timeout, MAX_TIMEOUT_SECONDS))
 
     runner = sandbox if sandbox is not None else SandboxRunner.disabled(cwd)
     return runner.run_argv(

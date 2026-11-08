@@ -482,6 +482,11 @@ def _validate(data: dict[str, Any], path: Path) -> None:
 
     if "thinking" in data:
         thinking = data["thinking"]
+        # `--thinking High` is accepted (argparse lowercases it), so a settings
+        # file with the same spelling must not be rejected as invalid.
+        if isinstance(thinking, str):
+            thinking = thinking.strip().lower()
+            data["thinking"] = thinking
         if not isinstance(thinking, str) or thinking not in EFFORT_LEVELS:
             raise ConfigError(
                 f"{path}: thinking must be one of {', '.join(EFFORT_LEVELS)}"

@@ -7,12 +7,17 @@ from typing import Any
 
 from ..errors import ToolError
 from ..provider.anthropic_env import ANTHROPIC_ENV_PROVIDER
-from ..shell import powershell_heredoc_delimiter, run_shell
-
-_POWERSHELL_KINDS = frozenset({"pwsh7", "windows_powershell"})
+from ..shell import MAX_TIMEOUT_SECONDS, powershell_heredoc_delimiter, run_shell
 from ..subagent import PREAMBLE as SUBAGENT_PREAMBLE
 from ..subagent import build_command as build_subagent_command
 from ..subagent import child_env as subagent_env
+
+_POWERSHELL_KINDS = frozenset({"pwsh7", "windows_powershell"})
+
+
+def _clamp_timeout(value: float) -> float:
+    """Apply the ceiling `run_shell` enforces, so the reported value is real."""
+    return max(1.0, min(value, MAX_TIMEOUT_SECONDS))
 
 
 class ProcessToolsMixin:
@@ -121,7 +126,7 @@ class ProcessToolsMixin:
         if self.sandbox.policy.enabled:
             # Only an active sandbox caps the child's runtime.
             limits.append(self.sandbox.policy.timeout_seconds)
-        effective_timeout = max(1.0, min(limits))
+        effective_timeout = _clamp_timeout(min(limits))
         turns = self.subagent_max_turns if max_turns is None else max_turns
         if isinstance(turns, bool) or not isinstance(turns, int):
             raise ToolError("max_turns must be an integer")

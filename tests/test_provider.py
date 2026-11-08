@@ -2048,3 +2048,186 @@ class ProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatStreamFragments151Tests(unittest.TestCase):
+    """Frames that the 1.5.0 assembler split or mis-joined."""
+
+    @staticmethod
+    def _reply(events: list[dict]) -> object:
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        provider = OpenAICompatibleProvider(
+            name="chat",
+            config={"base_url": "https://provider.test/v1", "stream": True},
+            model="model-c",
+            thinking="none",
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"Content-Type": "text/event-stream"},
+                    content=body,
+                )
+            ),
+        )
+        try:
+            return provider.stream_chat([{"role": "user", "content": "go"}])
+        finally:
+            provider.close()
+
+    def test_unlabelled_continuation_after_an_id_fragment(self) -> None:
+        # The standard frame sends the id once and the arguments in many
+        # chunks without `index`; opening a new entry per chunk truncated the
+        # first call and dropped the rest.
+        reply = self._reply(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": "call_a",
+                                        "function": {
+                                            "name": "read",
+                                            "arguments": '{"pa',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {"function": {"arguments": 'th": "a.md"}'}}
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
+        )
+        self.assertEqual(
+            [(call.name, call.arguments) for call in reply.tool_calls],
+            [("read", '{"path": "a.md"}')],
+        )
+
+    def test_reused_index_continuation_follows_the_replacement_call(self) -> None:
+        reply = self._reply(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_a",
+                                        "function": {
+                                            "name": "read",
+                                            "arguments": '{"path":',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": '"a"}'}}
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_b",
+                                        "function": {
+                                            "name": "write",
+                                            "arguments": '{"path":',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": '"b"}'}}
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
+        )
+        self.assertEqual(
+            [(call.name, call.arguments) for call in reply.tool_calls],
+            [("read", '{"path":"a"}'), ("write", '{"path":"b"}')],
+        )
+
+
+class ProviderAttemptBudgetTests(unittest.TestCase):
+    def test_each_attempt_is_bounded_by_the_request_budget(self) -> None:
+        # The backoff was already clamped to `timeout_seconds`, but every send
+        # still used the client-level timeout: with a 20s connect timeout, a
+        # second attempt overran a 30s budget. Each attempt now carries the
+        # remaining time.
+        timeouts: list[dict[str, float]] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            timeouts.append(dict(request.extensions.get("timeout") or {}))
+            raise httpx2.ConnectError("no route to provider")
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.now += seconds
+
+        clock = Clock()
+        provider = OpenAICompatibleProvider(
+            name="dead",
+            config={
+                "base_url": "https://provider.test/v1",
+                "api_key": "secret",
+                "timeout_seconds": 2.0,
+            },
+            model="model-a",
+            thinking="none",
+            transport=httpx2.MockTransport(handler),
+        )
+        try:
+            with (
+                patch("minimalcode.provider.transport.time", clock),
+                self.assertRaises(ProviderError),
+            ):
+                provider.stream_chat([{"role": "user", "content": "hi"}])
+        finally:
+            provider.close()
+        self.assertGreaterEqual(len(timeouts), 2)
+        self.assertLess(timeouts[1]["read"], timeouts[0]["read"])
+        self.assertLessEqual(clock.now, provider.timeout_seconds)

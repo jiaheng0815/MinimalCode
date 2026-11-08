@@ -509,3 +509,17 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingSpellingTests(unittest.TestCase):
+    def test_capitalised_thinking_level_is_accepted(self) -> None:
+        # `--thinking High` is lowercased by argparse, so the same spelling in
+        # settings.json must not be a fatal config error.
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            home.mkdir()
+            (home / "settings.json").write_text(
+                json.dumps({"thinking": " High "}), encoding="utf-8"
+            )
+            settings = load_settings(home)
+        self.assertEqual(settings.get("thinking"), "high")

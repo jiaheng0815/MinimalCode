@@ -201,17 +201,44 @@ def sensitive_command_paths(command: str, depth: int = 0) -> tuple[str, ...]:
     hits: list[str] = []
     previous = ""
     for token, quoted in words:
-        if quoted:
-            if previous.lower() in _INLINE_FLAGS and depth < _MAX_INLINE_DEPTH:
-                for hit in sensitive_command_paths(token, depth + 1):
-                    if hit not in hits:
-                        hits.append(hit)
+        if quoted and previous.lower() in _INLINE_FLAGS and depth < _MAX_INLINE_DEPTH:
+            for hit in sensitive_command_paths(token, depth + 1):
+                if hit not in hits:
+                    hits.append(hit)
             previous = token
             continue
-        if _looks_sensitive_token(token) and token not in hits:
+        if (
+            _looks_sensitive_token(token)
+            and token not in hits
+            and not _directory_option_value(token, previous)
+        ):
             hits.append(token)
         previous = token
     return tuple(hits)
+
+
+def _directory_option_value(token: str, option: str) -> bool:
+    """Return True for a directory-valued long option such as `--home`.
+
+    The agent itself runs `minimalcode --home <dir>`, and a config directory
+    named `.MinimalCode` matched the sensitive-directory rule, so every nested
+    agent was refused. Naming a directory is not reading a credential: the
+    exemption needs a `--long` option *and* a bare directory name, so
+    `Get-Content -Path "C:\\x\\.ssh\\id_rsa"` is still denied.
+    """
+    if not option.startswith("--"):
+        return False
+    candidate = token.strip(_COMMAND_WORD_TRIM)
+    if not candidate:
+        return False
+    try:
+        parts = _normalized_parts(Path(candidate).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not parts:
+        return False
+    name = parts[-1]
+    return name in SENSITIVE_DIRECTORY_NAMES and name not in SENSITIVE_FILE_NAMES
 
 
 def _normalized_parts(path: Path) -> list[str]:

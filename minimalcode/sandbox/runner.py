@@ -223,7 +223,6 @@ class SandboxRunner:
         except (TypeError, ValueError, OverflowError):
             requested_output = 1
         requested_output = max(1, requested_output)
-        requested_output = max(1, requested_output)
 
         # The sensitive-file rule is a path policy, not an execution setting: it
         # stays in force when the sandbox is disabled, exactly like `read` and

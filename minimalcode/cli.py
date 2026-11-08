@@ -1204,7 +1204,9 @@ def _chat_loop(
                 "(needs provider vision)"
             )
             continue
-        if text.startswith("/"):
+        if text.startswith("/") and "\n" not in text:
+            # A pasted block that happens to start with `/` is a prompt, not a
+            # mistyped command; only a single line is treated as one.
             print(f"unknown command: {sanitize_terminal_text(text)}", file=sys.stderr)
             continue
         if image is not None:
@@ -1460,13 +1462,19 @@ def _write_error(message: str) -> None:
 
 
 def _configure_stdio() -> None:
-    """Normalize stdio so a stray byte from CJK backspace cannot become a surrogate."""
+    """Pin stdio to UTF-8 so a pipe cannot decode CJK or emit a surrogate.
+
+    `errors="replace"` alone kept the platform default encoding, which on a
+    Windows pipe is the ANSI code page: a task piped into `-p` and the answer
+    piped out were silently mangled for every non-ASCII character. The console
+    itself is unaffected — Python already talks UTF-16 to it.
+    """
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            reconfigure(errors="replace")
+            reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):
             pass
 

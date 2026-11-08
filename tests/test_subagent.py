@@ -246,3 +246,12 @@ class SubagentToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChildEnvEncodingTests(unittest.TestCase):
+    def test_child_env_forces_utf8_pipes(self) -> None:
+        # The task travels on stdin and the answer on stdout; a Windows pipe
+        # defaults to the ANSI code page, which corrupted non-ASCII text.
+        env = child_env(1, python_path=Path("root"))
+        self.assertEqual(env["PYTHONUTF8"], "1")
+        self.assertEqual(env[DEPTH_ENV], "1")

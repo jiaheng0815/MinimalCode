@@ -201,12 +201,17 @@ class ChatProtocolMixin:
                             )
                             if matched is not None:
                                 index = matched
-                            elif (
-                                last_call_index >= 0
-                                and not calls[last_call_index]["id"]
+                            elif last_call_index >= 0 and (
+                                # An unlabelled continuation of the call that
+                                # just streamed, or the fragment that supplies
+                                # the id of a call whose first fragment had
+                                # none. Opening a new entry here truncated the
+                                # arguments of the common "id once, arguments in
+                                # many chunks" frame.
+                                not incoming_id
+                                or not calls[last_call_index]["id"]
+                                or calls[last_call_index]["id"] == incoming_id
                             ):
-                                # The first fragment of this call carried no id;
-                                # this one supplies it.
                                 index = last_call_index
                             else:
                                 index = max(calls, default=-1) + 1
@@ -214,7 +219,19 @@ class ChatProtocolMixin:
                             # A non-conforming server can reuse an index for a
                             # new call id. Treat that as a new call instead of
                             # overwriting the first one and concatenating its
-                            # arguments into invalid JSON.
+                            # arguments into invalid JSON. Each slot records the
+                            # wire index it belongs to, so the unlabelled
+                            # continuation fragments follow the replacement call
+                            # rather than falling back to the first one.
+                            wire_index = int(raw_call["index"])
+                            index = next(
+                                (
+                                    position
+                                    for position in reversed(calls)
+                                    if calls[position].get("wire") == str(wire_index)
+                                ),
+                                wire_index,
+                            )
                             existing = calls.get(index)
                             incoming_id = str(raw_call.get("id") or "")
                             if (
@@ -224,6 +241,10 @@ class ChatProtocolMixin:
                                 and incoming_id != existing["id"]
                             ):
                                 index = max(calls, default=-1) + 1
+                            calls.setdefault(
+                                index,
+                                {"id": "", "name": "", "arguments": ""},
+                            )["wire"] = str(wire_index)
                         last_call_index = index
                         entry = calls.setdefault(
                             index,

@@ -55,6 +55,16 @@ class SearchToolsMixin:
         if not target.is_file() and not target.is_dir():
             raise ToolError(f"path is not a file or directory: {target}")
         limit = positive_limit(max_results, self.max_results, 2000, "max_results")
+        if (
+            glob
+            and target.is_file()
+            and not self._matches_glob(target, target.parent, glob)
+        ):
+            # ripgrep does not apply `--glob` to a file named on the command
+            # line, so `grep(path="a.txt", glob="*.py")` returned the file with
+            # rg installed and nothing without it. The restriction is enforced
+            # here so both engines agree.
+            return {"status": "success", "matches": [], "truncated": False}
 
         # Prefer ripgrep when it is installed and the backend can spawn argv.
         rg = shutil.which("rg")
@@ -260,10 +270,14 @@ class SearchToolsMixin:
             else list(self._walk_files(target, ignored=ignored))
         )
         if glob_pattern:
+            # A single-file target has no relative path of its own, so its
+            # parent is the root the glob is matched against; otherwise the
+            # search root anchors the walk.
+            glob_root = target.parent if target.is_file() else target
             files = [
                 file_path
                 for file_path in files
-                if self._matches_glob(file_path, target, glob_pattern)
+                if self._matches_glob(file_path, glob_root, glob_pattern)
             ]
         if not files:
             return {"status": "success", "matches": [], "truncated": False}

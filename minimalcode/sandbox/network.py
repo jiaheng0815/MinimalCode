@@ -145,9 +145,23 @@ _NESTED_NETWORK_API = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-# A Universal Naming Convention path (`\\host\share`) is an SMB request even
-# though the command line names no network client and no URL scheme.
-_UNC_PATTERN = re.compile(r"\\\\[A-Za-z0-9._-]+\\(?![\\?])")
+# The PowerShell download stub at the outer command position. `_NESTED_NETWORK_API`
+# only runs on nested payloads, so `(New-Object Net.WebClient).DownloadString(...)`
+# typed directly into the shell (which *is* PowerShell on Windows) slipped past
+# the gate. The pattern stays narrow: it needs `New-Object ...WebClient` or a
+# `DownloadString(`/`DownloadFile(` call.
+_POWERSHELL_DOWNLOAD_RE = re.compile(
+    r"new-object\s+(?:system\.)?(?:net\.)?webclient"
+    r"|(?:downloadstring|downloadfile)\s*\(",
+    re.IGNORECASE,
+)
+_UNC_PATTERN = re.compile(
+    # `\\?\UNC\host\share` is the extended-length spelling of the same SMB
+    # request. The `(?![\\?])` guard only exists to keep local `\\?\C:\...`
+    # paths out, so the UNC prefix needs a branch of its own.
+    r"\\\\\?\\UNC\\(?P<ext_host>[A-Za-z0-9._-]+)"
+    r"|\\\\(?P<host>[A-Za-z0-9._-]+)\\(?![\\?])"
+)
 _URL_PATTERN = re.compile(
     r"\b(?:https?|ftps?)://(?:[^/@\s'\"`?#]*@)?"
     r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)",
@@ -156,8 +170,11 @@ _URL_PATTERN = re.compile(
 # curl options that can redirect a request away from the URL host: the
 # allowlist must see the resolver/proxy target as well, not just the URL.
 _HOST_OPTION_RE = re.compile(
+    # The separator may be `=`, whitespace, or nothing at all: curl also accepts
+    # the attached short form `-xhost:port`, and without that branch a request
+    # to an allowed host could be routed through any proxy.
     r"(?:^|\s)(?P<flag>--resolve|--connect-to|--proxy|--preproxy|--socks5|"
-    r"--socks5-hostname|--url|-x)(?:=|\s+)(?P<value>\S+)",
+    r"--socks5-hostname|--url|-x)(?:=|\s+|(?<=-x))(?P<value>\S+)",
     re.IGNORECASE,
 )
 _POWERSHELL_KINDS = frozenset({"powershell", "pwsh"})
@@ -213,6 +230,8 @@ _INLINE_COMMAND_SHELLS = frozenset(
         "perl",
         "powershell",
         "pwsh",
+        # The Windows launcher runs the same inline scripts as `python`.
+        "py",
         "python",
         "python3",
         "ruby",
@@ -222,6 +241,19 @@ _INLINE_COMMAND_SHELLS = frozenset(
         "zsh",
     }
 )
+# Versioned interpreter names (`python3.12`, `node18`) run the same inline code
+# as the bare name, but the name set is exact and they slipped past the scan.
+_INTERPRETER_VERSION_RE = re.compile(r"[0-9][0-9.]*$")
+
+
+def _is_inline_shell(name: str) -> bool:
+    """Return True when ``name`` is an interpreter that takes code via a flag."""
+    if name in _INLINE_COMMAND_SHELLS:
+        return True
+    stripped = _INTERPRETER_VERSION_RE.sub("", name)
+    return stripped != name and stripped in _INLINE_COMMAND_SHELLS
+
+
 # Wrappers run another program. The options that take a separate value must be
 # skipped with that value; otherwise `sudo -u root curl ...` treats `-u` as the
 # command and never sees curl.
@@ -296,7 +328,6 @@ def _shell_words(segment: str) -> list[tuple[str, int, int]]:
         buffer.append(char)
     if start is not None:
         words.append(("".join(buffer), start, len(segment)))
-    return words
     return words
 
 
@@ -504,7 +535,7 @@ def _scan_commands(command: str) -> tuple[list[str], list[str], bool]:
                     if inner:
                         inline.append(inner)
                     break
-            if any(name in _INLINE_COMMAND_SHELLS for name in program_names):
+            if any(_is_inline_shell(name) for name in program_names):
                 is_powershell = any(name in _POWERSHELL_KINDS for name in program_names)
                 for position in range(index + 1, len(tokens)):
                     flag = tokens[position].lower()
@@ -694,8 +725,7 @@ def _network_hosts(command: str) -> list[str]:
         else:
             add(_host_from_value(value))
     for match in _UNC_PATTERN.finditer(command):
-        add(match.group(0).strip("\\").split("\\", 1)[0])
-    return hosts
+        add(match.group("host") or match.group("ext_host") or "")
     return hosts
 
 
@@ -724,6 +754,11 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
         if any(name in _NETWORK_COMMANDS for name in _head_variants(head)):
             detected = True
             break
+    if not detected:
+        # `(New-Object Net.WebClient).DownloadString(...)` names no client and
+        # no scheme; the outer command is scanned because it is the payload the
+        # local shell actually runs.
+        detected = _POWERSHELL_DOWNLOAD_RE.search(normalized) is not None
     if not detected:
         detected = _sequence_detected(normalized)
     return detected, tuple(hosts)
