@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.5.0.
+Applies to MinimalCode 1.5.1.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -155,12 +155,15 @@ directions and excluded from bulk searches; `.env.example` and similar templates
 remain readable. Search results are re-checked against the same policy, so a
 sensitive path cannot appear in `grep` / `find` output even when its spelling
 (such as an upper-case `.PEM` suffix) is not covered by the exclusion globs.
-Since 1.5.0 the same rule inspects a `shell` command string: an unquoted word
-that names a sensitive path (`type .env`, `cat ~/.ssh/id_rsa`) is refused, and a
-quoted inline command (`cmd /c "type .env"`, `pwsh -Command "Get-Content .env"`)
-is scanned in turn. Quoted data such as `git commit -m "document .env"` is not a
-path and stays allowed. Credential files are also recognized in their YAML/TOML
-spellings (`secrets.yaml`, `credentials.toml`), `.envrc`, and `.git/config`.
+Since 1.5.1 the same rule inspects a `shell` command string: a word that names a
+sensitive path (`type .env`, `cat ~/.ssh/id_rsa`) is refused whether or not it is
+quoted (`type ".env"` reads the same file), a quoted inline command
+(`cmd /c "type .env"`, `pwsh -Command "Get-Content .env"`) is scanned in turn,
+and a directory named by a long option (`minimalcode --home <dir>`) is not a
+credential read. Multi-word quoted data such as `git commit -m "document .env"`
+is not a path and stays allowed. Credential files are also recognized in their
+YAML/TOML spellings (`secrets.yaml`, `credentials.toml`), `.envrc`, and
+`.git/config`.
 
 `network_policy`, the command timeout/output caps, and the resource limits only
 apply while the execution layer is enabled:
@@ -173,19 +176,20 @@ apply while the execution layer is enabled:
   intact, PowerShell `-EncodedCommand` payloads are decoded (an undecodable one
   fails closed, and the `-ec`/`-e`/`-en` abbreviations are recognized), and
   `cmd` caret escapes are folded before inspection. `npx`/`bunx` count as
-  network clients, and `curl.cmd`/`wget.ps1` are matched by their stem. Four
+  network clients, and `curl.cmd`/`wget.ps1` are matched by their stem. Several
   spellings that used to slip through are inspected as well: `env -S` /
-  `env --split-string` (its value is the command to run), the `py` launcher and
-  attached `-m` form of a package install (`py -3 -m pip install`,
-  `python -mpip install`), PowerShell's `(New-Object Net.WebClient)
-  .DownloadString`/`DownloadFile` inside an inline command, and `\\host\share`
-  UNC paths, which reach SMB without naming a client or a URL.
-- `allowlist`: named hosts are checked against `allowed_hosts`; commands whose
-  target host cannot be determined are refused. At least one host is required.
+  `env --split-string` (its value is the command to run), the `py` launcher,
+  versioned interpreters (`python3.12 -c`, `py -3 -c`) and the attached `-m`
+  form of a package install (`py -3 -m pip install`, `python -mpip install`),
+  PowerShell's `(New-Object Net.WebClient).DownloadString`/`DownloadFile` both
+  inside an inline command and at the command position (the Windows shell is
   `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
-  `--socks5*`, `-x`) contribute their targets, so an allowed URL cannot be
-  redirected to another host, and a UNC path contributes its host. A backend that
-  isolates the network (`bwrap`, `firejail`, `sandbox-exec`, `docker`) removes it
+  `--socks5*`, `-x` in both the `-x host` and the attached `-xhost:port` form)
+  contribute their targets, so an allowed URL cannot be redirected to another
+  host, and a UNC path contributes its host. A backend that isolates the network
+  (`bwrap`, `firejail`, `sandbox-exec`, `docker`) removes it under `allowlist`
+  exactly as under `deny`, because a container cannot enforce a host allowlist;
+  only `allow` opens the network for those backends.
   under `allowlist` exactly as under `deny`, because a container cannot enforce a
   host allowlist; only `allow` opens the network for those backends.
 - `allow`: no network restriction.
@@ -194,22 +198,22 @@ Backends are probed at execution time, which only happens when the layer is
 enabled. `auto` picks the first available of `bwrap`, `firejail`,
 `sandbox-exec`, then `local`; the default is `local`. Selecting a backend that is
 not installed refuses to run the command (it never silently downgrades). Path and
-sensitive-file policy is enforced in-process, so file tools stay usable even when
-directory and `--net=none` for `deny` and `allowlist`. `sandbox-exec` uses a
-profile that denies network traffic for both. `docker` runs `sh -lc` in the
-configured image with
-`bwrap` isolates namespaces and mounts the workspace/allowed roots read-write
-with the rest of the filesystem read-only. `firejail` adds a private temp
-directory and `--net=none` for `deny`. `sandbox-exec` uses a profile that denies
-network traffic for `deny`. `docker` runs `sh -lc` in the configured image with
-the workspace mounted and no host environment, so it refuses a PowerShell shell
-kind instead of handing its syntax to `/bin/sh`; it also refuses argv-based
-search children, so `grep`/`find` use the Python scanner: in-process with a
-deadline alarm on the main thread, or a trusted host child interpreter when that
-guard is unavailable (a worker thread or Windows). The `docker` backend is
-POSIX-host only (Docker Desktop cannot consume the
-`C:\ws:C:\ws` mount this backend builds) and runs the container as the invoking
-`uid:gid`, so workspace files do not end up owned by root.
+sensitive-file policy is enforced in-process, so the file tools stay usable even
+when the execution layer is off.
+
+`bwrap` isolates namespaces and mounts the workspace and the allowed roots
+read-write with the rest of the filesystem read-only; it adds `--unshare-net`
+for `deny` and `allowlist` and `--share-net` only for `allow`. `firejail` adds a
+private temp directory plus `--net=none` for `deny` and `allowlist`.
+`sandbox-exec` uses a profile that denies network traffic for both. `docker` runs
+`sh -lc` in the configured image with the workspace mounted and no host
+environment, so it refuses a PowerShell shell kind instead of handing its syntax
+to `/bin/sh`; it also refuses argv-based search children, so `grep`/`find` use the
+Python scanner: in-process with a deadline alarm on the main thread, or a trusted
+host child interpreter when that guard is unavailable (a worker thread or
+Windows). The `docker` backend is POSIX-host only (Docker Desktop cannot consume
+the `C:\ws:C:\ws` mount this backend builds) and runs the container as the
+invoking `uid:gid`, so workspace files do not end up owned by root.
 
 The local baseline enforces the timeout and output caps on every platform,
 kills the process tree on timeout, and runs children with a private temporary

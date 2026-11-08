@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.5.0`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.5.1`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
 
 ## 特性
 
@@ -43,7 +43,18 @@ minimalcode init
 
 ## 升级指南
 
-## 升级指南
+### 从 1.5.0 升级到 1.5.1
+
+1.5.1 没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，升级不需要改代码；`minimalcode.shell.MAX_TIMEOUT_SECONDS` 是新增常量。这一版修的是 1.5.0 里仍然存在的口径不一致，其中几条会改变日常命令的结果：
+
+- 引号不再能绕过敏感文件检查：`type ".env"`、`Get-Content '.ssh/id_rsa'` 与不加引号时一样被拒绝；`minimalcode --home <目录>` 这类“长选项 + 目录名”不算读凭据，子代理不会再被自己的配置目录挡住。
+- 网络门禁补上四种写法：`curl -xhost:port`（粘连代理）、`\\?\UNC\host\share`（扩展长度 UNC）、直接把 `(New-Object Net.WebClient).DownloadString(...)` 输入 shell、以及 `py -3 -c` / `python3.12 -c` 的内联脚本。`allowlist` 下这些目标同样参与主机比对。
+- 审计记录里带引号的 `-b` / `-H` / `--header` 值现在也被脱敏，`/status` 的 `recent_denials` 不再是凭证明文副本。
+- Chat 工具调用的分片不再截断或串包：`id` 只随首片发送时的续片归入同一调用，服务端复用 `index` 时的续片跟随新调用。每次连接尝试也受 `timeout_seconds` 剩余预算约束。
+- `edit` 越界提示只显示前 40 行，`write` 覆盖超过 `tools.max_file_bytes` 的既有文件会明确报错，`grep(path=<单个文件>, glob=…)` 在有无 `rg` 时结果一致，`subagent` 回报的超时不再超过实际的 3600 秒上限。
+- 管道与子代理的文本固定走 UTF-8（子进程设 `PYTHONUTF8=1`），`settings.json` 里 `thinking` 大小写不敏感，交互模式以 `/` 开头的多行粘贴会发给模型而不是被当成未知命令丢弃。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.4.3 升级到 1.5.0
 

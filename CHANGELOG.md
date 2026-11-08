@@ -1,6 +1,39 @@
 # 更新日志
 
-# 更新日志
+## 1.5.1 - 2026-11-08
+
+### 修复
+
+- 沙箱：给敏感路径加引号即可绕过。`sensitive_command_paths` 对带引号的词只在“前一个是 `-c`/`-Command` 等内联旗标”时才扫描，其余引号词一律当数据，于是 `type ".env"`、`Get-Content '.ssh/id_rsa'` 原样返回明文，而不加引号的同一命令会被拒绝。现在引号内的单 token 也参与判定；`git commit -m "document .env"` 这类多词载荷照旧放行。
+- 沙箱：`--home <目录>` 被当成凭据读取。上一条收紧后，配置目录名为 `.MinimalCode` 的路径会命中敏感目录规则，而子代理正是用 `minimalcode --home <dir>` 启动的，于是所有 `subagent` 调用都被拒绝。现在“`--长选项` + 纯目录名”不算读凭据（`Get-Content -Path "C:\x\.ssh\id_rsa"` 仍被拒绝）。
+- 沙箱网络策略：`-xhost:port` 这种粘连写法不参与 `allowlist` 比对。`_HOST_OPTION_RE` 要求旗标后是 `=` 或空白，curl 的短选项粘连形式匹配不上，`allowed_hosts` 里的 URL 可以经任意代理改道；现在粘连形式也会贡献主机。
+- 沙箱网络策略：外层命令里的 PowerShell 下载语句不被分析。`_NESTED_NETWORK_API` 只作用于内联子命令，而本工具的 Windows shell 本身就是 PowerShell，`(New-Object Net.WebClient).DownloadString('http://…')` 直接输入时既没有客户端名也没有 URL scheme，`deny` 放行；现在外层命令也做一次窄匹配（需要 `New-Object …WebClient` 或 `DownloadString(`/`DownloadFile(`）。
+- 沙箱网络策略：`py -3 -c …` 与 `python3.12 -c …` 的内联脚本从不被检查。内联宿主名是精确集合，带版本号的名字和 Windows 官方启动器 `py` 都不在里面，`deny` 下这两条都能直接联网；现在按去掉版本号的名字判定，并加入 `py`。
+- 沙箱网络策略：`\\?\UNC\host\share` 不被识别。`_UNC_PATTERN` 用 `(?![\\?])` 排除本地长路径 `\\?\C:\…`，同时把扩展长度的远程路径一并排除了；现在 `\\?\UNC\` 有独立分支，主机名照常进入 `allowlist` 比对。
+- 沙箱审计：带引号的凭据值以明文进入拒绝记录。脱敏规则的值部分是 `[^\s'\"]+`，紧跟在旗标后的是引号时必然失败，`curl -b "session=…"`、`curl -H "Cookie: session=…"`、`curl --header "X-Token: …"` 原样写进 `SandboxDenial.target`，再由 `/status` 的 `recent_denials` 输出；现在带引号的值一并脱敏。
+- 供应商：Chat 省略 `index` 且 `id` 只随首片发送时，参数续片被当成新调用丢弃，首个调用只剩半截 JSON，`finish_reason` 仍是 `tool_calls`，残缺参数会被直接执行。现在无 `id` 的续片归入上一个调用。
+- 供应商：同一 `index` 被复用给新调用时，不带 `id` 的续片仍写回旧调用，两个调用的 `arguments` 同时损坏。现在每个槽位记录自己对应的 wire index，续片跟随替换后的调用。
+- 供应商：连接重试的每次尝试不受 `timeout_seconds` 约束。预算只裁剪了退避 sleep，单次连接超时仍是 20 秒，`timeout_seconds=30` 时最坏约 40 秒才报错；现在每次尝试按剩余预算下发 `Timeout`，预算用尽即停止。
+- 工具：`edit` 的越界提示会把整份文件灌进工具错误。`end_line` 远大于总行数时 `nearest_end` 等于总行数，提示里拼接全部行，20 万行文件产生 3.7 MB 错误文本并进入下一轮请求；现在只显示前 40 行并标注省略区间。
+- 工具：`write` 覆盖超大文件时整份读入内存。仅为了保留行尾风格与 Python 校验回滚镜像就 `read_bytes()`，2 GB 文件直接 `MemoryError`；现在与 `edit`/`append_file` 一致，超过 `tools.max_file_bytes` 时返回明确的 `file is too large for write`。
+- 工具：`grep(path=<单个文件>, glob=…)` 在有/无 `rg` 时结果相反。ripgrep 不对命令行上显式给出的文件应用 `--glob`，Python 回退会过滤，同一个调用在装了 `rg` 的机器上返回不匹配的文件；现在单文件目标先按 glob 判定（以父目录为根），两个引擎一致。
+- 工具：`subagent` 报告的超时可能与实际生效值不一致。`run_shell` 硬上限 3600 秒，而工具结果原样回显配置值，`subagent.timeout_seconds=7200` 时声称 7200 秒、实际 3600 秒被杀；现在统一用 `shell.MAX_TIMEOUT_SECONDS` 裁剪后再回报。
+- CLI：stdio 没有固定编码，管道与子代理的中文被损坏。`_configure_stdio` 只设了 `errors="replace"`，Windows 管道默认用 ANSI 代码页：`… | minimalcode -p` 的任务文本按 cp936/cp1252 解码，输出方向被替换成 `?`，而 `errors="replace"` 让这一切静默发生。现在 stdio 固定 UTF-8，子进程环境额外设置 `PYTHONUTF8=1`。
+- 配置：`settings.json` 里的 `thinking` 大小写敏感。`--thinking High` 会被 argparse 归一化并接受，同样的值写进配置文件却直接 `ConfigError`；现在校验前去空格并转小写。
+- CLI：交互模式下以 `/` 开头的多行粘贴被整段丢弃。命令分派全部落空后按“未知命令”处理，`/dev/null 相关脚本` 这类粘贴内容根本到不了模型；现在只有单行才按未知命令处理。
+
+### 变更
+
+- 版本号升级到 1.5.1。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema；`shell.MAX_TIMEOUT_SECONDS` 是新增常量。
+- 可观察的行为变化（均为收紧或纠错）：引号内的敏感路径同样被拒绝；`--home <目录>` 形式不再被误拒；`-xhost:port`、`\\?\UNC\…`、外层 `WebClient` 下载、`py`/带版本号解释器的内联脚本计入网络检查；审计记录中带引号的凭据被脱敏；Chat 续片不再截断或串包；每次请求尝试受剩余预算约束；`edit` 越界提示与 `write` 超大文件有明确上限；单文件 `grep` 的 glob 语义在两引擎间一致；管道 stdio 固定 UTF-8。
+
+### 文档
+
+- `docs/configuration.md` 修正被拼接损坏的后端段落（重复两遍的 `firejail`/`sandbox-exec`/`docker` 描述），并补充引号内敏感路径、`--home` 例外、`-x` 粘连形式、`\\?\UNC\`、外层 `WebClient` 与带版本号解释器；`docs/architecture.md`、`docs/compatibility.md` 更新适用版本与 1.5.1 兼容说明；`README.md` 更新当前版本与 1.5.0 → 1.5.1 升级说明，并去掉重复的“升级指南”标题（`CHANGELOG.md` 顶部重复的“更新日志”标题一并删除）。
+
+### 测试
+
+- 新增回归测试：引号内 `.env` / `id_rsa` 的拒绝与多词引号载荷的放行、`--home <目录>` 不被误拒、`py -3 -c` 与 `python3.12 -c` 的内联脚本、外层 `WebClient` 下载（并保证 `rg "DownloadString"` 不误判）、`-xhost:port` 的 allowlist 比对、`\\?\UNC\` 主机提取、带引号的 `-b`/`-H`/`--header` 脱敏、Chat 无 `index` 续片与复用 `index` 的续片、每次连接尝试的超时预算、`edit` 越界提示的行数与体积、超大文件 `write` 的拒绝、单文件 `grep` 的 glob 一致性、`_clamp_timeout` 与 `run_shell` 上限一致、stdio 固定 UTF-8、子进程 `PYTHONUTF8`、`thinking` 大小写、以 `/` 开头的多行粘贴。
 
 ## 1.5.0 - 2026-11-07
 

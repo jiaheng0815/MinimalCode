@@ -1,18 +1,49 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.5.0. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.5.1. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, and 1.5.0 added no further breaking import changes
-(`minimalcode.httpclient` and `minimalcode.clipboard` are new modules, not
-renamed ones).
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, and 1.5.1 added no further breaking import
+changes (`minimalcode.httpclient` and `minimalcode.clipboard` are new modules,
+not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.5.0. `SandboxPolicy.isolates_network` is
-a new read-only property; it is additive, and the existing `network_policy`
-values keep their meaning for the agent-facing gate.
+format, or import path was removed in 1.5.1. `minimalcode.shell.MAX_TIMEOUT_SECONDS`
+is an additive constant, and `SandboxPolicy.isolates_network` keeps the meaning
+it got in 1.5.0.
+
+## What 1.5.1 changed
+
+Every change is a defect fix, and all of them tighten a check that used to be
+inconsistent or stop a case that silently produced wrong output:
+
+- Quotes no longer hide a sensitive path: `type ".env"` and
+  `Get-Content '.ssh/id_rsa'` are refused like their unquoted forms. A directory
+  named by a long option (`minimalcode --home <dir>`) is not treated as a
+  credential read, which is what spawned subagents rely on.
+- The network gate now sees four more spellings: curl's attached
+  `-xhost:port` proxy, the `\\?\UNC\host\share` path form, a
+  `(New-Object Net.WebClient).DownloadString(...)` typed straight into the shell,
+  and inline scripts run by `py -3 -c` or a versioned interpreter. Under
+  `allowlist` those targets also join the host comparison.
+- Audit records redact quoted `-b` / `-H` / `--header` values, so
+  `recent_denials` is no longer a second plaintext copy of a cookie or token.
+- A Chat tool call sent as "id once, arguments in unlabelled chunks" keeps all
+  of its arguments, and a server that reuses one `index` for a second call no
+  longer interleaves the two. Each connection attempt is bounded by the
+  remaining `timeout_seconds` budget.
+- `edit` reports at most 40 lines of an out-of-range file, `write` refuses an
+  existing file above `tools.max_file_bytes` instead of raising `MemoryError`,
+  `grep(path=<file>, glob=…)` returns the same result with and without
+  `ripgrep`, and the timeout a `subagent` reports matches the 3600-second
+  ceiling that is actually enforced.
+- Piped stdio is UTF-8 (children get `PYTHONUTF8=1`), `thinking` in
+  `settings.json` is case-insensitive, and a multi-line paste starting with `/`
+  reaches the model instead of being dropped as an unknown command.
+
+## What 1.5.0 changed
 
 ## What 1.5.0 changed
 
