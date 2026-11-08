@@ -532,10 +532,15 @@ def _format_usage(usage: dict[str, int], *, estimated: bool = False) -> str:
     ]
     cached = int(usage.get("cached_tokens", 0) or 0)
     reasoning = int(usage.get("reasoning_tokens", 0) or 0)
+
     if cached:
+        hit_rate = cached / prompt if prompt else 0.0
         parts.append(f"{cached:,} cached")
+        parts.append(f"{hit_rate:.2%} hit rate")
+
     if reasoning:
         parts.append(f"{reasoning:,} reasoning")
+
     line = "[usage] " + " | ".join(parts)
     if estimated:
         # Say so instead of presenting a character-count guess as billed usage.
