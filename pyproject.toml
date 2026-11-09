@@ -28,6 +28,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff==0.17.3"]
+# Only the `deepseek_web` protocol needs a wasm runtime: it solves the endpoint's
+# proof-of-work with DeepSeek's own module. Everything else stays httpx2-only.
+deepseek-web = ["wasmtime>=20"]
 
 [project.scripts]
 minimalcode = "minimalcode.cli:main"
@@ -44,7 +47,7 @@ version = {attr = "minimalcode.__version__"}
 include = ["minimalcode*"]
 
 [tool.setuptools.package-data]
-minimalcode = ["defaults.json"]
+minimalcode = ["defaults.json", "provider/sha3_wasm_bg.wasm"]
 
 [tool.ruff]
 line-length = 88

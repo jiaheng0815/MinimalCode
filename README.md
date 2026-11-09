@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.5.1`。运行时依赖只有 `httpx2`，Python 3.11–3.13。
+当前版本：`1.5.2`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 特性
 
@@ -18,7 +18,8 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **编码可见**：`read` 用严格 UTF-8 先扫一遍请求范围，遇到非 UTF-8 字节时改用替换解码返回内容，并在 `warnings` 里说明 `edit` 会拒绝该文件；UTF-8 BOM 会被去掉，不再出现在第一行。
 - **会话总结**：`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
-- **协议**：OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages，其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
+- **协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 DeepSeek 网页版（`deepseek_web`），其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
+- **多供应商切换**：内置 37 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **多供应商切换**：内置 36 个供应商预设（33 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
@@ -39,9 +40,22 @@ minimalcode init
 
 `init` 会在配置目录写入 `settings.json` 并创建 `sessions/`。首次正常运行如果发现配置缺失，也会自动生成，因此这一步是可选的。
 
-要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。
+要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。`deepseek_web` 协议需要可选的 wasm 运行时：`python -m pip install "minimalcode[deepseek-web]"`。
 
 ## 升级指南
+
+### 从 1.5.1 升级到 1.5.2
+
+1.5.2 新增 `deepseek_web` 协议和 `deepseek-web` 预设，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有配置无需改动。要使用网页版协议才需要额外安装 `minimalcode[deepseek-web]`（wasmtime），并把浏览器 localStorage 里的 `userToken` 放进 `DEEPSEEK_WEB_TOKEN`。
+
+- 新增 `protocol: "deepseek_web"`：直连 chat.deepseek.com 的网页接口，用本机的 wasmtime 解 `x-ds-pow-response` 工作量证明（挑战前缀为 `<salt>_<expire_at>_`，模块的 `status` 非零表示成功）；工具以文本块形式发给模型再解析回来，因此这条链路不需要函数调用支持。
+- 认证用 `Authorization: Bearer <userToken>`；`DEEPSEEK_WEB_COOKIE` / `cookie` 只是可选的 WAF 兼容项，缺失不会报错。`-m` / `/model deepseek-web/<mode>` 选的 `model_type` 不再被预设的 `default` 覆盖，`Authorization` 里重复的 `Bearer` 前缀会被去掉。
+- 会话 id 从 `biz_data.id` 读取（旧结构 `biz_data.chat_session.id` 仍兼容），补全请求带上 `stream: true` 和 `client_stream_id`，否则服务端只回一整段非 SSE JSON。
+- 网页版流式回复按片段增量去重，思维链与答案分别投递，`response/content` 补丁同样计入正文；无标记的裸 JSON 只有带参数键时才当作工具调用，普通 JSON 回答原样显示，解析失败的参数会让模型自我纠正而不是把原文塞进工具参数。
+- `tool_mode`、`cookie`、`cookie_env`、`model_type`、`web_search`、`pow_wasm_path`、`tool_parse_retries` 是新增的供应商键；`web_search` 与其它布尔键一样参与占位符展开和类型校验，`config show` 会脱敏内联的 `cookie`。
+- `transport` 的响应读取现在把裸 `OSError`/TLS 错误也归入 `ProviderError`，握手请求（会话创建、挑战获取）沿用连接重试，但重试仍不覆盖已开始生成的补全。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.5.0 升级到 1.5.1
 
@@ -343,7 +357,7 @@ JSON 输出字段：
 }
 ```
 
-- `protocol` 取 `openai_chat`、`openai_responses` 或 `anthropic_messages`。
+- `protocol` 取 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `deepseek_web`（网页版对话接口，见 [docs/configuration.md](docs/configuration.md#deepseek-web-chatdeepseekcom)）。
 - 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
 - `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。

@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.5.1.
+Applies to MinimalCode 1.5.2.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -321,7 +321,7 @@ back on the next turn. Finished answers do not retain them.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `protocol` | yes | `"openai_chat"`, `"openai_responses"`, or `"anthropic_messages"` |
+| `protocol` | yes | `"openai_chat"`, `"openai_responses"`, `"anthropic_messages"`, or `"deepseek_web"` |
 | `base_url` | yes | Base URL up to `/v1`, or the complete protocol endpoint |
 | `model` | no | Provider-specific default model; overrides the top-level model for this provider |
 | `api_key_env` | no | Environment variable containing the API key |
@@ -421,6 +421,7 @@ provider's `vision` endpoint.
 |---|---|---|
 | `deepseek` | `DEEPSEEK_API_KEY` | `openai_responses` |
 | `deepseek-anthropic` | `DEEPSEEK_API_KEY` | `anthropic_messages` |
+| `deepseek-web` | `DEEPSEEK_WEB_TOKEN` | `deepseek_web` |
 | `openai` | `OPENAI_API_KEY` | `openai_responses` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `anthropic_messages` |
 | `google` | `GEMINI_API_KEY` | `openai_chat` |
@@ -459,6 +460,43 @@ provider's `vision` endpoint.
 Presets pin the endpoint and the credential variable only. `context_window` is a conservative `32768` for the three local servers and the vendor's headline window for the rest; override it in `settings.json` when a different model needs more or less. Regional or plan-specific endpoints (MiniMax's `https://api.minimax.cn/v1`, StepFun's `https://api.stepfun.ai/v1`, Volcengine's `step_plan` endpoint) are a `base_url` override away. Cohere's compatibility API rejects `stream_options`, so its preset sets `include_usage: false`. Providers that need a signature or a query string per request (Azure OpenAI's `api-version`, Bedrock, Vertex) are not presets: configure them manually with `headers` and a full endpoint `base_url`.
 
 `/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Use `/model` without arguments to list the active model and only the providers whose credentials are available: an inline `api_key`, an auth header, a set `api_key_env`, or `require_api_key: false`. Providers with a missing key are omitted instead of listed as unavailable.
+
+`deepseek_web` drives the consumer web endpoint rather than an API: the same
+requests the browser makes, on the free account's quota. It needs the account's
+web token, plus the optional wasm runtime:
+
+```powershell
+python -m pip install "minimalcode[deepseek-web]"   # wasmtime, for the proof of work
+$env:DEEPSEEK_WEB_TOKEN = "<userToken from localStorage, with or without 'Bearer '>"
+minimalcode --provider deepseek-web "运行测试并总结"
+```
+
+The token is the `userToken` a logged-in tab keeps in local storage (DevTools →
+Application → Local Storage → `chat.deepseek.com`), not the session cookie: the
+endpoint authenticates with `Authorization: Bearer <userToken>`. A cookie is only
+useful behind a WAF that inspects it, and is optional.
+
+| Key | Meaning |
+|---|---|
+| `tool_mode` | `"text"` (default) renders tool schemas into the prompt and parses calls back out; `"none"` disables both |
+| `cookie_env` | Environment variable holding an optional Cookie header, default `DEEPSEEK_WEB_COOKIE` |
+| `cookie` | Inline cookie value, for a settings file that should be self-contained |
+| `model_type` | Web UI mode to request, default `"default"`; `-m` / `/model provider/<mode>` overrides it |
+Every completion is gated by an `x-ds-pow-response` proof-of-work ticket, solved
+locally by running DeepSeek's own wasm through wasmtime; the binary ships in the
+wheel and is cached under `~/.minimalcode/cache` when it has to be fetched, and a
+fetched copy must match the bundled SHA-256. The ticket is built from the
+`create_pow_challenge` answer, with the prefix
+`<salt>_<expire_at>_` and the module's status flag read as "non-zero means
+solved". The endpoint has no function calling, so tools travel as text and both
+the requested JSON block and DeepSeek's native DSML markup are parsed. Each turn
+creates a fresh chat session — the id lives at `biz_data.id` — and flattens the
+whole history into one prompt, so the client stays stateless and cannot
+desynchronise from the server.
+the requested JSON block and DeepSeek's native DSML markup are parsed. Each turn
+creates a fresh chat session — the id lives at `biz_data.id` — and flattens the
+whole history into one prompt, so the client stays stateless and cannot
+desynchronise from the server.
 
 ## Claude Code environment
 

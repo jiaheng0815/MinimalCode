@@ -1,5 +1,46 @@
 # 更新日志
 
+## 1.5.2 - 2026-11-09
+
+### 新增
+
+- 供应商：`protocol: "deepseek_web"` 直连 chat.deepseek.com 的网页接口，并新增 `deepseek-web` 预设。请求体、JSON-Patch 流式回复和 `x-ds-pow-response` 工作量证明都按浏览器的方式处理；证明用 DeepSeek 自己的 wasm 模块在本机通过 wasmtime 求解，模块随 wheel 发布，缺失时才下载到 `~/.minimalcode/cache`。wasmtime 是可选依赖 `minimalcode[deepseek-web]`，默认安装仍然只需要 `httpx2`。
+- 供应商：该协议没有函数调用，工具 schema 渲染进 prompt，调用从回复里解析回来；同时接受约定的 `<<<TOOL_CALLS>>>` JSON 块、裸 JSON 数组和 DeepSeek 原生的 DSML `invoke`/`parameter` 标记，`tool_mode: "none"` 可整体关闭。
+- 配置：新增 `cookie`、`cookie_env`、`model_type`、`web_search`、`pow_wasm_path`、`tool_parse_retries` 供应商键；`web_search` 与其它布尔键一样参与 `${VAR}` 展开和类型校验。
+- 打包：`minimalcode/provider/sha3_wasm_bg.wasm` 进入 wheel 与 sdist，CI 的产物断言同时检查 `defaults.json` 和该 wasm。
+
+### 修复
+
+- 供应商：`deepseek_web` 的会话 id 读的是 `biz_data.chat_session.id`，而真实服务端把它放在 `biz_data.id`，于是每个回合都报 "session create returned"；现在优先读 `biz_data.id`，旧结构保留为回退。
+- 供应商：`deepseek_web` 的补全请求缺 `stream: true` 和 `client_stream_id`，服务端因此只回一整段非 SSE JSON，解析器随即以 "returned application/json instead of text/event-stream" 失败；现在两者都按浏览器格式发送。
+- 供应商：`deepseek_web` 的解算器把 challenge/prefix 写进复用的大缓冲（256 字节）。wasm 模块按传入长度接管并释放这块内存，长度与分配不一致时直接 `unreachable` trap，所有 pow 求解都会失败；现在每次按精确长度分配（并注明为什么不能复用、也不显式 free）。
+- 供应商：`deepseek_web` 的 pow 票据写在共享客户端上，会跟着下一回合的 `chat_session/create` 和 `create_pow_challenge` 一起发出，而票据是按 `target_path` 签发的；现在请求发出后立即移除。
+- 供应商：`deepseek_web` 的 cookie 在会话创建和挑战请求之后才附加。Bearer token 才是凭据，但部署在检查 cookie 的 WAF 后面时首个握手会被拒；现在 cookie 在任何握手之前安装，且仍为可选（缺失不再报错）。
+- 供应商：`deepseek_web` 的 `model_type` 永远取预设值，`-m` / `/model deepseek-web/<mode>` 选择被静默丢弃；现在显式选择的模型优先，只有模型仍是预设默认值时才回落到 `model_type`。
+- 供应商：`DEEPSEEK_WEB_TOKEN` 里带 `Bearer` 前缀时被拼成 `Authorization: Bearer Bearer …`；现在前缀被去掉再构造头。
+- 供应商：`deepseek_web` 把普通 JSON 回答当成工具调用。回复以 `{`/`[` 开头且含 `"name"` 就进入工具解析，`{"name": "Alice", "age": 30}` 会抛解析错误或产生幻影调用，答案被丢弃；现在只有同时出现参数键时才按工具调用处理。
+- 供应商：`deepseek_web` 把无法解析的字符串参数包成 `{"value": "<原文>"}` 交给工具。工具收到的不是模型写的参数而是垃圾，而且绕过了本来为语法错误准备的重试；现在这种调用触发一次带原因的纠正回合，参数只接受 JSON 对象或数组。
+- 供应商：`deepseek_web` 的 JSON 修复会改写字符串里的逗号。`_strip_trailing_commas` 用正则匹配“逗号 + 右括号”，`"a, }"` 这类参数值被改成 `"a }"`；现在扫描时跳过字符串内容。
+- 供应商：`deepseek_web` 缺少 `type` 的流片段被整段丢弃，`type` 大小写不一致时也一样；现在按大小写不敏感匹配，无类型片段按答案显示，`response/content` 补丁也计入正文。
+- 供应商：`deepseek_web` 的 DSML 标签只匹配到名字，属性留在清洗后的值里（`name="path"` 会进工具参数），未闭合的标签还会吞掉后续内容；现在完整标签整段消费，只有结尾处的截断标签按开标签处理。
+- 供应商：`deepseek_web` 的 pow 求解在 wasmtime 缺失、模块损坏或挑战字段缺失时抛 `ImportError`/`KeyError`，绕过 `ProviderError` 通道；现在都转成带安装提示或缺失字段名的 `ProviderError`。
+- 供应商：`_read_body` 只捕获 `httpx2.HTTPError`，而读取路径也可能抛出裸 `OSError`/`ssl.SSLError`，TLS 被重置时以 traceback 结束；现在同样映射为 `ProviderError`，代理提示得以生效。
+- 配置：内联 `cookie` 在 `config show` 中以明文输出；现在与 `api_key` 一样脱敏，`cookie`/`cookie_env` 也做字符串类型校验。
+- 供应商：`deepseek_web` 在随包 wasm 缺失时会从 CDN 或第三方镜像下载并直接执行，没有任何完整性校验；现在下载结果必须匹配随包模块的 SHA-256，否则拒绝落盘并报告摘要。
+- 测试：`tests/test_config.py` 的预设端点断言曾被放宽为四种后缀的并集，`openai_chat` 端点写成 `/chat/completion` 也能通过；现在按协议逐个断言。
+
+### 变更
+
+- 版本号升级到 1.5.2。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+
+### 文档
+
+- `README.md` 更新当前版本、协议列表与预设数量（37 个），新增 1.5.1 → 1.5.2 升级说明和可选依赖安装方式；`docs/configuration.md` 重写 DeepSeek 网页版小节（`userToken` 认证、会话 id、流式字段、`tool_parse_retries`、`-m` 选择 `model_type`、wasmtime 安装）；`docs/architecture.md` 补 `deepseek_web.py` 模块行；`docs/compatibility.md` 更新适用版本与 1.5.2 兼容说明。
+
+### 测试
+
+- 新增回归测试：cookie 先于握手且缺失不报错、票据不残留、`Bearer` 前缀不重复、裸 JSON 回答不被当作调用、字符串参数无法解析时抛出、JSON 字符串参数正确解码、修复不再改写字符串内逗号、`model_type` 覆盖、pow 挑战缺字段/非对象、握手返回非对象 JSON、无类型片段与 `response/content` 显示、会话 id 两种形状、`stream`/`client_stream_id` 字段、随包 wasm 存在且能用已知挑战解出答案 32186、预设端点按协议断言。
+
 ## 1.5.1 - 2026-11-08
 
 ### 修复

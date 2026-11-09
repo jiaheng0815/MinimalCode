@@ -1,23 +1,50 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.5.1. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.5.2. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, and 1.5.1 added no further breaking import
-changes (`minimalcode.httpclient` and `minimalcode.clipboard` are new modules,
-not renamed ones).
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, and 1.5.2 added no further breaking
+import changes (`minimalcode.httpclient` and `minimalcode.clipboard` are new
+modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.5.1. `minimalcode.shell.MAX_TIMEOUT_SECONDS`
-is an additive constant, and `SandboxPolicy.isolates_network` keeps the meaning
-it got in 1.5.0.
+format, or import path was removed in 1.5.2. The `deepseek_web` protocol and its
+`deepseek-web` preset are additive; the wasm runtime is an optional extra
+(`minimalcode[deepseek-web]`), so the default install still depends on `httpx2`
+alone.
+
+## What 1.5.2 changed
+
+Every change is a defect fix or an additive protocol:
+
+- `protocol: "deepseek_web"` speaks the chat.deepseek.com web endpoint: the
+  payload is the browser's, the reply is a JSON-patch SSE stream, and the
+  `x-ds-pow-response` proof-of-work ticket is solved with DeepSeek's own wasm
+  module through wasmtime.
+- The session id is read from `biz_data.id` (the real shape; the nested
+  `chat_session.id` still works), and the completion carries `stream: true` plus a
+  `client_stream_id`, without which the server answers one non-SSE JSON body.
+- The single-use PoW ticket no longer rides along on the next turn's handshake,
+  and the optional cookie is attached before the handshakes instead of after them.
+- A `Bearer ` prefix pasted into `DEEPSEEK_WEB_TOKEN` is stripped instead of
+  being doubled, and `-m`/`/model` picks the requested `model_type` over the
+  preset's `default`.
+- Untyped stream fragments are shown as answer text rather than dropped, a
+  `response/content` patch is counted as answer text, an ordinary JSON answer
+  with a `name` field stays prose, and a tool call whose string arguments cannot
+  be decoded asks the model to repair itself instead of passing raw text as
+  `{"value": ...}`.
+- Streamed text is decoded without rewriting commas inside string literals, and
+  the wasm solver allocates each argument at exactly its own length: the module
+  frees with that length, so a reused or rounded buffer makes the call trap.
+- `_read_body` maps bare `OSError`/TLS failures to `ProviderError`, so a dropped
+  TLS session surfaces with the proxy hint instead of a traceback.
+- `web_search` joins the boolean keys that are placeholder-expanded and
+  type-checked, and `config show` redacts an inline `cookie`.
 
 ## What 1.5.1 changed
-
-Every change is a defect fix, and all of them tighten a check that used to be
-inconsistent or stop a case that silently produced wrong output:
 
 - Quotes no longer hide a sensitive path: `type ".env"` and
   `Get-Content '.ssh/id_rsa'` are refused like their unquoted forms. A directory

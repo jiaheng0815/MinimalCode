@@ -95,6 +95,25 @@
       "headers": {},
       "extra_body": {}
     },
+    "deepseek-web": {
+      "protocol": "deepseek_web",
+      "base_url": "https://chat.deepseek.com",
+      "api_key_env": "DEEPSEEK_WEB_TOKEN",
+      "model": "default",
+      "cookie_env": "DEEPSEEK_WEB_COOKIE",
+      "context_window": 262000,
+      "timeout_seconds": 300,
+      "stream": true,
+      "tool_mode": "text",
+      "model_type": "default",
+      "web_search": false,
+      "headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Origin": "https://chat.deepseek.com",
+        "Referer": "https://chat.deepseek.com/"
+      },
+      "extra_body": {}
+    },
     "openai": {
       "protocol": "openai_responses",
       "base_url": "https://api.openai.com/v1",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import ssl
 import time
 from typing import Any
 
@@ -18,6 +19,19 @@ from .common import iter_sse_data
 # Backoff runs 0.5, 1, 2, 4, then 8 seconds per attempt, so all 11 attempts span
 # roughly a minute: long enough to ride out a provider hiccup, short enough that
 # a dead endpoint still fails inside one agent turn.
+
+# A TLS session can be reset after the handshake but before the response headers
+# ("[SSL: UNEXPECTED_EOF_WHILE_READING]"), which httpcore surfaces as ReadError or
+# as a bare ssl.SSLError. One-shot handshakes (session create, challenge fetch) are
+# idempotent and cost nothing server-side, so they retry these; a streamed
+# generation does not, because retrying it could duplicate output and billing.
+HANDSHAKE_RETRY_ERRORS = (
+    ssl.SSLError,
+    httpx2.ReadError,
+    httpx2.WriteError,
+    httpx2.PoolTimeout,
+    ConnectionError,
+)
 
 
 class TransportMixin:
@@ -46,6 +60,15 @@ class TransportMixin:
         """Yield one payload per SSE event, joined across `data:` lines."""
         yield from iter_sse_data(self._checked_lines(lines))
 
+    def _sse_lines(self, response: httpx2.Response):
+        """Yield ``response.iter_lines()`` under the whole-stream deadline.
+
+        Protocols that read raw SSE lines rather than whole events still have to
+        inherit ``timeout_seconds``; calling ``iter_lines`` directly would let a
+        server that trickles one byte hold the turn open indefinitely.
+        """
+        yield from self._checked_lines(response.iter_lines())
+
     def _read_body(self, response: httpx2.Response) -> bytes:
         """Read a response body under the same whole-request deadline.
 
@@ -64,16 +87,42 @@ class TransportMixin:
                         f"({self.timeout_seconds:g}s)"
                     )
                 chunks.append(chunk)
-        except httpx2.HTTPError as exc:
+        except (httpx2.HTTPError, OSError) as exc:
             raise ProviderError(f"provider response read failed: {exc}") from exc
         return b"".join(chunks)
 
+    def _post_json(self, url: str, payload: dict[str, Any]) -> bytes:
+        """POST a small idempotent JSON request and return its body.
+
+        Used for provider handshakes (session creation, challenge fetch) that sit
+        outside the single wire-protocol call. Routed through ``_open_url`` so they
+        inherit the connection retry policy, and given the extra TLS-reset
+        retryable set because a dropped handshake costs nothing to repeat.
+        """
+        response = self._open_url(url, payload, retry_extra=HANDSHAKE_RETRY_ERRORS)
+        try:
+            return self._read_body(response)
+        finally:
+            response.close()
+
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
-        """POST ``payload`` and return a successful response.
+        """POST ``payload`` to the protocol endpoint and return a response."""
+        return self._open_url(self._endpoint(), payload)
+
+    def _open_url(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        retry_extra: tuple[type[BaseException], ...] = (),
+    ) -> httpx2.Response:
+        """POST ``payload`` to ``url`` and return a successful response.
 
         Retries cover connection failures that occurred before a response and
         one 429/503 retry. Any other status is reported through ProviderError
-        with the bounded response body.
+        with the bounded response body. ``retry_extra`` lets an idempotent
+        handshake treat TLS resets as retryable without loosening the policy for
+        a streamed generation.
         """
         # Keep the transport streamed even for a `stream: false` request: the
         # parsers read either SSE lines or the whole body through `_read_body`,
@@ -88,6 +137,7 @@ class TransportMixin:
         # this budget, so one call issues at most httpclient.CONNECTION_ATTEMPTS + 1 requests.
         connection_failures = 0
         status_retried = False
+        retryable_types = httpclient.RETRYABLE_CONNECTION_ERRORS + tuple(retry_extra)
         while True:
             try:
                 remaining = deadline - time.monotonic()
@@ -102,17 +152,17 @@ class TransportMixin:
                     break
                 request = self._client.build_request(
                     "POST",
-                    self._endpoint(),
+                    url,
                     json=payload,
                     timeout=httpx2.Timeout(remaining, connect=min(20.0, remaining)),
                 )
                 response = self._client.send(request, stream=stream)
-            except (httpx2.HTTPError, httpx2.InvalidURL, ValueError) as exc:
+            except (httpx2.HTTPError, httpx2.InvalidURL, ValueError, OSError) as exc:
                 last_error = ProviderError(f"provider network error: {exc}")
                 connection_failures += 1
                 if (
                     connection_failures >= httpclient.CONNECTION_ATTEMPTS
-                    or not isinstance(exc, httpclient.RETRYABLE_CONNECTION_ERRORS)
+                    or not isinstance(exc, retryable_types)
                 ):
                     break
                 delay = min(

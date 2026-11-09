@@ -1,9 +1,9 @@
-"""Provider transport and protocol parsing for three wire formats.
+"""Provider transport and protocol parsing for four wire formats.
 
-The package normalizes the Chat Completions, Responses, and Anthropic Messages
-wire formats into one ``ProviderReply``/``ToolCall`` shape, so the agent loop
-never handles any dialect's JSON directly. ``__all__`` is the complete public
-surface: the client class, its factory, the reply types, and the error type
+The package normalizes the Chat Completions, Responses, Anthropic Messages, and
+DeepSeek web wire formats into one ``ProviderReply``/``ToolCall`` shape, so the
+agent loop never handles any dialect's JSON directly. ``__all__`` is the complete
+public surface: the client class, its factory, the reply types, and the error type
 every failure leaves through. Conversation history, tool dispatch, and
 retry-notice rendering live outside this package; here one call performs exactly
 one HTTP round trip and parses the answer. All requests must go through

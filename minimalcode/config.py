@@ -148,6 +148,7 @@ def _coerce_provider_values(name: str, provider: dict[str, Any]) -> dict[str, An
         "send_reasoning_effort",
         "require_api_key",
         "prompt_cache",
+        "web_search",
     ):
         if key in result:
             result[key] = _coerce_bool(result[key], f"provider {name!r} {key}")
@@ -503,6 +504,7 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         "openai_chat",
         "openai_responses",
         "anthropic_messages",
+        "deepseek_web",
     }:
         raise ConfigError(
             f"{path}: provider {name!r} uses unsupported protocol {protocol!r}"
@@ -537,6 +539,7 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         "send_reasoning_effort",
         "require_api_key",
         "prompt_cache",
+        "web_search",
     ):
         if (
             key in provider
@@ -567,7 +570,7 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
     for key in ("headers", "extra_body"):
         if key in provider and not isinstance(provider[key], dict):
             raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
-    for key in ("api_key", "api_key_env"):
+    for key in ("api_key", "api_key_env", "cookie", "cookie_env"):
         value = provider.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"{path}: provider {name!r} {key} must be a string")
@@ -941,7 +944,13 @@ def ensure_config(
     return path
 
 
-_SENSITIVE_EXACT_KEYS = {"api_key", "apikey", "authorization", "x-api-key"}
+_SENSITIVE_EXACT_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "x-api-key",
+}
 # Token budgets and counters describe costs, not credentials, and environment
 # variable names are safe to print. Redacting them made `config show` hide
 # ordinary settings such as `max_tokens` or `prompt_tokens`.

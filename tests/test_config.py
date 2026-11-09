@@ -118,12 +118,14 @@ class ConfigTests(unittest.TestCase):
                         finally:
                             provider.close()
                     self.assertTrue(endpoint.startswith(("https://", "http://")))
-                    self.assertTrue(
-                        endpoint.endswith(
-                            ("/chat/completions", "/responses", "/messages")
-                        ),
-                        endpoint,
-                    )
+                    expected = {
+                        "openai_chat": "/chat/completions",
+                        "openai_responses": "/responses",
+                        "anthropic_messages": "/messages",
+                        "deepseek_web": "/chat/completion",
+                    }.get(provider_config.get("protocol", "openai_chat"))
+                    self.assertIsNotNone(expected, provider_config)
+                    self.assertTrue(endpoint.endswith(expected), endpoint)
 
     def test_home_environment_override(self) -> None:
         with (

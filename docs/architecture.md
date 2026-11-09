@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.5.1.
+Applies to MinimalCode 1.5.2.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -82,8 +82,9 @@ every tool shares one sandbox, workspace, and configuration instance.
 | `responses.py` | Responses payload, event stream, non-stream parsing |
 | `anthropic.py` | Anthropic Messages payload, SSE stream, non-stream parsing |
 | `anthropic_env.py` | Claude Code style `ANTHROPIC_*` environment provider for `--anthropic-env` |
+| `deepseek_web.py` | DeepSeek web payload, JSON-patch SSE stream, proof of work, text tool protocol |
 | `transport.py` | Request construction, connection retries, HTTP status retries |
-| `common.py` | Usage/content/argument normalization shared by both protocols |
+| `common.py` | Usage/content/argument normalization shared by every protocol |
 | `types.py` | `ToolCall` and `ProviderReply` |
 | `factory.py` | `create_provider` and provider/model/effort resolution |
 

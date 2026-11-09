@@ -1,4 +1,4 @@
-"""Provider client shared by the Chat, Responses, and Anthropic mixins."""
+"""Provider client shared by the Chat, Responses, Anthropic, and web mixins."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from ..errors import ProviderError
 from ..httpclient import build_client, build_headers
 from .anthropic import AnthropicProtocolMixin
 from .chat import ChatProtocolMixin
+from .deepseek_web import CHAT_PATH, DeepSeekWebProtocolMixin
 from .responses import ResponsesProtocolMixin
 from .transport import TransportMixin
 from .types import ProviderReply
@@ -24,6 +25,7 @@ class OpenAICompatibleProvider(
     ChatProtocolMixin,
     ResponsesProtocolMixin,
     AnthropicProtocolMixin,
+    DeepSeekWebProtocolMixin,
 ):
     """HTTP client for OpenAI Chat/Responses and Anthropic Messages APIs."""
 
@@ -44,11 +46,12 @@ class OpenAICompatibleProvider(
             "openai_chat",
             "openai_responses",
             "anthropic_messages",
+            "deepseek_web",
         }:
             raise ProviderError(
                 f"provider {name!r} uses unsupported protocol {protocol!r}; "
-                "expected 'openai_chat', 'openai_responses', or "
-                "'anthropic_messages'"
+                "expected 'openai_chat', 'openai_responses', "
+                "'anthropic_messages', or 'deepseek_web'"
             )
         self.name = name
         self.config = config
@@ -100,6 +103,14 @@ class OpenAICompatibleProvider(
                 f"provider {name!r} requires API key in environment variable {key_env}"
             )
 
+        if protocol == "deepseek_web" and api_key:
+            # The browser sends `Bearer <token>`, but people paste the whole
+            # header value into DEEPSEEK_WEB_TOKEN, which produced
+            # `Authorization: Bearer Bearer <token>` and a 401.
+            stripped = api_key.strip()
+            if stripped.lower().startswith("bearer "):
+                stripped = stripped[len("bearer ") :].strip()
+            api_key = stripped or None
         custom_headers = config.get("headers")
         custom_names = (
             {str(key).lower() for key in custom_headers}
@@ -151,6 +162,11 @@ class OpenAICompatibleProvider(
         """
         parsed = urlsplit(self.base_url)
         path = parsed.path.rstrip("/")
+        if self.protocol == "deepseek_web":
+            new_path = path if path.endswith(CHAT_PATH) else f"{path}{CHAT_PATH}"
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc, new_path, parsed.query, parsed.fragment)
+            )
         if self.protocol == "anthropic_messages":
             if path.endswith("/messages"):
                 new_path = path
@@ -181,6 +197,10 @@ class OpenAICompatibleProvider(
         on_thinking: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         """Send one conversation turn using the configured wire protocol."""
+        if self.protocol == "deepseek_web":
+            return self._ds_web_turn(
+                messages, tools, on_text=on_text, on_thinking=on_thinking
+            )
         if self.protocol == "anthropic_messages":
             payload = self._anthropic_payload(messages, tools)
             if self.stream_enabled:
