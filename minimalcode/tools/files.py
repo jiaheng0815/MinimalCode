@@ -781,11 +781,14 @@ class FileToolsMixin:
             # truncate into a MemoryError that killed the process.
             raise ToolError("file is too large for write")
         original_bytes = target.read_bytes() if existed else None
+        # An existing file whose last line has no terminator still has a style;
+        # reporting `none` while writing the caller's CRLF made the same bytes
+        # describe themselves differently depending on when the file was created.
         newline = (
             _detect_newline_bytes(original_bytes)
             if original_bytes is not None
-            else _detect_newline_optional(content)
-        )
+            else None
+        ) or _detect_newline_optional(content)
         if newline is not None:
             # Keep the file's physical style instead of letting a model's LF
             # payload churn every line of a CRLF checkout.
@@ -862,10 +865,11 @@ class FileToolsMixin:
                 ) from exc
             if "\x00" in original_text:
                 raise ToolError("binary files are not supported by append_file")
-            newline = (
-                _detect_newline(original_text)
-                if original_text
-                else _detect_newline(content)
+            # `_detect_newline_optional`, not `_detect_newline`: a file whose
+            # last line has no terminator still has a style, and the fallback
+            # rewrote the caller's CRLF payload as LF in a CRLF checkout.
+            newline = _detect_newline_optional(original_text) or _detect_newline(
+                content
             )
         separator = ""
         if (
@@ -1027,7 +1031,11 @@ class FileToolsMixin:
                     replacement += span_newline
             updated = prefix + replacement + "".join(lines[end_index:])
             lines_removed = end_index - start_index
-            lines_added = len(new_text.splitlines())
+            # `_physical_lines`, not `splitlines`: the latter also breaks on
+            # U+2028/U+2029, so a one-line patch reported `lines_added: 2` for a
+            # file that `read` still showed as three lines. The separator and
+            # terminator added above belong to the file, not to the payload.
+            lines_added = len(_physical_lines(new_text))
         else:
             if not isinstance(old_text, str) or not old_text:
                 raise ToolError(
@@ -1084,8 +1092,8 @@ class FileToolsMixin:
                     replacement = replacement_for(match.group(0))
                     pieces.append(original[last : match.start()])
                     pieces.append(replacement)
-                    lines_removed += len(match.group(0).splitlines())
-                    lines_added += len(replacement.splitlines())
+                    lines_removed += len(_physical_lines(match.group(0)))
+                    lines_added += len(_physical_lines(replacement))
                     last = match.end()
                 pieces.append(original[last:])
                 updated = "".join(pieces)
@@ -1095,8 +1103,8 @@ class FileToolsMixin:
                     original[: first.start()] + replacement + original[first.end() :]
                 )
                 count = 1
-                lines_removed = len(first.group(0).splitlines())
-                lines_added = len(replacement.splitlines())
+                lines_removed = len(_physical_lines(first.group(0)))
+                lines_added = len(_physical_lines(replacement))
         if bom:
             updated = bom + updated
         try:

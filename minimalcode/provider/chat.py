@@ -366,7 +366,11 @@ class ChatProtocolMixin:
         return ProviderReply(
             content=content,
             tool_calls=calls,
-            finish_reason=str(finish_reason) if finish_reason is not None else None,
+            # An empty string is a missing reason, not a reason: the stream path
+            # already ignores it, and keeping `""` made the agent report a
+            # complete answer as unfinished and `/summary` refuse with
+            # "finish reason ''".
+            finish_reason=str(finish_reason) if finish_reason else None,
             usage=normalize_usage(data.get("usage")),
         )
 

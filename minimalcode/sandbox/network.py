@@ -142,6 +142,13 @@ _NESTED_NETWORK_API = re.compile(
     # PowerShell's download stubs: `(New-Object Net.WebClient).DownloadString()`
     # is the common Windows one-liner, and it names no network client at all.
     r"|webclient|downloadstring|downloadfile"
+    # A detached command is opaque to the token scanner: the quoted payload of
+    # `python -c "import os;os.system('curl http://evil.test')"` reaches the
+    # client as one word, so the launcher itself has to count as a network
+    # reach under `deny` instead of the payload being re-tokenized.
+    r"|os\.system|os\.popen|os\.exec[lv]\w*"
+    r"|subprocess\.(?:run|call|check_call|check_output|popen)"
+    r"|pty\.spawn"
     r")\b",
     re.IGNORECASE,
 )
@@ -172,9 +179,11 @@ _URL_PATTERN = re.compile(
 _HOST_OPTION_RE = re.compile(
     # The separator may be `=`, whitespace, or nothing at all: curl also accepts
     # the attached short form `-xhost:port`, and without that branch a request
-    # to an allowed host could be routed through any proxy.
+    # to an allowed host could be routed through any proxy. `-x` is matched
+    # case-sensitively because `-X POST` is the request method, and reading it
+    # as a proxy made `curl -X POST https://allowed.test` fail the allowlist.
     r"(?:^|\s)(?P<flag>--resolve|--connect-to|--proxy|--preproxy|--socks5|"
-    r"--socks5-hostname|--url|-x)(?:=|\s+|(?<=-x))(?P<value>\S+)",
+    r"--socks5-hostname|--url|(?-i:-x))(?:=|\s+|(?<=(?-i:-x)))(?P<value>\S+)",
     re.IGNORECASE,
 )
 _POWERSHELL_KINDS = frozenset({"powershell", "pwsh"})
@@ -596,31 +605,48 @@ def _command_tokens(segment: str) -> list[str]:
     return tokens[index:]
 
 
+# Subcommands that only group another subcommand (`uv pip install`,
+# `docker compose pull`). Scanning used to continue past *any* positional word,
+# so `npm run install` (a local script named install) counted as a package
+# install and `deny` refused a network-free command.
+_SUBCOMMAND_GROUPS: dict[str, frozenset[str]] = {
+    "docker": frozenset({"buildx", "compose", "container", "context", "image"}),
+    "poetry": frozenset({"env"}),
+    "uv": frozenset({"pip", "tool"}),
+}
+
+
 def _network_subcommand(program: str, arguments: list[str]) -> bool:
     """Return True when a package/git-style program runs a network subcommand."""
     subcommands = _NETWORK_SUBCOMMANDS.get(program)
     if not subcommands:
         return False
     valued = _SUBCOMMAND_OPTION_VALUES.get(program, frozenset())
+    groups = _SUBCOMMAND_GROUPS.get(program, frozenset())
     remaining = list(arguments)
-    # A few option/value pairs can precede the subcommand (`git -C . clone`,
-    # `npm --prefix x install`). Six probes cover them without scanning the
-    # whole command line and mistaking a later argument for a subcommand.
-    for _ in range(6):
-        while remaining and remaining[0].startswith("-"):
-            option = remaining.pop(0).lower()
-            if option in valued and remaining:
+    while remaining:
+        token = remaining.pop(0)
+        lowered = token.lower()
+        if lowered.startswith("-"):
+            if lowered in valued and remaining:
                 remaining.pop(0)
-        if not remaining:
-            return False
-        token = remaining.pop(0).lower()
-        if token in subcommands:
+            elif (
+                lowered.startswith("--")
+                and remaining
+                and remaining[0].lower() not in subcommands
+            ):
+                # An option missing from `valued` leaves its value at the
+                # command position (`npm --loglevel verbose install x`), so the
+                # value must not be read as the subcommand.
+                remaining.pop(0)
+            continue
+        if lowered in subcommands:
             return True
-        # An option with a separate value that is not in `valued` leaves that
-        # value at the command position (`npm --loglevel verbose install x`),
-        # so a non-matching token is not proof of a network-free command.
-        # Continuing also covers `uv pip install`, which nests one level deeper.
-        continue
+        if lowered in groups:
+            # `uv pip install` nests one level deeper, so the next word is the
+            # subcommand; only a known group word may be skipped.
+            continue
+        return False
     return False
 
 

@@ -9,6 +9,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# The PowerShell `-EncodedCommand` argv rules live with the network gate, which
+# already decodes them. Importing them keeps one definition: the payload is a
+# base64 UTF-16 script, so a drifted copy would let
+# `pwsh -EncodedCommand <Get-Content .env>` read the file through this gate.
+from .network import _POWERSHELL_KINDS as POWERSHELL_KINDS
+from .network import _decode_powershell_command as decode_encoded_command
+from .network import _is_encoded_command_flag as is_encoded_command_flag
+
+
+def program_name(token: str) -> str:
+    """Return the bare, lowercase executable name of one command word."""
+    return token.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+
+
 SENSITIVE_DIRECTORY_NAMES = frozenset(
     {
         ".ssh",
@@ -147,6 +161,22 @@ _INLINE_FLAGS = frozenset(
 _MAX_INLINE_DEPTH = 3
 
 
+def is_inline_command_flag(token: str) -> bool:
+    """Return True when a flag makes an interpreter run the next word as code."""
+    lowered = token.lower()
+    if lowered in _INLINE_FLAGS:
+        return True
+    # Combined short flags (`-ec`, `-xc`) still end in `c`, which is what makes
+    # the interpreter read the next argument as a command. The set above was an
+    # exact match, so `bash -ec 'cat .env'` treated the payload as data.
+    return (
+        lowered.startswith("-")
+        and not lowered.startswith("--")
+        and len(lowered) > 1
+        and lowered.endswith("c")
+    )
+
+
 # The sandbox only sees a string and cannot know whether a POSIX shell (`\"`)
 # or PowerShell (`` `" ``) will run it. Ignoring escapes inverted quote parity:
 # `printf "a\"b"; cat .env` made the whole tail look quoted, so the `cat`
@@ -177,8 +207,13 @@ def _escape_variants(command: str) -> tuple[str, ...]:
     return tuple(variants)
 
 
-def _looks_sensitive_token(token: str) -> bool:
-    """Return True when one shell word names a sensitive path."""
+def _looks_sensitive_token(token: str, *, quoted: bool = False) -> bool:
+    """Return True when one shell word names a sensitive path.
+
+    ``quoted`` decides whether a backslash is a shell escape: an unquoted
+    `\\.env` reaches `.env`, while the same text inside quotes is the literal
+    file name `\\.env` (so `rg '\\.env'` keeps working).
+    """
     candidate = token.split("=", 1)[-1] if "=" in token else token
     candidate = candidate.strip(_COMMAND_WORD_TRIM)
     if candidate.startswith("-"):
@@ -191,10 +226,26 @@ def _looks_sensitive_token(token: str) -> bool:
         candidate = value.strip(_COMMAND_WORD_TRIM)
     if not candidate:
         return False
+    spellings = [candidate]
+    if not quoted:
+        # POSIX shells strip a bare backslash before the program sees the word,
+        # so `cat \\.env` opened the same file the bare spelling is refused for.
+        unescaped = candidate.replace("\\", "")
+        if unescaped and unescaped != candidate:
+            spellings.append(unescaped)
+    return any(_resolves_to_sensitive(spelling) for spelling in spellings)
+
+
+def _resolves_to_sensitive(spelling: str) -> bool:
+    """Return True when a path spelling names a credential-like file."""
     try:
-        return is_sensitive_path(Path(candidate).expanduser())
+        expanded = Path(spelling).expanduser()
     except (OSError, RuntimeError, ValueError):
-        return False
+        # An unexpandable `~user` cannot be resolved, but its literal parts are
+        # still a path; declaring the word harmless let `cat ~nosuch/.ssh/id_rsa`
+        # through when user lookup failed.
+        expanded = Path(spelling)
+    return is_sensitive_path(expanded)
 
 
 def _command_words(command: str) -> list[tuple[str, bool]]:
@@ -248,35 +299,79 @@ def _scan_command_paths(command: str, depth: int) -> tuple[str, ...]:
     words = _command_words(command)
     hits: list[str] = []
     previous = ""
+    program = ""
     for token, quoted in words:
-        if quoted and previous.lower() in _INLINE_FLAGS and depth < _MAX_INLINE_DEPTH:
+        if quoted and is_inline_command_flag(previous) and depth < _MAX_INLINE_DEPTH:
             for hit in sensitive_command_paths(token, depth + 1):
                 if hit not in hits:
                     hits.append(hit)
             previous = token
             continue
+        if is_encoded_command_flag(previous) and program in POWERSHELL_KINDS:
+            # The payload is base64 UTF-16LE, so the literal word names nothing;
+            # only the decoded script says which file is read. An undecodable
+            # payload is opaque, and guessing in the caller's favour would let a
+            # corrupt blob through as clean.
+            decoded = (
+                decode_encoded_command(token) if depth < _MAX_INLINE_DEPTH else None
+            )
+            hit = decoded is None or bool(sensitive_command_paths(decoded, depth + 1))
+            if hit and previous not in hits:
+                hits.append(previous)
+            previous = token
+            continue
         if (
-            _looks_sensitive_token(token)
+            _looks_sensitive_token(token, quoted=quoted)
             and token not in hits
             and not _directory_option_value(token, previous)
         ):
             hits.append(token)
+        if not token.startswith(("-", "/")):
+            program = program_name(token)
         previous = token
     return tuple(hits)
 
 
+# Options that name a directory to work in. Only these may be exempted from the
+# directory rule; matching any `--` token also exempted `--`, the end-of-options
+# marker, so `grep -rn . -- ~/.ssh` listed every private key.
+_DIRECTORY_OPTIONS = frozenset(
+    {
+        "--chdir",
+        "--cwd",
+        "--dir",
+        "--directory",
+        "--home",
+        "--prefix",
+        "--project",
+        "--work-tree",
+    }
+)
+# `git -C <dir>` and `docker -c <name>` are directory options too, but `-c` is an
+# inline-command flag for most interpreters, so only the capital form is exempt.
+_DIRECTORY_SHORT_OPTIONS = frozenset({"-C"})
+
+
 def _directory_option_value(token: str, option: str) -> bool:
-    """Return True for a directory-valued long option such as `--home`.
+    """Return True for a directory-valued option such as `--home <dir>`.
 
     The agent itself runs `minimalcode --home <dir>`, and a config directory
     named `.MinimalCode` matched the sensitive-directory rule, so every nested
     agent was refused. Naming a directory is not reading a credential: the
-    exemption needs a `--long` option *and* a bare directory name, so
+    exemption needs a known directory option *and* a bare directory name, so
     `Get-Content -Path "C:\\x\\.ssh\\id_rsa"` is still denied.
     """
-    if not option.startswith("--"):
+    name, separator, attached = token.partition("=")
+    if separator and name.startswith("--"):
+        # `--home=C:\cfg\.minimalcode` carries its value in the same word.
+        if name.lower() not in _DIRECTORY_OPTIONS:
+            return False
+        candidate = attached
+    elif option.lower() in _DIRECTORY_OPTIONS or option in _DIRECTORY_SHORT_OPTIONS:
+        candidate = token
+    else:
         return False
-    candidate = token.strip(_COMMAND_WORD_TRIM)
+    candidate = candidate.strip(_COMMAND_WORD_TRIM)
     if not candidate:
         return False
     try:

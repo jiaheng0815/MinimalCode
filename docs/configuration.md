@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.5.3.
+Applies to MinimalCode 1.5.4.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -174,7 +174,15 @@ checked too (`Get-Content -Path:.env`), and an escaped quote no longer hides the
 rest of the line: the command is analysed once per dialect (`\"` for POSIX,
 `` `" `` for PowerShell) and the findings are unioned, so the inspection can only
 report more. Line continuations (`\` or `` ` `` before a newline) are joined
-before analysis, because the shell joins them before it tokenizes.
+before analysis, because the shell joins them before it tokenizes. Since 1.5.4
+the exemption is limited to known directory options (`--home`, `--dir`,
+`--cwd`, `--chdir`, `--directory`, `--prefix`, `--project`, `--work-tree`,
+`git -C`), so the `--` end-of-options marker no longer exempts a sensitive
+directory (`grep -rn . -- ~/.ssh`), and a combined inline flag such as
+`-ec`/`-xc` hands its quoted payload to the scanner the way `-c` does. A
+PowerShell `-EncodedCommand` payload is decoded and scanned (an undecodable one
+fails closed), and a bare backslash escape is resolved (`cat \.env` opens
+`.env`), while the same text inside quotes stays a literal file name.
 
 `network_policy`, the command timeout/output caps, and the resource limits only
 apply while the execution layer is enabled:
@@ -194,15 +202,17 @@ apply while the execution layer is enabled:
   form of a package install (`py -3 -m pip install`, `python -mpip install`),
   PowerShell's `(New-Object Net.WebClient).DownloadString`/`DownloadFile` both
   inside an inline command and at the command position (the Windows shell is
-  `curl` resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`,
-  `--socks5*`, `-x` in both the `-x host` and the attached `-xhost:port` form)
-  contribute their targets, so an allowed URL cannot be redirected to another
-  host, and a UNC path contributes its host. A backend that isolates the network
+  PowerShell, so it is checked there as well), and a `python -c` payload that
+  launches a process (`os.system`, `os.popen`, `subprocess.*`) counts as a
+  network reach instead of being re-tokenized as an ordinary script. `curl`
+  resolver/proxy options (`--resolve`, `--connect-to`, `--proxy`, `--socks5*`,
+  `-x` in both the `-x host` and the attached `-xhost:port` form, while the
+  uppercase `-X` request method is not read as a proxy) contribute their
+  targets, so an allowed URL cannot be redirected to another host, and a UNC
+  path contributes its host. A backend that isolates the network
   (`bwrap`, `firejail`, `sandbox-exec`, `docker`) removes it under `allowlist`
   exactly as under `deny`, because a container cannot enforce a host allowlist;
   only `allow` opens the network for those backends.
-  under `allowlist` exactly as under `deny`, because a container cannot enforce a
-  host allowlist; only `allow` opens the network for those backends.
 - `allow`: no network restriction.
 
 Backends are probed at execution time, which only happens when the layer is

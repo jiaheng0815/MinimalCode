@@ -247,6 +247,38 @@ class ToolTests(unittest.TestCase):
         self.tools.append_file("crlf.txt", "next")
         self.assertEqual(target.read_bytes(), b"no-terminator\nnext")
 
+    def test_append_file_keeps_a_crlf_payload_when_the_file_has_no_style(self) -> None:
+        # A file whose only line has no terminator has no line ending to copy,
+        # so the caller's CRLF payload must survive instead of being rewritten
+        # as LF; `write` already preserved it in the same situation.
+        target = self.workspace / "style.txt"
+        target.write_bytes(b"abc")
+        self.tools.append_file("style.txt", "z\r\n")
+        self.assertEqual(target.read_bytes(), b"abc\r\nz\r\n")
+
+    def test_write_reports_the_line_ending_it_wrote(self) -> None:
+        # An existing but empty file has no style of its own; the report said
+        # `none` while the bytes kept the caller's CRLF, so the same content
+        # described itself differently depending on how the file was created.
+        target = self.workspace / "empty.txt"
+        target.write_bytes(b"")
+        result = self.tools.write("empty.txt", "a\r\nb\r\n")
+        self.assertEqual(result["line_ending"], "CRLF")
+        self.assertEqual(target.read_bytes(), b"a\r\nb\r\n")
+
+    def test_line_edit_counts_physical_lines_only(self) -> None:
+        # U+2028 is not a physical line break for `read`, so `splitlines` made a
+        # one-line patch report two added lines.
+        self.tools.write("sep.txt", "one\ntwo\nthree\n")
+        result = self.tools.edit(
+            "sep.txt", start_line=2, end_line=2, new_text="a\u2028b"
+        )
+        self.assertEqual(result["lines_added"], 1)
+        self.assertEqual(
+            (self.workspace / "sep.txt").read_text(encoding="utf-8"),
+            "one\na\u2028b\nthree\n",
+        )
+
     def test_append_file_rolls_back_invalid_python(self) -> None:
         self.tools.write("append.py", "value = 1\n")
         target = self.workspace / "append.py"

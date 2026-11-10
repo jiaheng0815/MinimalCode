@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.5.3`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.5.4`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 特性
 
@@ -42,7 +42,17 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。`deepseek_web` 协议需要可选的 wasm 运行时：`python -m pip install "minimalcode[deepseek-web]"`。
 
 ## 升级指南
-## 升级指南
+
+### 从 1.5.3 升级到 1.5.4
+
+1.5.4 只修 bug，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有配置无需改动。
+
+- 沙箱：`--` 被当成目录选项，`grep -rn . -- ~/.ssh`、`cp -a -- ~/.ssh /tmp` 能列出或复制整个凭据目录；组合短选项 `-ec`/`-xc` 后面的引号内容不被扫描；`pwsh -EncodedCommand` 的 base64 载荷不解码；POSIX 下 `cat \.env` 的反斜杠转义不还原。这四处都已堵上，`--home=<dir>` 这类合法的目录选项写法继续放行。
+- 沙箱网络策略：`curl -X POST` 的 `-X` 被当成 `-x` 代理，指向白名单主机的请求会被拒绝；`python -c "…os.system('curl …')"` 这类进程启动器在 `deny` 下没被拦住；`npm run install`、`yarn run install` 这类同名脚本被误判成安装。
+- 工具：`edit` 的 `lines_added` 在含 U+2028/U+2029 的补丁上多算行；`append_file` 在目标文件没有行尾符时把 CRLF 载荷改写成 LF；`write` 会报告 `line_ending: none` 却写入 CRLF。
+- provider：Responses 协议把一次工具调用解析成两次（工具会执行两遍）；非流式请求返回 SSE 时思考增量丢失；空的 `finish_reason` 让已完成的回答被标记为未完成。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.5.2 升级到 1.5.3
 

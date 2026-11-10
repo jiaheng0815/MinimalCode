@@ -1,19 +1,35 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.5.3. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.5.4. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, and 1.5.3 added no further breaking
-import changes (`minimalcode.httpclient` and `minimalcode.clipboard` are new
-modules, not renamed ones).
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, and 1.5.4 added no
+further breaking import changes (`minimalcode.httpclient` and
+`minimalcode.clipboard` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.5.3. Every change is a defect fix: the
-sandbox stops missing escaped quotes, `-Path:value`, line continuations and
-option values that hid a network subcommand, and `grep` now returns the same
-matches with and without ripgrep.
+format, or import path was removed in 1.5.4. Every change is a defect fix: the
+sandbox no longer exempts a sensitive directory behind `--`, scans combined
+inline flags and encoded PowerShell payloads, and the Responses protocol stops
+reporting one tool call twice.
+
+## What 1.5.4 changed
+
+- The directory-option exemption names the options it accepts, so the `--`
+  end-of-options marker no longer exempts a sensitive directory.
+- Combined inline flags (`-ec`, `-xc`) are treated like `-c`, and a PowerShell
+  `-EncodedCommand` payload is decoded and scanned (undecodable fails closed).
+- A bare backslash escape is resolved for unquoted words (`cat \.env`), while
+  quoted text stays a literal file name.
+- `curl -X POST` is no longer read as `-x` (proxy) under `allowlist`, and a
+  process launcher inside `python -c` counts as a network reach under `deny`.
+- A local script named like a network subcommand (`npm run install`) is allowed.
+- `edit` counts physical lines, `append_file` keeps a CRLF payload for a file
+  with no line ending, and `write` reports the ending it actually wrote.
+- The Responses parsers assemble one element id per tool call and surface
+  reasoning deltas on the non-streaming SSE path.
 
 ## What 1.5.3 changed
 

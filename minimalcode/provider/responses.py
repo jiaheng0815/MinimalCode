@@ -345,10 +345,16 @@ class ResponsesProtocolMixin:
                         if not isinstance(item, dict):
                             continue
                         raw_key = str(item.get("id") or event.get("output_index", "0"))
-                        # Resolve through `output_keys`: an item that repeats the
-                        # call without an `id` must update the state its deltas
-                        # were accumulated into instead of opening a second one.
-                        key = output_keys.get(raw_key, raw_key)
+                        # Resolve through `output_keys` in both directions: the
+                        # `added` item usually has no `id`, so its deltas are
+                        # accumulated under the `output_index`. A `done` item that
+                        # arrives *with* an `id` must map back to that state;
+                        # otherwise the same call was reported twice and the tool
+                        # ran a second time.
+                        key = output_keys.get(raw_key) or output_keys.get(
+                            str(event.get("output_index", "0"))
+                        )
+                        key = key or raw_key
                         if "output_index" in event:
                             output_keys[str(event["output_index"])] = key
                         if item.get("type") == "function_call":
@@ -496,6 +502,7 @@ class ResponsesProtocolMixin:
             raise ProviderError("provider returned an invalid response")
         content_parts: list[str] = []
         fallback_text: list[str] = []
+        reasoning_parts: list[str] = []
         call_states: dict[str, dict[str, str]] = {}
         output_keys: dict[str, str] = {}
         final_response: dict[str, Any] = {}
@@ -523,6 +530,12 @@ class ResponsesProtocolMixin:
             if text and (not fallback_text or fallback_text[-1] != text):
                 fallback_text.append(text)
 
+        def emit_thinking(text: str) -> None:
+            # Recorded so the finished reasoning item is not emitted twice.
+            reasoning_parts.append(text)
+            if on_thinking is not None:
+                on_thinking(text)
+
         for data in self._sse_events(text.splitlines()):
             data = strip_sse_bom(data).strip()
             if not data or data == "[DONE]":
@@ -536,21 +549,36 @@ class ResponsesProtocolMixin:
             event_type = str(event.get("type") or "")
             if not event_type and event.get("error"):
                 raise self._response_error(event)
-            if event_type == "response.output_text.delta":
+            if event_type in {
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+            }:
+                # The streaming parser handles these; without the branch a
+                # gateway that ignored `stream: false` dropped every thinking
+                # delta, because the completed response carried no `output`.
+                reasoning = content_text(event.get("delta"))
+                if reasoning:
+                    emit_thinking(reasoning)
+            elif event_type == "response.output_text.delta":
                 delta = content_text(event.get("delta"))
                 if delta:
                     content_parts.append(delta)
                     if on_text is not None:
                         on_text(delta)
-            elif event_type == "response.output_text.done":
-                add_fallback(content_text(event.get("text")))
             elif event_type in {
                 "response.output_item.added",
                 "response.output_item.done",
             }:
                 item = event.get("item")
                 if isinstance(item, dict) and item.get("type") == "function_call":
-                    key = str(item.get("id") or event.get("output_index", "0"))
+                    raw_key = str(item.get("id") or event.get("output_index", "0"))
+                    # Same resolution as the streaming parser: `added` rarely
+                    # carries an `id`, so a `done` item that adds one has to map
+                    # back to the state its deltas were accumulated into.
+                    key = output_keys.get(raw_key) or output_keys.get(
+                        str(event.get("output_index", "0"))
+                    )
+                    key = key or raw_key
                     if "output_index" in event:
                         output_keys[str(event["output_index"])] = key
                     update_call(item, key)
@@ -608,13 +636,15 @@ class ResponsesProtocolMixin:
             has_output = isinstance(final_response.get("output"), list) or isinstance(
                 final_response.get("output_text"), str
             )
-            reply = (
-                self._parse_responses_payload(
-                    final_response, on_text=None, on_thinking=on_thinking
+            reply = None
+            if has_output:
+                reply = self._parse_responses_payload(
+                    final_response,
+                    on_text=None,
+                    # The deltas above already spoke for this thinking text; the
+                    # finished item repeats the same summary.
+                    on_thinking=None if reasoning_parts else on_thinking,
                 )
-                if has_output
-                else None
-            )
             if reply is not None:
                 tool_calls = list(reply.tool_calls)
                 if tool_calls:

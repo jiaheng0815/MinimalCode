@@ -38,9 +38,8 @@ _HEREDOC_RE = re.compile(
 _HERE_STRING_RE = re.compile(
     r"(?ms)(?<!\\)@(?P<quote>['\"])[ \t]*\r?\n.*?^[ \t]*(?P=quote)@[ \t]*$"
 )
-_BLOCK_COMMENT_RE = re.compile(r"(?s)<#.*?#>")
-
-# the following lines were scanned as live code and refused as a bash heredoc.
+# A PowerShell block comment can hold `<<EOF`; the heredoc scan must not read
+# text inside a comment as a live heredoc opener.
 _BLOCK_COMMENT_RE = re.compile(r"(?s)<#.*?#>")
 # A shell that exists on disk is not necessarily a shell that can start: a
 # pwsh build without libicu, or one whose .NET runtime cannot reserve memory,

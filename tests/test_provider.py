@@ -2231,3 +2231,118 @@ class ProviderAttemptBudgetTests(unittest.TestCase):
         self.assertGreaterEqual(len(timeouts), 2)
         self.assertLess(timeouts[1]["read"], timeouts[0]["read"])
         self.assertLessEqual(clock.now, provider.timeout_seconds)
+
+
+class ResponsesStreamAssemblyTests(unittest.TestCase):
+    """The two Responses parsers must assemble one call from one item."""
+
+    def _reply(self, stream: bool, events: list[dict[str, object]]):
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        body += "data: [DONE]\n\n"
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=body.encode("utf-8"),
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="responses",
+            config={
+                "base_url": "https://provider.test/v1",
+                "protocol": "openai_responses",
+                "stream": stream,
+            },
+            model="model-r",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        self.addCleanup(provider.close)
+        return provider
+
+    def _chat(self, provider, seen: list[str]):
+        return provider.stream_chat(
+            [{"role": "user", "content": "inspect"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            on_thinking=seen.append,
+        )
+
+    def test_late_item_id_does_not_duplicate_the_tool_call(self) -> None:
+        # `output_item.added` usually has no `id`, so the deltas accumulate under
+        # the `output_index`; a `done` item that arrives *with* an id opened a
+        # second state, and the agent then ran the same tool twice.
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "name": "read"},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "delta": '{"path":"README.md"}',
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "name": "read",
+                    "arguments": '{"path":"README.md"}',
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                reply = self._chat(self._reply(stream, events), [])
+                self.assertEqual(
+                    [(call.id, call.name, call.arguments) for call in reply.tool_calls],
+                    [("fc_1", "read", '{"path":"README.md"}')],
+                )
+
+    def test_reasoning_deltas_surface_in_both_parsers(self) -> None:
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "delta": "why"},
+            {"type": "response.output_text.delta", "delta": "ok"},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                seen: list[str] = []
+                reply = self._chat(self._reply(stream, events), seen)
+                self.assertEqual(seen, ["why"])
+                self.assertEqual(reply.content, "ok")
+
+
+class EmptyFinishReasonTests(unittest.TestCase):
+    def test_empty_finish_reason_is_treated_as_missing(self) -> None:
+        # `""` is not a reason: keeping it made the agent report a finished
+        # answer as incomplete and `/summary` refuse with "finish reason ''".
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}, "finish_reason": ""}]},
+            )
+
+        provider = OpenAICompatibleProvider(
+            name="chat",
+            config={"base_url": "https://provider.test/v1", "stream": False},
+            model="model-a",
+            thinking="high",
+            transport=httpx2.MockTransport(handler),
+        )
+        self.addCleanup(provider.close)
+        reply = provider.stream_chat([{"role": "user", "content": "hi"}])
+        self.assertIsNone(reply.finish_reason)
+        self.assertEqual(reply.content, "ok")

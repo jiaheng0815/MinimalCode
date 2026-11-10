@@ -1106,6 +1106,56 @@ class QuotedSensitivePathTests(SandboxTestBase):
             with self.subTest(command=command):
                 self.assertTrue(sensitive_command_paths(command))
 
+    def test_end_of_options_marker_does_not_exempt_a_directory(self) -> None:
+        # `--` ends the option list; it is not a directory option. Matching any
+        # `--` token let `grep -rn . -- ~/.ssh` list every private key.
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        for command in ("grep -rn . -- ~/.ssh", "cp -a -- ~/.ssh /tmp/exfil"):
+            with self.subTest(command=command):
+                self.assertIn(".ssh", " ".join(sensitive_command_paths(command)))
+
+    def test_attached_directory_option_is_not_a_credential_read(self) -> None:
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        self.assertEqual(sensitive_command_paths(f"minimalcode --home={self.home}"), ())
+        self.assertTrue(sensitive_command_paths(f"type {self.home}/config.json"))
+
+    def test_combined_inline_flag_payload_is_inspected(self) -> None:
+        # `-ec`/`-xc` still end in `c`, which is what makes the interpreter run
+        # the next word; the exact-match flag set treated the payload as data.
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        for command in (
+            "bash -ec 'cat .env'",
+            "sh -xc 'cat .env'",
+            "zsh -lc 'cat .env'",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(".env", " ".join(sensitive_command_paths(command)))
+
+    def test_powershell_encoded_command_payload_is_scanned(self) -> None:
+        # The payload is base64 UTF-16, so the literal word names no file: only
+        # the decoded script says which credential is read.
+        import base64
+
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        encoded = base64.b64encode("Get-Content .env".encode("utf-16-le")).decode()
+        self.assertTrue(sensitive_command_paths(f"pwsh -EncodedCommand {encoded}"))
+        # An undecodable payload is opaque, so it fails closed.
+        self.assertTrue(sensitive_command_paths("pwsh -EncodedCommand not-base64!"))
+        benign = base64.b64encode("Get-ChildItem .".encode("utf-16-le")).decode()
+        self.assertEqual(sensitive_command_paths(f"pwsh -EncodedCommand {benign}"), ())
+
+    def test_bare_backslash_escape_is_resolved(self) -> None:
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        # A POSIX shell strips the backslash before the program sees the word,
+        # so `cat \.env` opened the file the bare spelling is refused for.
+        self.assertTrue(sensitive_command_paths("cat \\.env"))
+        self.assertTrue(sensitive_command_paths("cat .en\\v"))
+
 
 class NetworkPolicyRegressionTests(SandboxTestBase):
     def _policy(self, **sandbox: object):
@@ -1202,3 +1252,49 @@ class NetworkPolicyRegressionTests(SandboxTestBase):
                 target = audit.denials()[-1].target
                 self.assertNotIn(secret, target)
                 self.assertIn("<redacted>", target)
+
+    def test_request_method_is_not_read_as_a_proxy(self) -> None:
+        # `-X POST` is curl's request method. `-x` is matched case-insensitively
+        # by the option table, so `POST` became an allowlist candidate and a
+        # legitimate request to an allowed host was refused.
+        policy = self._policy(
+            network_policy="allowlist", allowed_hosts=["allowed.test"]
+        )
+        for command in (
+            "curl -X POST https://allowed.test/x",
+            "curl -XPOST https://allowed.test/x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command), command)
+        # The lowercase proxy spelling must still contribute its host.
+        denial = policy.network_denial(
+            "curl -X POST -x evil.test:8080 https://allowed.test/x"
+        )
+        self.assertIn("evil.test", str(denial))
+
+    def test_launcher_inside_an_inline_script_is_a_network_reach(self) -> None:
+        # The quoted payload of `python -c` reaches the client as a single word,
+        # so re-tokenizing it never saw `curl`; the launcher has to count.
+        policy = self._policy(network_policy="deny")
+        for command in (
+            "python -c \"import os;os.system('curl http://evil.test/x')\"",
+            "python -c \"import subprocess;subprocess.run(['curl','http://evil.test'])\"",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+        self.assertIsNone(policy.network_denial('python -c "print(1)"'))
+
+    def test_local_script_named_like_a_network_subcommand_is_allowed(self) -> None:
+        # `npm run install` runs a package script; only a known namespace word
+        # (`uv pip install`) may shift the subcommand one position right.
+        policy = self._policy(network_policy="deny")
+        for command in ("npm run install", "npm run build", "yarn run install"):
+            with self.subTest(command=command):
+                self.assertIsNone(policy.network_denial(command), command)
+        for command in (
+            "uv pip install requests",
+            "npm --loglevel verbose install lodash",
+            "pip --disable-pip-version-check install requests",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
