@@ -75,7 +75,9 @@ for path in spec["files"]:
     try:
         if os.path.getsize(path) > spec["max_bytes"]:
             continue
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        # `utf-8-sig` drops a leading BOM the way ripgrep does; keeping it made
+        # `^first` miss line 1 and echoed U+FEFF into the match text.
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
             number = 0
             while True:
                 line = handle.readline(spec["max_line_chars"])
@@ -482,9 +484,9 @@ def inline_python_grep(
     try:
         for path in files:
             try:
-                if path.stat().st_size > max_bytes:
-                    continue
-                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                # A leading BOM is not part of line 1: ripgrep strips it, and
+                # `^` has to anchor the same way in this engine.
+                with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
                     for number, line in enumerate(handle, start=1):
                         if "\x00" in line:
                             continue

@@ -1,8 +1,8 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.5.2. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.5.3. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, and 1.5.2 added no further breaking
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, and 1.5.3 added no further breaking
 import changes (`minimalcode.httpclient` and `minimalcode.clipboard` are new
 modules, not renamed ones).
 
@@ -10,10 +10,29 @@ The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.5.2. The `deepseek_web` protocol and its
-`deepseek-web` preset are additive; the wasm runtime is an optional extra
-(`minimalcode[deepseek-web]`), so the default install still depends on `httpx2`
-alone.
+format, or import path was removed in 1.5.3. Every change is a defect fix: the
+sandbox stops missing escaped quotes, `-Path:value`, line continuations and
+option values that hid a network subcommand, and `grep` now returns the same
+matches with and without ripgrep.
+
+## What 1.5.3 changed
+
+- The sensitive-path gate inspects the value of a PowerShell `-Param:value` word
+  instead of skipping the whole word as an option.
+- Both shell scanners analyse the command once per quote-escape dialect
+  (`\"` and `` `" ``) and union the findings, so an escaped quote can no longer
+  swallow the rest of the line.
+- Line continuations (`\`, `` ` ``, `^` before a newline) are joined before
+  analysis.
+- A missing entry in the network option table no longer ends the subcommand
+  probe: `npm --loglevel verbose install x` is detected again.
+- Audit redaction covers `https://<token>@host` userinfo and keyword names with
+  suffixes such as `AWS_SECRET_ACCESS_KEY`.
+- `grep` passes `--crlf`, decodes with `utf-8-sig`, applies
+  `tools.max_file_bytes` to both engines, and refuses an explicitly named
+  oversized file with a clear error.
+- A PowerShell block comment no longer makes `powershell_heredoc_delimiter`
+  report a bash heredoc.
 
 ## What 1.5.2 changed
 

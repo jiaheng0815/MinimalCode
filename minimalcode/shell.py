@@ -38,7 +38,10 @@ _HEREDOC_RE = re.compile(
 _HERE_STRING_RE = re.compile(
     r"(?ms)(?<!\\)@(?P<quote>['\"])[ \t]*\r?\n.*?^[ \t]*(?P=quote)@[ \t]*$"
 )
+_BLOCK_COMMENT_RE = re.compile(r"(?s)<#.*?#>")
 
+# the following lines were scanned as live code and refused as a bash heredoc.
+_BLOCK_COMMENT_RE = re.compile(r"(?s)<#.*?#>")
 # A shell that exists on disk is not necessarily a shell that can start: a
 # pwsh build without libicu, or one whose .NET runtime cannot reserve memory,
 # aborts before reading the command. Detection verifies each candidate once so
@@ -261,6 +264,7 @@ def powershell_heredoc_delimiter(command: str) -> str | None:
     active shell is PowerShell; bash/zsh heredocs remain valid there.
     """
     command = _HERE_STRING_RE.sub("", command)
+    command = _BLOCK_COMMENT_RE.sub("", command)
     quote: str | None = None
     for line in command.splitlines():
         positions, quote = _unquoted_heredoc_marks(line, quote)

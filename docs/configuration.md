@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.5.2.
+Applies to MinimalCode 1.5.3.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -64,7 +64,7 @@ kind instead of falling back to `sh` semantics.
 | `allow` | `null` | Allowlist of tool names; `null` enables every tool the provider supports |
 | `allow_outside_workspace` | `false` | Allow file tools outside the workspace |
 | `max_file_chars` | `160000` | Maximum characters returned by one `read` call |
-| `max_file_bytes` | `5000000` | Maximum size accepted by `write`, `append_file`, and `edit` |
+| `max_file_bytes` | `5000000` | Maximum size accepted by `write`, `append_file`, and `edit`; `grep` skips larger files |
 | `max_results` | `200` | Default `grep`/`find` result limit |
 | `max_parallel` | `4` | Concurrency for adjacent read-only tool calls |
 
@@ -92,8 +92,14 @@ search output even when the exclusion globs do not cover its spelling, and both
 engines pass `--no-config` to `ripgrep` so `RIPGREP_CONFIG_PATH` cannot widen
 the file set. An explicit `path` pointing at an ignored directory is still
 searched. Neither path parses `.gitignore`; install `ripgrep` if ignore-file
-semantics are required. A configured `max_results` above a tool's hard cap
-(2000 for `grep`, 5000 for `find`) is clamped to that cap.
+(2000 for `grep`, 5000 for `find`) is clamped to that cap. Both engines skip
+files larger than `tools.max_file_bytes` while walking a directory, so the cap
+is applied to the `ripgrep` walk as well; a `path` that names such a file
+directly raises `file is too large for grep` instead of returning no matches.
+Line endings and encodings agree too: `ripgrep` runs with `--crlf`, so `$`
+anchors at the line content rather than after the `\r`, and both Python engines
+decode with `utf-8-sig`, so a leading BOM is dropped the way `ripgrep` drops it
+and `^` matches line 1.
 
 `read`, `read_range`, `write`, `append_file`, and `edit` operate on UTF-8 text.
 Content containing a NUL byte is treated as binary and rejected, and `edit`
@@ -163,7 +169,12 @@ and a directory named by a long option (`minimalcode --home <dir>`) is not a
 credential read. Multi-word quoted data such as `git commit -m "document .env"`
 is not a path and stays allowed. Credential files are also recognized in their
 YAML/TOML spellings (`secrets.yaml`, `credentials.toml`), `.envrc`, and
-`.git/config`.
+`.git/config`. Since 1.5.3 the value of a PowerShell `-Param:value` word is
+checked too (`Get-Content -Path:.env`), and an escaped quote no longer hides the
+rest of the line: the command is analysed once per dialect (`\"` for POSIX,
+`` `" `` for PowerShell) and the findings are unioned, so the inspection can only
+report more. Line continuations (`\` or `` ` `` before a newline) are joined
+before analysis, because the shell joins them before it tokenizes.
 
 `network_policy`, the command timeout/output caps, and the resource limits only
 apply while the execution layer is enabled:

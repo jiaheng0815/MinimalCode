@@ -77,6 +77,18 @@ class ShellTests(unittest.TestCase):
             "DONE",
         )
 
+    def test_powershell_block_comment_is_not_a_bash_heredoc(self) -> None:
+        # `<#` only ends its own line as a `#` comment, so the comment body was
+        # scanned as live code and a documented example was refused.
+        self.assertIsNone(
+            powershell_heredoc_delimiter("<#\nexample:\ncat <<EOF\n#>\nGet-ChildItem\n")
+        )
+        # An inline block comment with a real heredoc after it still counts.
+        self.assertEqual(
+            powershell_heredoc_delimiter("<# note #>\ncat <<END\nx\nEND"),
+            "END",
+        )
+
     def test_cmd_exe_is_rejected_instead_of_silently_doing_nothing(self) -> None:
         # `cmd -c` prints its banner and exits 0, so the command never ran.
         with (

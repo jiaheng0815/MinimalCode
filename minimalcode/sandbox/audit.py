@@ -17,8 +17,10 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(x-api-key\s*:\s*)[^\s'\"]+"),
     re.compile(
         # `access_token=...` and `client-secret: ...` are as sensitive as a
-        # bare `token=...`, so allow a name prefix before the keyword.
-        r"(?i)\b([\w-]*(?:api[_-]?key|token|password|passwd|secret)\s*[=:]\s*)"
+        # bare `token=...`, so allow a name prefix before the keyword and a
+        # name suffix after it: `AWS_SECRET_ACCESS_KEY=...` carries the value
+        # after the suffix, not right after `secret`.
+        r"(?i)\b([\w-]*(?:api[_-]?key|token|password|passwd|secret)[\w-]*\s*[=:]\s*)"
         r"[^\s'\"]+"
     ),
     re.compile(r"(?i)(--(?:password|token|api-key|header)\s+)[^\s'\"]+"),
@@ -38,6 +40,9 @@ _SECRET_PATTERNS = (
     # `https://user:password@host` puts the credential in the URL itself, which
     # none of the option-shaped patterns above reach.
     re.compile(r"(?i)(://[^/\s:@'\"]+:)[^/\s@'\"]+(?=@)"),
+    # A personal access token is often the whole userinfo
+    # (`https://ghp_...@github.com/...`), with no `:` for the pattern above.
+    re.compile(r"(?i)(://)[^/\s:@'\"]+(?=@)"),
     # `net use \\server\share /user:name password` passes the secret as a
     # separate, positionally paired argument.
     re.compile(r"(?i)(/user:\S+\s+)[^\s'\"]+"),

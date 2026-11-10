@@ -616,9 +616,11 @@ def _network_subcommand(program: str, arguments: list[str]) -> bool:
         token = remaining.pop(0).lower()
         if token in subcommands:
             return True
-        if program == "uv" and token == "pip":
-            continue
-        return False
+        # An option with a separate value that is not in `valued` leaves that
+        # value at the command position (`npm --loglevel verbose install x`),
+        # so a non-matching token is not proof of a network-free command.
+        # Continuing also covers `uv pip install`, which nests one level deeper.
+        continue
     return False
 
 
@@ -729,6 +731,42 @@ def _network_hosts(command: str) -> list[str]:
     return hosts
 
 
+_MASKED_QUOTE = "\ue000"
+
+
+def _join_continuations(command: str) -> str:
+    """Remove the line continuations a shell strips before it tokenizes.
+
+    A POSIX shell joins `cur\\` + newline + `l` into `curl`, and PowerShell does
+    the same with a trailing backtick. Splitting on the raw newline first left
+    two harmless-looking heads, so the client and its host were never checked.
+    """
+    for escape in ("\\", "`", "^"):
+        command = command.replace(escape + "\r\n", "").replace(escape + "\n", "")
+    return command
+
+
+def _escape_variants(command: str) -> tuple[str, ...]:
+    """Return the command plus one spelling per quote-escape dialect.
+
+    The gate cannot know whether a POSIX shell (`\\"`) or PowerShell (`` `" ``)
+    runs the string, and an escaped quote inverted quote parity:
+    ``Write-Output "a`"b"; curl x`` looked like one quoted argument, so the
+    client was never seen. Masking the escaped quote per dialect can only add
+    findings, which keeps the union fail-closed.
+    """
+    joined = _join_continuations(command)
+    variants = [joined]
+    for escape in ("\\", "`"):
+        if escape + '"' in joined or escape + "'" in joined:
+            variants.append(
+                joined.replace(escape + '"', _MASKED_QUOTE).replace(
+                    escape + "'", _MASKED_QUOTE
+                )
+            )
+    return tuple(variants)
+
+
 def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
     """Detect obvious network use and the hosts named on the command line.
 
@@ -748,19 +786,28 @@ def network_signals(command: str) -> tuple[bool, tuple[str, ...]]:
     hosts = _network_hosts(normalized)
     # An SMB share is a network request with no client name and no scheme.
     detected = _UNC_PATTERN.search(normalized) is not None
-    for head in _all_command_heads(normalized):
-        # Compare bare executable names so `/usr/bin/curl`, `curl.exe`, and
-        # `c\url` all match the same entry.
-        if any(name in _NETWORK_COMMANDS for name in _head_variants(head)):
-            detected = True
+    for variant in _escape_variants(command):
+        text = (
+            variant.replace("^", "").replace("`", "")
+            if "^" in variant or "`" in variant
+            else variant
+        )
+        if not detected:
+            for head in _all_command_heads(text):
+                # Compare bare executable names so `/usr/bin/curl`, `curl.exe`,
+                # and `c\url` all match the same entry.
+                if any(name in _NETWORK_COMMANDS for name in _head_variants(head)):
+                    detected = True
+                    break
+        if not detected:
+            # `(New-Object Net.WebClient).DownloadString(...)` names no client
+            # and no scheme; the outer command is the payload the local shell
+            # actually runs.
+            detected = _POWERSHELL_DOWNLOAD_RE.search(text) is not None
+        if not detected:
+            detected = _sequence_detected(text)
+        if detected:
             break
-    if not detected:
-        # `(New-Object Net.WebClient).DownloadString(...)` names no client and
-        # no scheme; the outer command is scanned because it is the payload the
-        # local shell actually runs.
-        detected = _POWERSHELL_DOWNLOAD_RE.search(normalized) is not None
-    if not detected:
-        detected = _sequence_detected(normalized)
     return detected, tuple(hosts)
 
 

@@ -1075,6 +1075,37 @@ class QuotedSensitivePathTests(SandboxTestBase):
         self.assertEqual(sensitive_command_paths(quoted), ())
         self.assertTrue(sensitive_command_paths(f"type '{self.home}/config.json'"))
 
+    def test_option_value_attached_with_a_colon_is_still_a_path(self) -> None:
+        # PowerShell attaches an option value with `-Path:value`; the word was
+        # skipped as an option, so `Get-Content -Path:.env` returned the
+        # credential that `Get-Content .env` is refused for.
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        self.assertTrue(sensitive_command_paths("Get-Content -Path:.env"))
+        self.assertTrue(sensitive_command_paths("Get-Content -LiteralPath:.ssh/id_rsa"))
+        # A plain option name stays data, not a path.
+        self.assertEqual(sensitive_command_paths("rg --hidden -n needle"), ())
+
+    def test_escaped_quote_keeps_the_rest_of_the_line_in_scope(self) -> None:
+        # An escaped quote inverted quote parity, so everything after the `;`
+        # looked quoted and `cat .env` was never inspected. The gate cannot
+        # know the shell dialect, so both spellings have to be caught.
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        for command in (
+            'printf "a\\"b"; cat .env',
+            'Write-Output "a`"b"; Get-Content .env',
+        ):
+            with self.subTest(command=command):
+                self.assertIn(".env", " ".join(sensitive_command_paths(command)))
+
+    def test_line_continuation_does_not_split_a_sensitive_name(self) -> None:
+        from minimalcode.sandbox.sensitive import sensitive_command_paths
+
+        for command in ("cat .en\\\nv", "type .en`\nv"):
+            with self.subTest(command=command):
+                self.assertTrue(sensitive_command_paths(command))
+
 
 class NetworkPolicyRegressionTests(SandboxTestBase):
     def _policy(self, **sandbox: object):
@@ -1124,6 +1155,47 @@ class NetworkPolicyRegressionTests(SandboxTestBase):
             ('curl -b "session=SECRETCOOKIE1" https://x.test', "SECRETCOOKIE1"),
             ('curl -H "Cookie: session=SECRETCOOKIE4" https://x.test', "SECRETCOOKIE4"),
             ('curl --header "X-Token-Value: SECRET5" https://x.test', "SECRET5"),
+        ):
+            with self.subTest(command=command):
+                audit.deny("shell", command, "network denied")
+                target = audit.denials()[-1].target
+                self.assertNotIn(secret, target)
+                self.assertIn("<redacted>", target)
+
+    def test_option_value_does_not_hide_a_network_subcommand(self) -> None:
+        # An option missing from the valued table left its value at the command
+        # position, so `npm --loglevel verbose install x` looked network-free.
+        policy = self._policy(network_policy="deny")
+        for command in (
+            "npm --loglevel verbose install lodash",
+            "pip --log /tmp/pip.log install requests",
+            "docker --config /tmp run alpine echo hi",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+        self.assertIsNone(policy.network_denial("git log --oneline -n 5"))
+
+    def test_escaped_quote_does_not_hide_the_next_command(self) -> None:
+        policy = self._policy(network_policy="deny")
+        for command in (
+            'printf "a\\"b"; curl http://evil.test/x',
+            'Write-Output "a`"b"; curl.cmd http://evil.test/x',
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(policy.network_denial(command), command)
+
+    def test_line_continuation_does_not_split_a_command_head(self) -> None:
+        policy = self._policy(network_policy="deny")
+        self.assertIsNotNone(policy.network_denial("cur\\\nl http://evil.test/x"))
+
+    def test_token_userinfo_and_key_suffix_are_redacted(self) -> None:
+        audit = self._tools().sandbox.audit
+        for command, secret in (
+            (
+                "git clone https://ghp_TOKENVALUE7@github.test/o/r.git",
+                "ghp_TOKENVALUE7",
+            ),
+            ("AWS_SECRET_ACCESS_KEY=KEYVALUE8 aws s3 ls", "KEYVALUE8"),
         ):
             with self.subTest(command=command):
                 audit.deny("shell", command, "network denied")

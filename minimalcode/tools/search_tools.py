@@ -65,6 +65,16 @@ class SearchToolsMixin:
             # rg installed and nothing without it. The restriction is enforced
             # here so both engines agree.
             return {"status": "success", "matches": [], "truncated": False}
+        if target.is_file() and target.stat().st_size > self.max_file_bytes:
+            # The Python engines skip files over `tools.max_file_bytes`, but
+            # ripgrep's `--max-filesize` does not apply to a file named on the
+            # command line. Refusing it here keeps both engines identical and
+            # turns a silent empty result into a clear reason.
+            raise ToolError(
+                f"file is too large for grep: {target} "
+                f"({target.stat().st_size} bytes, tools.max_file_bytes is "
+                f"{self.max_file_bytes})"
+            )
 
         # Prefer ripgrep when it is installed and the backend can spawn argv.
         rg = shutil.which("rg")
@@ -72,6 +82,10 @@ class SearchToolsMixin:
             command = [
                 rg,
                 "--no-config",
+                # `$` must anchor at the end of the line content, not after the
+                # `\r` of a CRLF file; without this, `needle$` matched in the
+                # Python fallback and not with ripgrep installed.
+                "--crlf",
                 "--line-number",
                 "--no-heading",
                 # A single-file target otherwise prints `LINE:TEXT` with no
@@ -83,6 +97,11 @@ class SearchToolsMixin:
                 "--no-ignore",
                 "--no-follow",
                 "--smart-case",
+                # Ripgrep skips oversized files only while walking a directory,
+                # while the Python engines skip them everywhere; the caps are
+                # applied here and in `grep` so both engines agree.
+                "--max-filesize",
+                str(self.max_file_bytes),
                 "--max-columns",
                 str(_MAX_GREP_LINE_CHARS),
                 "--max-columns-preview",

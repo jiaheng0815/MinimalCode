@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.5.2`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.5.3`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 特性
 
@@ -20,7 +20,6 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 - **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
 - **协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 DeepSeek 网页版（`deepseek_web`），其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
 - **多供应商切换**：内置 37 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
-- **多供应商切换**：内置 36 个供应商预设（33 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
 
@@ -43,6 +42,21 @@ minimalcode init
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。`deepseek_web` 协议需要可选的 wasm 运行时：`python -m pip install "minimalcode[deepseek-web]"`。
 
 ## 升级指南
+## 升级指南
+
+### 从 1.5.2 升级到 1.5.3
+
+1.5.3 只修 bug，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有配置无需改动。
+
+- 沙箱：`Get-Content -Path:.env` 这类用冒号粘值的 PowerShell 写法绕过了敏感路径检查；现在 `-Path:值` / `-LiteralPath:值` 里的值同样参与判定。
+- 沙箱：转义引号会让引号配对翻转，`printf "a\"b"; cat .env` 和 ``Write-Output "a`"b"; curl …`` 都被当成「后面全是引号内数据」，于是读出明文或直接出网。现在按 POSIX 与 PowerShell 两种转义各分析一遍并合并结果，只会多报不会漏报。
+- 沙箱：行尾续行符会把命令名拆成两段（`cur\` 换行 `l`），`curl` 因此不再被识别；续行符现在先被合并。
+- 沙箱网络策略：`npm --loglevel verbose install x` 这类「未知选项 + 独立取值」会把真正的子命令顶到第二位，`deny` 下直接放行；现在会继续探测后面的位置。
+- 沙箱审计：`https://<token>@host` 这种只有用户名、没有冒号的凭据，以及 `AWS_SECRET_ACCESS_KEY=…` 这种关键字带后缀的键，之前以明文写进拒绝记录；现在都会被脱敏。
+- `grep`：CRLF 文件上 `$` 锚点在 ripgrep 与 Python 回退之间结果相反；`^` 锚点在带 UTF-8 BOM 的文件上永远不匹配，BOM 还会进入结果文本；超过 `tools.max_file_bytes` 的文件在两种引擎下行为不一致。现在两边都用 `--crlf`、`utf-8-sig` 和同一套大小上限，显式搜索超大文件会得到明确的错误而不是空结果。
+- `shell`：PowerShell 块注释 `<# … #>` 里的 `<<EOF` 被当成 bash heredoc，合法命令被拒绝执行。
+
+详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 1.5.1 升级到 1.5.2
 

@@ -147,11 +147,49 @@ _INLINE_FLAGS = frozenset(
 _MAX_INLINE_DEPTH = 3
 
 
+# The sandbox only sees a string and cannot know whether a POSIX shell (`\"`)
+# or PowerShell (`` `" ``) will run it. Ignoring escapes inverted quote parity:
+# `printf "a\"b"; cat .env` made the whole tail look quoted, so the `cat`
+# returned the credential the bare command is refused for. Each dialect is
+# analysed with its escaped quote masked out and the findings are unioned, so
+# an escape spelling can only add hits.
+_MASKED_QUOTE = "\ue000"
+
+
+def _join_continuations(command: str) -> str:
+    """Remove the line continuations a shell removes before it tokenizes."""
+    for escape in ("\\", "`", "^"):
+        command = command.replace(escape + "\r\n", "").replace(escape + "\n", "")
+    return command
+
+
+def _escape_variants(command: str) -> tuple[str, ...]:
+    """Return the command plus one spelling per quote-escape dialect."""
+    joined = _join_continuations(command)
+    variants = [joined]
+    for escape in ("\\", "`"):
+        if escape + '"' in joined or escape + "'" in joined:
+            variants.append(
+                joined.replace(escape + '"', _MASKED_QUOTE).replace(
+                    escape + "'", _MASKED_QUOTE
+                )
+            )
+    return tuple(variants)
+
+
 def _looks_sensitive_token(token: str) -> bool:
     """Return True when one shell word names a sensitive path."""
     candidate = token.split("=", 1)[-1] if "=" in token else token
     candidate = candidate.strip(_COMMAND_WORD_TRIM)
-    if not candidate or candidate.startswith("-"):
+    if candidate.startswith("-"):
+        # PowerShell attaches an option value with a colon (`-Path:.env`), so a
+        # word starting with `-` can still carry the path; only a word that is
+        # a bare option name is data-free.
+        _name, separator, value = candidate.partition(":")
+        if not separator:
+            return False
+        candidate = value.strip(_COMMAND_WORD_TRIM)
+    if not candidate:
         return False
     try:
         return is_sensitive_path(Path(candidate).expanduser())
@@ -197,6 +235,16 @@ def sensitive_command_paths(command: str, depth: int = 0) -> tuple[str, ...]:
     (`git commit -m "document .env"`), except when it is the command handed to
     `sh -c` / `cmd /c` / `pwsh -Command`, which is scanned in turn.
     """
+    hits: list[str] = []
+    for variant in _escape_variants(command):
+        for hit in _scan_command_paths(variant, depth):
+            if hit not in hits:
+                hits.append(hit)
+    return tuple(hits)
+
+
+def _scan_command_paths(command: str, depth: int) -> tuple[str, ...]:
+    """Scan one dialect spelling of ``command`` for sensitive words."""
     words = _command_words(command)
     hits: list[str] = []
     previous = ""

@@ -813,6 +813,54 @@ class ToolTests(unittest.TestCase):
         )
         self.assertEqual(len(anchored["matches"]), 1)
 
+    def test_ripgrep_is_told_about_crlf_line_endings(self) -> None:
+        # Without --crlf ripgrep keeps the `\r` in the line, so `needle$`
+        # matched in the Python fallback and not with ripgrep installed.
+        (self.workspace / "crlf.txt").write_bytes(b"needle\r\nother\r\n")
+        path = str(self.workspace / "crlf.txt")
+        with (
+            patch(
+                "minimalcode.tools.search_tools.shutil.which",
+                return_value="/usr/bin/rg",
+            ),
+            patch(
+                "minimalcode.tools.search.run_bounded_command",
+                return_value=(0, [f"{path}:1:needle"], False, ""),
+            ) as run,
+        ):
+            result = self.tools.grep("needle$", path="crlf.txt")
+        self.assertIn("--crlf", run.call_args.args[0])
+        self.assertEqual(len(result["matches"]), 1)
+
+    def test_python_grep_drops_a_utf8_bom_before_matching(self) -> None:
+        # `utf-8` kept U+FEFF in line 1, so `^first` missed there, and `first`
+        # echoed the marker into the match text the model sees.
+        (self.workspace / "bom.txt").write_bytes(
+            b"\xef\xbb\xbffirst line\r\nsecond\r\n"
+        )
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            anchored = self.tools.grep("^first", path="bom.txt")
+            plain = self.tools.grep("first", path="bom.txt")
+        self.assertEqual(
+            [line.rsplit(":", 1)[-1] for line in anchored["matches"]], ["first line"]
+        )
+        self.assertEqual(
+            [line.rsplit(":", 1)[-1] for line in plain["matches"]], ["first line"]
+        )
+
+    def test_grep_file_size_cap_is_the_same_in_both_engines(self) -> None:
+        # ripgrep ignores --max-filesize for a file named on the command line,
+        # so the same call returned matches with rg installed and nothing
+        # without it. A directory walk skips the file in both engines.
+        self.tools.max_file_bytes = 8
+        (self.workspace / "big.txt").write_text("needle\n" * 4, encoding="utf-8")
+        with self.assertRaisesRegex(ToolError, "too large for grep"):
+            self.tools.grep("needle", path="big.txt")
+        with patch("minimalcode.tools.search_tools.shutil.which", return_value=None):
+            with self.assertRaisesRegex(ToolError, "too large for grep"):
+                self.tools.grep("needle", path="big.txt")
+            self.assertEqual(self.tools.grep("needle", path=".")["matches"], [])
+
     def test_python_grep_exact_limit_is_not_truncated(self) -> None:
         self.tools.write("limits.txt", "needle 1\nneedle 2\nneedle 3\n")
         target = self.workspace / "limits.txt"

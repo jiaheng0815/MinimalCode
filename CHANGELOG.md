@@ -1,5 +1,32 @@
 # 更新日志
 
+## 1.5.3 - 2026-11-10
+
+### 修复
+
+- 沙箱：PowerShell 的 `-Param:value` 写法绕过敏感路径检查。`_looks_sensitive_token` 对以 `-` 开头的词整体返回 False，而 PowerShell 用冒号粘值，于是 `Get-Content -Path:.env`、`Get-Content -LiteralPath:C:\x\.env`、`Set-Content -Path:.env` 都读得到 `Get-Content .env` 会被拒绝的明文。现在冒号后面的值同样参与判定，纯选项名（`rg --hidden`）照旧跳过。
+- 沙箱：转义引号让引号配对翻转。两个扫描器都不认转义，`printf "a\"b"; cat .env` 和 ``Write-Output "a`"b"; Get-Content .env`` 里的 `\"` / `` `" `` 被当成收尾引号，`;` 之后的整段成了「引号内数据」，凭据被 `shell` 原样打印。现在按 POSIX 与 PowerShell 两种转义各遮蔽一次再合并结果，只增加命中、不减少。
+- 沙箱：行续行符把命令名和文件名拆成两段。POSIX 在分词前会把 `\`+换行、PowerShell 会把 `` ` ``+换行、`cmd` 会把 `^`+换行消掉，而扫描器先在裸换行处切分，`cur\`+换行+`l` 只剩 `cur` 和 `l` 两个无害的词，`curl` 不再被识别；`cat .en\`+换行+`v` 同样漏检。现在两种扫描器都先合并续行符。
+- 沙箱网络策略：未知选项的独立取值把真正的子命令顶到第二位。`_network_subcommand` 只跳过 `_SUBCOMMAND_OPTION_VALUES` 里有记录的选项值，`--loglevel verbose`、`--log /tmp/pip.log`、`--config /tmp` 的第一个位置参数被当成子命令，随即 `return False`，`npm --loglevel verbose install lodash`、`pip --log /tmp/pip.log install requests`、`docker --config /tmp run …` 在 `deny` 下直接放行、`allowlist` 下跳过主机比对。六次探测的循环本来就是为这种情况写的，非匹配 token 现在继续探测而不是结束。
+- 沙箱网络策略：同一条转义引号问题在 `_segments` 上重复出现，`;` 之后真正的 `curl` 完全没有进入 `_all_command_heads`。
+- 沙箱审计：`https://<token>@host` 这种只有凭据、没有冒号的 URL 用户名不被脱敏，`AWS_SECRET_ACCESS_KEY=…` 这种关键字带后缀的键也匹配不到（正则要求 `secret` 后紧跟 `=`/`:`）。`git clone` / `aws` 正是被网络策略拒绝的命令，整串凭据会进入 `SandboxDenial.target`，再由 `/status` 的 `recent_denials` 输出给用户和模型。
+- 工具：`grep` 在 CRLF 文件上的 `$` 锚点两种引擎结果相反。`--crlf` 让 ripgrep 把行的内容结束在 `\r` 之前，而 Python 引擎本来就会 `rstrip("\r\n")`，`search.py` 里「ripgrep 不会找到」的注释恰好说反了：`needle$` 只有装了 rg 才返回空。现在 rg 调用带 `--crlf`，三种引擎一致。
+- 工具：UTF-8 BOM 让 `^` 锚点永远匹配不到第一行。Python 引擎用 `utf-8` 打开，U+FEFF 留在行首，`^first` 不匹配，而不带 `^` 的同一模式又把 BOM 写进结果文本；ripgrep 会先剥掉 BOM。现在两处都改成 `utf-8-sig`。
+- 工具：超过 `tools.max_file_bytes` 的文件在两种引擎下行为不一致。Python 引擎直接跳过，ripgrep 的 `--max-filesize` 却只作用于目录遍历，显式给出的文件照样搜索；同一个 `grep` 调用在有/无 rg 时一个返回命中、一个返回空。现在目录遍历两边用同一个上限，显式指定超大文件则报 `file is too large for grep` 并带上实际字节数与上限。
+- 工具：`powershell_heredoc_delimiter` 把 PowerShell 块注释当成 bash heredoc。`<#` 的 `#` 只结束所在行，注释体里的 `cat <<EOF` 被当成待执行代码，`shell` 于是以「PowerShell 7 不支持 bash heredoc」为由拒绝了合法命令。现在块注释在扫描前整段移除。
+
+### 变更
+
+- 版本号升级到 1.5.3。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+
+### 文档
+
+- `README.md` 更新当前版本与 1.5.2 → 1.5.3 升级说明；同时删掉「多供应商切换」里 36 个预设的重复旧条目（1.5.2 起是 37 个）。`docs/configuration.md` 补充 `grep` 的 CRLF/BOM/大小上限说明和敏感路径的新规则，`docs/compatibility.md`、`docs/architecture.md` 更新适用版本与 1.5.3 变更清单。
+
+### 测试
+
+- 新增回归测试：`-Path:.env`、转义引号（POSIX 与 PowerShell）、续行符（`\` 与 `` ` ``）、未知选项后的网络子命令、转义引号后面的 `curl`、续行符拆开的 `curl`、URL 内 token 与 `AWS_SECRET_ACCESS_KEY` 脱敏、rg 调用带 `--crlf`、BOM 下的 `^` 锚点与结果文本、超大文件的显式报错与目录跳过、PowerShell 块注释不是 heredoc。
+
 ## 1.5.2 - 2026-11-09
 
 ### 新增
