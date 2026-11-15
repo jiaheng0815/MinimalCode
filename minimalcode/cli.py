@@ -78,7 +78,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Keep the read-only tools (read, grep, find, read_image, web_search, "
-            "web_fetch) and refuse every tool that can change the workspace"
+            "web_fetch, and MCP tools the server marks read-only) and refuse "
+            "every tool that can change the workspace"
         ),
     )
     parser.add_argument("--cwd", help="Workspace directory")
@@ -155,6 +156,7 @@ _MANAGEMENT_COMMANDS = (
     "config",
     "import-pi",
     "init",
+    "mcp",
     "sandbox",
     "sessions",
     "shell",
@@ -320,6 +322,28 @@ def _management_command(argv: Sequence[str]) -> int | None:
         runner = SandboxRunner.from_settings(settings, workspace)
         payload = runner.summary()
         payload["available_backends"] = available_backends()
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    if command == "mcp":
+        from .mcp import MCPManager
+        from .sandbox import SandboxRunner
+
+        parser = argparse.ArgumentParser(prog="minimalcode mcp")
+        parser.add_argument("--home")
+        parser.add_argument("--cwd", help="Workspace directory")
+        args = parser.parse_args(argv[1:])
+        settings = load_settings(args.home)
+        workspace = _resolve_cwd(args.cwd)
+        sandbox = SandboxRunner.from_settings(settings, workspace)
+        manager = MCPManager.from_settings(settings, workspace, sandbox=sandbox)
+        try:
+            # Starting the servers is the point of this command: a server that
+            # cannot start must be visible here before a paid model turn.
+            manager.start()
+            payload = manager.summary()
+        finally:
+            manager.close()
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
@@ -687,6 +711,7 @@ def _switch_runtime(
             model=resolved_model,
             thinking=provider.thinking,
             read_only=getattr(agent.tools, "read_only", False),
+            mcp_manager=getattr(agent.tools, "mcp", None),
         )
         old_provider = agent.provider
         old_tools = agent.tools
@@ -762,6 +787,45 @@ def _handle_model(agent: Agent, settings: Settings, text: str) -> bool:
         f"{sanitize_terminal_text(name)}/{sanitize_terminal_text(resolved_model)}"
     )
     return True
+
+
+def _handle_mcp(agent: Agent, text: str) -> None:
+    """Print MCP server state; ``/mcp refresh`` re-lists server tools."""
+    parts = text.split()
+    action = parts[1].lower() if len(parts) > 1 else ""
+    if action and action != "refresh":
+        print("usage: /mcp [refresh]", file=sys.stderr)
+        return
+    manager = getattr(agent.tools, "mcp", None)
+    if manager is None:
+        print("this runtime has no MCP manager", file=sys.stderr)
+        return
+    if action == "refresh":
+        try:
+            added = agent.refresh_tools()
+        except (MinimalCodeError, OSError) as exc:
+            print(
+                f"mcp refresh failed: {sanitize_terminal_text(str(exc))}",
+                file=sys.stderr,
+            )
+            return
+        if added:
+            print("mcp: added " + sanitize_terminal_text(", ".join(sorted(added))))
+        else:
+            print("mcp: no new tools")
+    payload = manager.summary()
+    for server in payload.get("servers", []):
+        line = (
+            f"{server['name']}  {server['transport']}  {server['state']}  "
+            f"{len(server.get('tools', []))} tools"
+        )
+        if server.get("error"):
+            line += f"  {server['error']}"
+        print(sanitize_terminal_text(line))
+    if not payload.get("servers"):
+        print("no MCP servers configured (add mcp.servers to settings.json)")
+    for note in payload.get("notes", []):
+        print(sanitize_terminal_text(f"note: {note}"), file=sys.stderr)
 
 
 def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
@@ -1150,6 +1214,7 @@ def _chat_loop(
                         model=agent.provider.model,
                         thinking=agent.provider.thinking,
                         read_only=getattr(agent.tools, "read_only", False),
+                        mcp_manager=getattr(agent.tools, "mcp", None),
                     ),
                 )
             except (MinimalCodeError, OSError, ValueError) as exc:
@@ -1198,10 +1263,13 @@ def _chat_loop(
         if head == "/model":
             _handle_model(agent, settings, text)
             continue
+        if head == "/mcp":
+            _handle_mcp(agent, text)
+            continue
         if command == "/help":
             print(
                 "/new  /clear  /compact  /summary  /session  /status  "
-                "/model  /effort  /exit"
+                "/model  /effort  /mcp  /exit"
             )
             print("multiline: end a line with \\ to continue, or paste a block")
             print(
@@ -1281,6 +1349,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     web_client = None
     vision_client = None
     agent = None
+    mcp_manager = None
     try:
         store = SessionStore(settings)
         resumed = None
@@ -1392,12 +1461,18 @@ def run(argv: Sequence[str] | None = None) -> int:
             web_client = agent.tools.web_client
             vision_client = agent.tools.vision_client
             provider = agent.provider
+            mcp_manager = getattr(agent.tools, "mcp", None)
         if web_client is not None:
             web_client.close()
         if vision_client is not None:
             vision_client.close()
         if provider is not None:
             provider.close()
+        if mcp_manager is not None:
+            # A stdio server is a child process; leaving it behind after the
+            # answer is printed would keep its pipes (and possibly a language
+            # runtime) alive for no reason.
+            mcp_manager.close()
 
 
 def _standard_stream_is_pipe(stream: object) -> bool:

@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.5.4.
+Applies to MinimalCode 1.6.0.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -33,6 +33,7 @@ CLI
 | `vision.py` | Configurable provider vision client for inline image understanding |
 | `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
+| `mcp/` | MCP client: JSON-RPC framing, stdio/HTTP/SSE transports, tool discovery, and the server manager |
 | `subagent.py` | Child `minimalcode -p` command construction, depth tracking |
 | `session.py` | Append-only JSONL history, project-scoped discovery, post-compaction rewrite |
 | `agent.py` | Tool loop, concurrent subagent and read-only dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
@@ -59,7 +60,23 @@ Private helpers are imported from the submodule that defines and uses them.
 | `validation.py` | Argument arity/type checks before a handler runs |
 
 `ToolRuntime` is composed from the file, search, process, and remote mixins, so
-every tool shares one sandbox, workspace, and configuration instance.
+every tool shares one sandbox, workspace, and configuration instance. It also
+owns the `MCPManager`, so the discovered MCP tools follow the same
+`tools.allow`, `--read-only`, and dispatch path as the built-in ones.
+
+### `mcp/`
+
+| Module | Responsibility |
+|---|---|
+| `protocol.py` | JSON-RPC 2.0 message builders/validators, content conversion, tool schema conversion and name normalisation |
+| `transport.py` | `StdioTransport` (child process pipes), `HTTPTransport` (streamable HTTP), `SSETransport` (legacy HTTP+SSE), base environment for stdio servers |
+| `client.py` | `MCPClient`: handshake, `tools/list` pagination, `tools/call`, server-request handling, per-server status |
+| `manager.py` | `MCPManager`: start servers concurrently, failure isolation, namespaced tool index, allowlist/read-only helpers, refresh, shutdown |
+
+A client serialises requests over one session and answers `ping` and
+`roots/list` from inside the receive loop. Sampling and elicitation are refused
+with `-32601`; the client has no second model call to offer.
+
 
 ### `sandbox/`
 
@@ -125,6 +142,8 @@ The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 - `rg` is used when available; a timeout-bounded Python fallback keeps commands working without it.
 - Shell and search output is captured through bounded head/tail buffers, so a noisy command cannot exhaust memory or disk.
 - Tool output is truncated by head and tail, preserving both leading context and final errors.
+- MCP servers start concurrently (at most four at a time), and an empty `mcp.servers` object starts no thread or process at all. A failed server costs one timeout window at startup and nothing afterwards, because its tools are simply absent from the advertised list.
+- MCP results are converted to text before they reach the transcript: image and audio blocks report their MIME type and payload size instead of inlining base64, and the whole result is clipped by head and tail under `mcp.max_output_chars`.
 - Untrusted model, tool, and error text is stripped of terminal control sequences before display.
 - Interactive input is read line by line: bracketed paste keeps a pasted block in one message, buffered input (`msvcrt.kbhit` on Windows, `select` elsewhere) joins the lines of a terminal that does not support it, and a trailing `\` continues the message. Non-interactive prompts and piped stdin are untouched.
 - Session writes are append-only, with one exception: a compaction that would leave the file more than twice the size of the state it keeps rewrites it atomically (temp file, `fsync`, `os.replace`), and configuration is otherwise the only atomically rewritten file.

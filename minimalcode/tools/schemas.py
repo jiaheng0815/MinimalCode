@@ -398,6 +398,7 @@ def available_tool_schemas(
     subagent: bool = False,
     *,
     allowed: frozenset[str] | None = None,
+    mcp_schemas: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return the schemas enabled by the active clients and depth limit.
 
@@ -405,6 +406,8 @@ def available_tool_schemas(
     dispatcher's accepted names stay in sync. ``allowed`` carries the
     ``tools.allow`` / ``--read-only`` restriction so a disabled tool is never
     advertised: a schema the model can see but not call only wastes a turn.
+    ``mcp_schemas`` are the declarations discovered from MCP servers; they are
+    filtered by the same allowlist as the built-in tools.
     """
     schemas = list(TOOL_SCHEMAS)
     if subagent:
@@ -413,6 +416,8 @@ def available_tool_schemas(
         schemas.append(READ_IMAGE_SCHEMA)
     if web_client is not None and web_client.enabled:
         schemas.extend(_web_schemas(web_client))
+    if mcp_schemas:
+        schemas.extend(mcp_schemas)
     if allowed is None:
         return schemas
     return [schema for schema in schemas if schema["function"]["name"] in allowed]

@@ -48,6 +48,14 @@
     "markdown_highlight": true,
     "theme": "dark"
   },
+  "mcp": {
+    "enabled": true,
+    "startup_timeout_seconds": 20,
+    "timeout_seconds": 60,
+    "max_output_chars": 60000,
+    "max_tools": 200,
+    "servers": {}
+  },
   "providers": {
     "deepseek": {
       "protocol": "openai_responses",

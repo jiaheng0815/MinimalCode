@@ -1,5 +1,41 @@
 # 更新日志
 
+## 1.6.0 - 2026-11-11
+
+### 新增
+
+- MCP：新增 `minimalcode/mcp/` 包，MinimalCode 可以直接连接 Model Context Protocol 服务器。三种传输都支持：`stdio`（子进程 + 换行分隔的 JSON-RPC）、`http`（streamable HTTP：一条消息一次 POST，响应可以是 JSON 或 SSE，带 `Mcp-Session-Id` 与 `MCP-Protocol-Version` 头）、`sse`（旧版 HTTP+SSE：长连接 GET 的 `endpoint` 事件给出 POST 地址）。仍只依赖 `httpx2`，没有引入 MCP SDK。
+- MCP：服务器工具以 `mcp__<server>__<tool>` 暴露给模型，与内置工具同处一个 schema 列表。`tools/list` 的分页会被读到底；`inputSchema` 缺失或不是对象时按「无参数」处理，避免一个坏声明让整个请求被供应商拒绝；超过 64 字符或含非法字符的工具名会被规范化，截断时带原名的短哈希，两个规范化后同名的工具不会互相覆盖。
+- MCP：工具结果按内容类型转换：`text` 原样保留，`image`/`audio` 只报告 MIME 与 base64 长度（不把二进制塞进上下文），`resource` 带 URI 输出文本或 blob 大小，`resource_link` 输出链接，只有 `structuredContent` 时渲染成 JSON；总长度受 `mcp.max_output_chars` 约束并首尾同时保留。`isError` 结果标记为 `status: error`，JSON-RPC 错误与超时变成 `ToolError`，不会终止回合。
+- MCP：双向协议。客户端应答服务器的 `ping` 与 `roots/list`（返回当前工作区 URI），对 `sampling/createMessage`、`elicitation/create` 返回 `-32601`；`notifications/tools/list_changed` 会被记录，`/mcp refresh` 重新拉取工具列表并重建本会话的 schema。
+- MCP：生命周期。启动时最多 4 个服务器并发连接；单个服务器启动失败（命令不存在、握手超时、协议错误）只记录在该服务器名下，其余服务器与所有内置工具照常工作。`/new`、`/model` 复用同一个管理器，不会重复拉起服务器；进程退出时统一 `terminate` → `kill` 并关闭管道。
+- MCP：新增 `minimalcode mcp [--cwd DIR]` 命令，输出服务器状态、协议版本、服务器名/版本与工具清单的 JSON；不发起模型请求即可验证配置。
+- MCP：新增 `/mcp` 交互命令查看服务器状态，`/mcp refresh` 重新发现工具并重建 schema（服务器启动后才出现的工具、或运行中新增的工具都能进入本轮会话）。
+- 配置：新增 `mcp.enabled`、`mcp.startup_timeout_seconds`（默认 20）、`mcp.timeout_seconds`（默认 60）、`mcp.max_output_chars`（默认 60000）、`mcp.max_tools`（默认 200），以及 `mcp.servers.<name>`：`transport`、`command`、`args`、`env`、`inherit_env`、`cwd`、`url`、`headers`、`enabled`、`read_only`、`timeout_seconds`、`startup_timeout_seconds`、`include_tools`、`exclude_tools`。服务器名限定为 `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`，因为它会成为工具名的一部分。
+- 策略：`tools.allow` 现在也能写 MCP 名字，支持精确名、`mcp__<server>` 和 `mcp__<server>__*` 三种写法；写错时报错会列出已发现的 MCP 工具，或在服务器启动失败时附上失败原因。`--read-only` 保留服务器声明 `readOnlyHint: true` 的工具，或整台服务器配置了 `read_only: true` 时保留其全部工具。
+
+### 变更
+
+- 版本号升级到 1.6.0。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- `minimalcode.mcp` 的 `__all__` 导出 `MCPClient`、`MCPManager`、`MCPServerConfig`、`MCPTool`、`MCPError`、`MCPTimeout`、`TOOL_PREFIX`、`sanitize_tool_name`；内部实现按 `protocol`、`transport`、`client`、`manager` 分工。
+- `Agent.status()` 增加 `mcp` 字段（服务器状态、工具数、错误与提示），已有字段含义不变；`/status` 的 JSON 因此多一个键。
+- 没有配置 MCP 服务器时不启动任何线程或子进程，`mcp.servers` 默认为空对象，零开销。
+- stdio 服务器默认只继承解释器与运行所需的基础环境变量（`PATH`、`HOME`/`USERPROFILE`、`SystemRoot`、`TEMP`、`LANG` 等），不再默认拿到父进程里的 API key；需要全量继承时设 `inherit_env: true`，或把具体变量写进 `env`。`cwd` 经过与文件工具相同的沙箱路径策略，默认就是工作区。
+
+### 修复
+
+- MCP：`ToolRuntime` 构造失败（例如 `tools.allow` 写错工具名）时会关闭刚启动的服务器，而不是留下子进程继续持有工作区目录。
+- MCP：未发现的 `mcp__...` 名字报 `unknown tool`，而不是被 `tools.allow` 的检查误报成「被禁用」。
+- MCP：只有 `mcp__` 前缀且确实在当前索引里的名字才会走 MCP 分发；拼错或已消失的工具名不会再被转发给任何服务器。
+
+### 文档
+
+- `README.md` 更新当前版本、特性、快速开始、CLI 参考、交互命令、工具列表、项目结构与 1.5.4 → 1.6.0 升级说明；`docs/configuration.md` 新增 MCP 章节（三种传输、每个配置键、安全边界、示例）；`docs/architecture.md` 增加 `mcp/` 模块职责与性能取舍；`docs/compatibility.md` 记录 1.6.0 只有新增，没有破坏性变更。
+
+### 测试
+
+- 新增 `tests/test_mcp.py`：真实子进程的 stdio 服务器覆盖握手、分页发现、工具调用、结构化结果、图像内容、JSON-RPC 错误、超时、`roots/list`、`cwd`/环境变量边界、工具名冲突、启动失败降级、运行中工具变更与刷新；HTTP 传输覆盖 JSON/SSE 响应、会话头与协议版本头、错误状态；旧版 SSE 覆盖 `endpoint` 事件与 POST 目标；另覆盖配置校验、`${VAR}` 重定型、凭据打码、`tools.allow` 通配与 `--read-only` 策略，以及 Agent 工具循环实际调用 MCP 工具。
+
 ## 1.5.4 - 2026-11-10
 
 ### 修复

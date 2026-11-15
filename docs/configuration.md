@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.5.4.
+Applies to MinimalCode 1.6.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -632,7 +632,135 @@ JPEG, PNG, GIF, and WebP are accepted. Images are read through the same
 workspace check as `read`, so files outside the workspace require
 `tools.allow_outside_workspace: true`.
 
+## MCP
+
+MinimalCode can attach Model Context Protocol servers and expose their tools to
+the model as `mcp__<server>__<tool>`. The client speaks JSON-RPC directly, so
+the only dependency is still `httpx2`.
+
+No server is started while `mcp.servers` is empty. A server that fails to start
+(no such command, handshake timeout, protocol error) is recorded and skipped:
+the built-in tools and the remaining servers keep working, and the failure is
+shown by `/mcp`, `/status`, and `minimalcode mcp`.
+
+### Shared block
+
+| Key | Type | Default | Meaning |
+|---|---|---:|---|
+| `enabled` | boolean | `true` | Start the configured servers; `false` keeps the definitions but starts nothing |
+| `startup_timeout_seconds` | number | `20` | Handshake plus initial `tools/list` budget, 1–300 |
+| `timeout_seconds` | number | `60` | Budget for one `tools/call` (and for a refresh), 1–3600 |
+| `max_output_chars` | integer | `60000` | Character cap for one converted tool result; the head and tail are kept |
+| `max_tools` | integer | `200` | Cap on advertised MCP tools across all servers, 1–1000 |
+| `servers` | object | `{}` | Server name → definition |
+
+Server names must match `[A-Za-z0-9][A-Za-z0-9_-]{0,31}` because the name
+becomes part of every tool name the model sees.
+
+### Server fields
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `transport` | string | `"stdio"` | `stdio`, `http` (streamable HTTP), or `sse` (legacy HTTP+SSE) |
+| `command` | string | — | Required for `stdio`: executable to start |
+| `args` | list of strings | `[]` | Arguments for `command` |
+| `env` | object | `{}` | Extra environment variables; `${VAR}` is expanded at load time |
+| `inherit_env` | boolean | `false` | Pass the whole parent environment instead of the base set |
+| `cwd` | string or null | `null` | Working directory, resolved through the sandbox path policy (workspace by default) |
+| `url` | string | — | Required for `http`/`sse`: an `http` or `https` endpoint |
+| `headers` | object | `{}` | Extra request headers for `http`/`sse` |
+| `enabled` | boolean | `true` | Set `false` to keep a definition without starting it |
+| `read_only` | boolean | `false` | Treat every tool on this server as read-only |
+| `timeout_seconds` | number | shared | Per-server override for one tool call |
+| `startup_timeout_seconds` | number | shared | Per-server override for the handshake |
+| `include_tools` | list or null | `null` | Only expose these server tool names |
+| `exclude_tools` | list | `[]` | Never expose these server tool names |
+
+### Transports
+
+- `stdio` starts `command` with `args` in `cwd` and exchanges newline-delimited
+  JSON-RPC on the child's pipes. Stderr is captured (last few lines) so a
+  startup failure reports why.
+- `http` posts one JSON-RPC message per request with
+  `Accept: application/json, text/event-stream`, accepts a JSON or SSE reply,
+  and echoes the server's `Mcp-Session-Id` and the negotiated
+  `MCP-Protocol-Version` on later requests.
+- `sse` opens a long-lived `GET` stream, reads the `endpoint` event, and posts
+  messages to that URL while responses arrive on the stream.
+
+### Tool names and policy
+
+`tools/list` entries are converted to provider declarations. Names that contain
+characters outside `[A-Za-z0-9_-]` are normalised, names longer than the
+provider's 64-character limit keep a short hash of the original, and two tools
+that normalise to the same name are kept apart by that hash. A missing
+`inputSchema` (or a non-object one) is advertised as taking no arguments.
+
+`mcp__<server>__<tool>` names participate in `tools.allow` exactly like
+built-in names, and a server can be selected as a group:
+
+```json
+{
+  "tools": {
+    "allow": ["read", "grep", "mcp__github", "mcp__docs__*"]
+  }
+}
+```
+
+`--read-only` keeps an MCP tool only when the server's `readOnlyHint` is `true`,
+or when the whole server is configured with `"read_only": true`. MCP tools
+without annotations count as mutating.
+
+`/mcp` prints the state of every server; `/mcp refresh` re-lists tools (and
+retries a failed server) and rebuilds the schema list for the rest of the
+session. `minimalcode mcp` prints the same information as JSON without a model
+turn.
+
+### Environment and workspace
+
+A `stdio` server inherits only the variables it needs to start: `PATH`,
+`PATHEXT`, `HOME`/`USERPROFILE`/`USERNAME`, `APPDATA`/`LOCALAPPDATA`,
+`SystemRoot`/`WINDIR`/`ComSpec`, `TEMP`/`TMP`/`TMPDIR`, `LANG`/`LC_*`,
+`SHELL`, `TERM`, `XDG_*`, and `PYTHONIOENCODING`. A server that needs a
+credential or vendor variable gets it from `env` (or `inherit_env: true`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "github": {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}
+      },
+      "docs": {
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+        "include_tools": ["search"]
+      }
+    }
+  }
+}
+```
+
+`cwd` is resolved with the same rules as `read`: the workspace (plus
+`sandbox.allowed_roots`) unless `tools.allow_outside_workspace` is `true`, and
+sensitive directories stay blocked unless `sandbox.allow_sensitive_files` is
+set. The client also answers `roots/list` with the workspace URI, so a server
+that respects roots sees the same boundary.
+
+MCP servers are user-declared processes: they run with your privileges and are
+not wrapped by the sandbox backends. The sandbox's network policy applies to
+commands run through `shell`, not to an MCP server's own traffic. Treat a server
+entry like any other program from that source.
+
+`config show` redacts `headers` and `env` values the same way it redacts
+provider credentials.
+
 ## See also
+
 
 - [architecture.md](architecture.md): request flow, package layout, and which
   module implements each setting.

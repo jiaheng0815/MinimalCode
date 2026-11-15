@@ -290,6 +290,28 @@ def _coerce_root_values(data: dict[str, Any], paths: set[tuple[str, ...]]) -> No
     output = data.get("output")
     if isinstance(output, dict):
         _coerce_keys(output, "output", paths, bools=("markdown_highlight",))
+    mcp = data.get("mcp")
+    if isinstance(mcp, dict):
+        _coerce_keys(
+            mcp,
+            "mcp",
+            paths,
+            bools=("enabled",),
+            ints=("max_output_chars", "max_tools"),
+            floats=("startup_timeout_seconds", "timeout_seconds"),
+        )
+        servers = mcp.get("servers")
+        if isinstance(servers, dict):
+            for name, server in servers.items():
+                if not isinstance(server, dict):
+                    continue
+                _coerce_keys(
+                    server,
+                    f"mcp.servers.{name}",
+                    paths,
+                    bools=("enabled", "read_only"),
+                    floats=("startup_timeout_seconds", "timeout_seconds"),
+                )
     sandbox = data.get("sandbox")
     if isinstance(sandbox, dict):
         _coerce_keys(
@@ -354,6 +376,7 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         "session",
         "output",
         "sandbox",
+        "mcp",
     ):
         if not isinstance(data.get(key), dict):
             raise ConfigError(f"{path}: {key} must be an object")
@@ -473,6 +496,7 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         raise ConfigError(f"{path}: session.save must be a boolean")
 
     _validate_sandbox(data["sandbox"], path)
+    _validate_mcp(data["mcp"], path)
 
     highlight = data["output"].get("markdown_highlight")
     if not isinstance(highlight, bool):
@@ -639,6 +663,126 @@ def _validate_sandbox(sandbox: dict[str, Any], path: Path) -> None:
     docker_image = sandbox.get("docker_image")
     if not isinstance(docker_image, str) or not docker_image.strip():
         raise ConfigError(f"{path}: sandbox.docker_image must be a non-empty string")
+
+
+_MCP_SERVER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+_MCP_TRANSPORTS = ("stdio", "http", "sse")
+
+
+def _validate_string_map(value: Any, path: Path, key: str) -> None:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: {key} must be an object of strings")
+    for name, item in value.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{path}: {key} keys must be non-empty strings")
+        if not isinstance(item, str):
+            raise ConfigError(f"{path}: {key}.{name} must be a string")
+
+
+def _validate_mcp(mcp: dict[str, Any], path: Path) -> None:
+    """Validate the MCP block and every server definition in it."""
+    if not isinstance(mcp.get("enabled"), bool):
+        raise ConfigError(f"{path}: mcp.enabled must be a boolean")
+    _validate_number(
+        mcp.get("startup_timeout_seconds"),
+        path,
+        "mcp.startup_timeout_seconds",
+        minimum=1,
+        maximum=300,
+    )
+    _validate_number(
+        mcp.get("timeout_seconds"),
+        path,
+        "mcp.timeout_seconds",
+        minimum=1,
+        maximum=3600,
+    )
+    _validate_integer(
+        mcp.get("max_output_chars"),
+        path,
+        "mcp.max_output_chars",
+        minimum=1,
+    )
+    _validate_integer(
+        mcp.get("max_tools"),
+        path,
+        "mcp.max_tools",
+        minimum=1,
+        maximum=1000,
+    )
+    servers = mcp.get("servers")
+    if not isinstance(servers, dict):
+        raise ConfigError(f"{path}: mcp.servers must be an object")
+    for name, server in servers.items():
+        # The name becomes part of every tool name the model sees, so it is
+        # restricted to identifier characters instead of being escaped later.
+        if not isinstance(name, str) or not _MCP_SERVER_NAME.fullmatch(name):
+            raise ConfigError(
+                f"{path}: MCP server names must match "
+                f"[A-Za-z0-9][A-Za-z0-9_-]{{0,31}} (got {name!r})"
+            )
+        if not isinstance(server, dict):
+            raise ConfigError(f"{path}: mcp.servers.{name} must be an object")
+        _validate_mcp_server(name, server, path)
+
+
+def _validate_mcp_server(name: str, server: dict[str, Any], path: Path) -> None:
+    label = f"mcp.servers.{name}"
+    transport = server.get("transport", "stdio")
+    if transport not in _MCP_TRANSPORTS:
+        raise ConfigError(
+            f"{path}: {label}.transport must be one of {', '.join(_MCP_TRANSPORTS)}"
+        )
+    for key in ("enabled", "read_only"):
+        value = server.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"{path}: {label}.{key} must be a boolean")
+    # A per-server timeout is optional: omitting it inherits
+    # ``mcp.timeout_seconds`` / ``mcp.startup_timeout_seconds``.
+    if "timeout_seconds" in server:
+        _validate_number(
+            server["timeout_seconds"],
+            path,
+            f"{label}.timeout_seconds",
+            minimum=1,
+            maximum=3600,
+        )
+    if "startup_timeout_seconds" in server:
+        _validate_number(
+            server["startup_timeout_seconds"],
+            path,
+            f"{label}.startup_timeout_seconds",
+            minimum=1,
+            maximum=300,
+        )
+    for key in ("args", "include_tools", "exclude_tools"):
+        value = server.get(key)
+        if value is not None:
+            _validate_string_list(value, path, f"{label}.{key}")
+    if transport == "stdio":
+        command = server.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ConfigError(f"{path}: {label}.command must be a non-empty string")
+        cwd = server.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
+            raise ConfigError(f"{path}: {label}.cwd must be null or a non-empty string")
+        env = server.get("env")
+        if env is not None:
+            _validate_string_map(env, path, f"{label}.env")
+        return
+    url = server.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"{path}: {label}.url must be a non-empty string")
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"{path}: {label}.url is invalid: {exc}") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConfigError(f"{path}: {label}.url must be an http or https URL")
+    headers = server.get("headers")
+    if headers is not None:
+        _validate_string_map(headers, path, f"{label}.headers")
 
 
 def _validate_number(

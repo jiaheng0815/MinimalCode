@@ -331,12 +331,7 @@ class Agent:
         self.provider = provider
         self.session = session
         self.tools = tool_runtime
-        self.tool_schemas = available_tool_schemas(
-            self.tools.web_client,
-            self.tools.vision_client,
-            self.tools.subagent_enabled,
-            allowed=self._allowed_tools(),
-        )
+        self.tool_schemas = self._tool_schemas(tool_runtime)
         self.shell = shell
         configured_turns = (
             settings.get("max_turns", 1000) if max_turns is None else max_turns
@@ -571,6 +566,30 @@ class Agent:
         """Return the tool names the runtime accepts, or None when unrestricted."""
         allowed = getattr(tool_runtime or self.tools, "allowed_tools", None)
         return allowed if isinstance(allowed, frozenset) else None
+
+    def _tool_schemas(self, tool_runtime: ToolRuntime) -> list[dict[str, Any]]:
+        """Build the advertised schema list, including discovered MCP tools."""
+        manager = getattr(tool_runtime, "mcp", None)
+        mcp_schemas = manager.schemas() if manager is not None else []
+        return available_tool_schemas(
+            tool_runtime.web_client,
+            tool_runtime.vision_client,
+            tool_runtime.subagent_enabled,
+            allowed=self._allowed_tools(tool_runtime),
+            mcp_schemas=mcp_schemas,
+        )
+
+    def refresh_tools(self) -> list[str]:
+        """Re-read MCP tool lists and rebuild the advertised schema set.
+
+        Server tool lists change at runtime (``notifications/tools/list_changed``
+        and a server that was down at startup), and the schema list is built
+        once per runtime, so the user triggers this explicitly from ``/mcp``.
+        """
+        manager = getattr(self.tools, "mcp", None)
+        added = manager.refresh() if manager is not None else []
+        self.tool_schemas = self._tool_schemas(self.tools)
+        return added
 
     def _execute_tool_calls(self, calls: list[ToolCall]) -> list[dict[str, Any]]:
         """Run one turn's tool calls, overlapping adjacent independent calls.
@@ -1007,12 +1026,7 @@ class Agent:
 
     def new_session(self, session: Session, tool_runtime: ToolRuntime) -> None:
         """Start a fresh conversation while keeping the active provider."""
-        schemas = available_tool_schemas(
-            tool_runtime.web_client,
-            tool_runtime.vision_client,
-            tool_runtime.subagent_enabled,
-            allowed=self._allowed_tools(tool_runtime),
-        )
+        schemas = self._tool_schemas(tool_runtime)
         self.session = session
         self.tools = tool_runtime
         self.tool_schemas = schemas
@@ -1036,12 +1050,7 @@ class Agent:
         tools, and the previous prompt size is dropped because it describes the
         old model's context window.
         """
-        schemas = available_tool_schemas(
-            tool_runtime.web_client,
-            tool_runtime.vision_client,
-            tool_runtime.subagent_enabled,
-            allowed=self._allowed_tools(tool_runtime),
-        )
+        schemas = self._tool_schemas(tool_runtime)
         if hasattr(provider, "notify"):
             provider.notify = self._activity
         self.provider = provider
@@ -1067,6 +1076,7 @@ class Agent:
 
     def status(self) -> dict[str, Any]:
         summary = getattr(self.tools, "sandbox_summary", None)
+        mcp_summary = getattr(getattr(self.tools, "mcp", None), "summary", None)
         return {
             "provider": self.provider.name,
             "model": self.provider.model,
@@ -1081,4 +1091,5 @@ class Agent:
             "read_only": getattr(self.tools, "read_only", False),
             "tools": sorted(self._allowed_tools() or ()),
             "sandbox": summary() if callable(summary) else {"enabled": False},
+            "mcp": mcp_summary() if callable(mcp_summary) else {"enabled": False},
         }

@@ -1,19 +1,45 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.5.4. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.6.0. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, and 1.5.4 added no
-further breaking import changes (`minimalcode.httpclient` and
-`minimalcode.clipboard` are new modules, not renamed ones).
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, and 1.6.0 added
+no further breaking import changes (`minimalcode.httpclient`,
+`minimalcode.clipboard`, and `minimalcode.mcp` are new modules, not renamed
+ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.5.4. Every change is a defect fix: the
-sandbox no longer exempts a sensitive directory behind `--`, scans combined
-inline flags and encoded PowerShell payloads, and the Responses protocol stops
-reporting one tool call twice.
+format, or import path was removed in 1.6.0. Every change is additive: MCP
+servers become extra tools, `mcp` settings appear in the merged defaults, and
+`Agent.status()` gains one key. An existing settings file without an `mcp`
+block behaves exactly as it did in 1.5.4 and starts no extra process.
+
+## What 1.6.0 added
+
+- `minimalcode.mcp` with `MCPClient`, `MCPManager`, `MCPServerConfig`,
+  `MCPTool`, `MCPError`, `MCPTimeout`, `TOOL_PREFIX`, and
+  `sanitize_tool_name` in `__all__`. Internals live in `protocol.py`,
+  `transport.py`, `client.py`, and `manager.py`; import them from the submodule
+  that defines them.
+- `mcp` settings block with `servers` (stdio, streamable HTTP, legacy SSE) and
+  per-server timeouts, environment, headers, cwd, tool filters, and read-only
+  mode.
+- Namespaced `mcp__<server>__<tool>` declarations in the same schema list as
+  the built-in tools, `tools.allow` wildcards (`mcp__<server>`,
+  `mcp__<server>__*`), and `--read-only` support for `readOnlyHint` tools.
+- `minimalcode mcp` and `/mcp [refresh]`.
+- An `mcp` object in `Agent.status()` / `/status` output.
+
+## What 1.6.0 changed
+
+- `ToolRuntime.dispatch` routes `mcp__` names to the MCP manager after the
+  same `tools.allow` / `--read-only` check that gates built-in tools.
+- `ToolRuntime._allowed_tool_names` is now an instance method (it has to see
+  the discovered MCP tools); it was private before and still is.
+- `available_tool_schemas` accepts an optional `mcp_schemas` keyword. The
+  positional parameters and the return type are unchanged.
 
 ## What 1.5.4 changed
 

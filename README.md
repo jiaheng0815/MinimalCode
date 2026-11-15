@@ -4,13 +4,13 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.5.4`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.6.0`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 特性
 
 - **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。Windows 上会跳过 `C:\Windows\System32\bash.exe`（WSL 启动器），它看起来像 bash，但会把命令送进 Linux 命名空间。
-- **聚焦工具集**：`read`、`read_range`、`write`、`append_file`、`edit`、`shell`、`grep`、`find`、`subagent` 九个基础工具，外加可选的 `read_image`、`web_search`、`web_fetch`。`edit` 默认按行号替换区间，`append_file` 负责在 EOF 追加，写入 Python 时会校验并回滚坏改动。`read_image` 不绑定供应商，任何配置了 `vision` 的供应商都能使用。
 - **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
+- **MCP 工具**：`mcp.servers` 里的 Model Context Protocol 服务器会以 `mcp__<服务器>__<工具>` 出现在工具列表里，支持 `stdio`、streamable HTTP 和旧版 HTTP+SSE 三种传输。启动失败的服务器只记录错误、不影响其余工具；`/mcp` 查看状态，`/mcp refresh` 重新发现工具。未配置服务器时不启动任何进程或线程。
 - **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。同一轮里相邻的只读工具会并发执行（上限 `tools.max_parallel`，默认 4），结果仍按请求顺序写回；只读调用旁边出现 `write` / `shell` / `subagent` 时保持严格顺序。
 - **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
 - **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。压缩后如果文件比保留的状态大一倍以上（且超过 64 KiB），会原子重写成「meta + 压缩状态」，避免把同一段历史存两遍；小会话保持纯追加。
@@ -43,6 +43,17 @@ minimalcode init
 
 ## 升级指南
 
+### 从 1.5.4 升级到 1.6.0
+
+1.6.0 只新增能力，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema。已有的 `settings.json` 不需要改动：没有 `mcp` 块时行为与 1.5.4 完全一致，也不会启动任何额外进程。
+
+- 想接入 MCP 服务器时，在配置里加 `mcp.servers`。最简形式是一个 `stdio` 服务器：`{"mcp":{"servers":{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}}}}`。工具会以 `mcp__fs__<工具名>` 提供给模型。
+- 远程服务器用 `"transport": "http"`（streamable HTTP）或 `"sse"`（旧版 HTTP+SSE），配 `url` 和可选的 `headers`；`${VAR}` 在读取配置时展开，`config show` 会把 `headers`/`env` 里的值打码。
+- `stdio` 服务器默认只继承启动所需的基础环境变量。需要凭据时写进 `env`（例如 `{"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}`），或设 `"inherit_env": true` 全量继承。
+- `tools.allow` 可以用 `mcp__<服务器>` 或 `mcp__<服务器>__*` 选择一台服务器的全部工具；`--read-only` 只保留服务器标注 `readOnlyHint: true` 的工具。
+- 用 `minimalcode mcp` 先验证配置（不消耗模型额度），交互中 `/mcp` 查看状态、`/mcp refresh` 重新发现工具。
+
+### 从 1.5.3 升级到 1.5.4
 ### 从 1.5.3 升级到 1.5.4
 
 1.5.4 只修 bug，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有配置无需改动。
@@ -164,7 +175,7 @@ minimalcode init
 
 ### 从 0.8 升级到 1.0
 
-1.0.0 是首个稳定版本。从 1.0 起，CLI 参数、配置键、JSON 输出字段、会话格式，以及 `tools`、`sandbox`、`provider`、`highlight` 四个包的 `__all__` 公开面在 1.x 内保持兼容。0.8 → 1.0 没有删除公开名字或 CLI 参数，但修复项里有两处可观察行为变化：`--json` 的 `usage` 改为本次运行（累计值在 `session_usage`），`import-pi` 默认不再复制 API key。详见 [CHANGELOG.md](CHANGELOG.md)。
+1.0.0 是首个稳定版本。从 1.0 起，CLI 参数、配置键、JSON 输出字段、会话格式，以及 `tools`、`sandbox`、`provider`、`highlight`（1.6.0 起还有 `mcp`）的 `__all__` 公开面在 1.x 内保持兼容。0.8 → 1.0 没有删除公开名字或 CLI 参数，但修复项里有两处可观察行为变化：`--json` 的 `usage` 改为本次运行（累计值在 `session_usage`），`import-pi` 默认不再复制 API key。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ### 从 0.6 升级到 0.7
 
@@ -221,7 +232,7 @@ minimalcode [prompt ...] [options]
 | `-m`, `--model <id>` | 覆盖模型 |
 | `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
 | `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
-| `--read-only` | 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`，拒绝任何可能改动工作区的工具 |
+| `--read-only` | 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`，以及 MCP 服务器标记为只读的工具；拒绝任何可能改动工作区的工具 |
 | `--cwd <dir>` | 指定工作区 |
 | `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
 | `--sandbox`, `--no-sandbox` | 开启/关闭沙箱执行层（默认关闭，等价于默认 `--no-sandbox`）。无论开关，文件工具的工作区与敏感文件边界都生效 |
@@ -250,6 +261,7 @@ minimalcode [prompt ...] [options]
 | `minimalcode sessions` | 列出已保存会话（时间、ID、模型、工作区） |
 | `minimalcode shell` | 显示探测到的 shell |
 | `minimalcode sandbox` | 打印当前沙箱策略与各后端可用性 |
+| `minimalcode mcp [--cwd DIR]` | 启动配置的 MCP 服务器并打印状态、协议版本与工具清单（JSON），不发起模型请求 |
 | `minimalcode import-pi` | 从 Pi 配置迁移供应商、模型和上下文窗口 |
 
 `import-pi` 默认**不**复制 API key，而是写入指向环境变量的 `api_key_env`；确实要把密钥复制进权限受限的配置时加 `--secrets`（密钥不会在终端打印）。`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
@@ -274,7 +286,8 @@ JSON 输出字段：
 | `/session` | 显示会话文件路径 |
 | `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
 | `/model [供应商/模型]` | 查看当前模型和可用供应商（只列出已检测到凭据的，含免密钥的本地预设）；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
-| `/status` | 显示模型、推理强度、shell、上下文和 token 统计（JSON） |
+| `/status` | 显示模型、推理强度、shell、上下文、token 统计与 MCP 服务器状态（JSON） |
+| `/mcp [refresh]` | 显示每个 MCP 服务器的状态；`refresh` 重新拉取工具列表（并重试启动失败的服务器），重建本会话的工具定义 |
 | `/help` | 显示命令 |
 | `/exit`、`/quit` | 退出 |
 
@@ -304,6 +317,38 @@ JSON 输出字段：
 `subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
 
 `write`、`edit`、`append_file` 写入 Python 文件后会先跑 `py_compile`，装有时再跑 `ruff`；出现新诊断就原子回滚并返回文件、行号和源码预览。改动前已经存在的 lint 问题不会阻塞无关编辑。
+
+### MCP 服务器
+
+MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一套工具循环。服务器在 `settings.json` 的 `mcp.servers` 里声明，工具名是 `mcp__<服务器名>__<工具名>`：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "files": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "docs": {
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+      }
+    }
+  }
+}
+```
+
+- 传输：`stdio`（默认，子进程）、`http`（streamable HTTP，响应可以是 JSON 或 SSE）、`sse`（旧版 HTTP+SSE）。
+- 发现：`tools/list` 会读完全部分页；缺少 `inputSchema` 的工具按无参数处理；非法字符、超长名字会被规范化，并用短哈希区分冲突。
+- 结果：文本原样返回，图片/音频只报告类型与大小，`structuredContent` 在没有文本时转成 JSON，总长度按 `mcp.max_output_chars` 首尾截断。
+- 失败隔离：某个服务器启动失败或调用超时，只返回该服务器的错误，其余工具和后续回合照常。
+- 权限：`tools.allow` 支持 `mcp__<服务器>` / `mcp__<服务器>__*`；`--read-only` 只保留 `readOnlyHint: true` 或整台服务器 `read_only: true` 的工具。
+- 生命周期：`/new` 和 `/model` 复用同一批服务器进程；`/mcp refresh` 重新发现工具；退出时统一关闭。
+- 边界：`stdio` 服务器默认只拿到启动所需的环境变量；`cwd` 经过与文件工具相同的沙箱路径检查；服务器进程本身由你声明，不在沙箱后端内运行。
+
+完整字段与安全说明见 [docs/configuration.md](docs/configuration.md)。
 
 ### 图像理解
 
@@ -592,6 +637,12 @@ minimalcode/
 │   ├── process.py       #   shell / subagent
 │   ├── remote.py        #   vision / web 工具
 │   └── validation.py    #   模型参数校验
+├── mcp/             # MCP 客户端
+│   ├── protocol.py  #   JSON-RPC、内容与 schema 转换
+│   ├── transport.py #   stdio / streamable HTTP / 旧版 HTTP+SSE
+│   ├── client.py    #   握手、工具发现与调用
+│   └── manager.py   #   服务器生命周期与工具索引
+├── sandbox/         # 沙箱策略、后端与有界执行
 ├── sandbox/         # 沙箱策略、后端与有界执行
 │   ├── runner.py    #   统一入口
 │   ├── policy.py    #   路径与网络策略
@@ -614,7 +665,7 @@ minimalcode/
 ├── web.py           # 供应商 web_search / web_fetch 客户端
 ├── vision.py        # 供应商视觉客户端
 ├── clipboard.py     # 系统剪贴板图片读取
-├── subagent.py      # 子进程命令构建与深度传递
+五个包的 `__all__` 是唯一公开接口。0.7.0 起不再为拆分前的模块级名字提供回退；私有 helper 从定义它的子模块导入，详见 [docs/compatibility.md](docs/compatibility.md)。
 ├── importer.py      # Pi 配置迁移
 ├── errors.py        # 统一异常类型
 └── defaults.json    # 内置默认配置
