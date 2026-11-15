@@ -562,27 +562,66 @@
 - 修复 `subagent`/`init` 等管理命令与提示词冲突的问题：命令行出现 `--` 时不再按子命令解析，`minimalcode -- init` 发送提示词 `init`。
 - 修复供应商在拿到响应前断开（`provider network error: Server disconnected without sending a response.`）时只重试一次的问题：现在重试 10 次，退避从 0.5 秒翻倍到最多 8 秒；已经开始输出的流式中断仍不重试，避免重复输出或重复计费。重试提示写入工具活动流，`--quiet` / `--json` 下保持静默。
 
-## 0.6.0
+## 0.6.0 - 2026-10-25
 
 ### 新增
 
 - 新增可配置、fail-closed 的沙箱执行层（`minimalcode/sandbox.py`）。所有 shell/subagent 命令、文件读写和搜索现在都经过 `SandboxRunner`：工作区限定的允许根（含符号链接逃逸检查）、敏感文件拦截、默认禁网（可选主机白名单）、超时/输出/资源上限、每条命令的临时目录用后必定清理，以及拒绝原因审计。后端可插拔：跨平台的 `local` 基线由策略加 POSIX rlimit 组成，`bwrap`、`firejail`、`sandbox-exec`、`docker` 均为可选且不是强依赖；显式选择但不可用的后端会拒绝执行而不是降级。新增配置：`sandbox.enabled`、`sandbox.backend`、`sandbox.allowed_roots`、`sandbox.network_policy`、`sandbox.allowed_hosts`、`sandbox.timeout_seconds`、`sandbox.max_output_chars`、`sandbox.allow_sensitive_files`、`sandbox.max_memory_mb`、`sandbox.max_processes`、`sandbox.docker_image`；新增 CLI 参数 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output`、`--sandbox-allow-sensitive`；新增 `minimalcode sandbox` 命令。
+- 新增 `max` 推理强度档位：最高一级，按原样转发为 `reasoning_effort`（Chat）/ `reasoning.effort`（Responses），`--thinking`、`thinking` 和 `/effort` 均接受该值，`/effort` 因此在 0.4.0 的七个档位之上多了第八级。
 - 版本号升级到 0.6.0。
+
+### 变更
+
+- 系统提示词每个 agent 只构建一次，而不是每轮模型调用一次，`SYSTEM.md`/`AGENTS.md` 不再每次往返都重新读取。
+- shell 命令通过有界的内存流捕获输出，因此超时命令即使还有后台子进程存活，也能返回已有部分输出，而不会阻塞或耗尽内存/磁盘。
+- Web 搜索结果现在会被规范化：非对象条目被丢弃，数量受 `max_count` 限制，过长的 `content`/`text`/`snippet` 字段按 `max_content_chars` 截断。
+- `write` 改为执行 `tools.max_file_bytes`，不再使用无关的 `max_file_chars * 8` 启发式。
+- 配置的 `max_results` 超过工具硬上限时会被收敛到上限，而不是在默认限制下被静默忽略。
+- 项目改用 Apache License 2.0：`LICENSE` 保存完整文本，`pyproject.toml` 声明 `license = "Apache-2.0"` 与 `license-files`，构建 wheel 或 sdist 需要 setuptools 77 或更新版本。
 
 ### 修复
 
+- 流式响应如果在缺少 `finish_reason` 或 `[DONE]` 的情况下结束，现在会被报告为未完成，而不是当作成功的截断答复；未完成的工具调用不会被执行。
+- 来自模型、shell 和错误信息的不受信输出在写入终端前会移除终端转义序列，包括被拆分到多个流式 delta 中的序列。
+- 解析后位于其声明目录之外的项目指令文件（例如被符号链接的 `AGENTS.md`）会被忽略，而不再注入系统提示词。
+- 非法的 `thinking` 取值以及格式错误的供应商 `protocol`/`base_url`/数值/布尔配置会在加载配置时被拒绝，而不是稍后或在子 agent 中失败；非有限值（`Infinity`）同样被拒绝，而不是抛出 `OverflowError`。
+- `/effort` 现在会同步更新工具运行时而不只是 provider，因此 subagent 使用选定的推理强度。
+- `web_search` 会遵循请求的/默认的结果数量，而不只是 `max_count`；供应商返回的所有字符串字段（包括标题和 URL）都受长度限制。
+- `edit` 会对结果文件执行 `tools.max_file_bytes`，而不只是检查原文件。
+- Python 版 `grep` 回退使用 smart-case、跳过相同的忽略目录、截断超长行，并在超时限制下运行，因此灾难性正则不会挂死 agent；`**/*.py` 这类递归 glob 在 `grep` 与 `find` 两条路径上判断一致，回退还会跳过大于 `tools.max_file_bytes` 的文件。
+- `grep`/`find` 只读取所需数量的结果行；`read` 限制单行内存占用，并在 `start_line` 超出文件末尾时报告，而不是返回虚假的行范围。
+- shell 输出改用有界捕获而不是无上限的临时文件；缺少 `taskkill` 或按下 Ctrl-C 时，不再遗留仍在运行的进程树，也不会在超时路径上抛异常。
+- 压缩（compaction）转录按模型窗口大小裁剪；总结答复的 finish reason 不完整时不再允许替换历史记录。
+- 缺少元数据的会话文件现在默认使用请求的工作区，而不是在 sessions 目录里运行工具。
+- `config` 会拒绝多余的位置参数，而不是静默忽略。
+- 供应商 POST 只在连接失败和限流/服务不可用时重试，避免读取中断后产生重复工作。
 - 修复 Linux 上启用沙箱后 PowerShell 7 报 `Out of memory` 的问题：`sandbox.max_memory_mb` 的默认值从 `2048` 改为 `0`（关闭）。`RLIMIT_AS` 限制的是进程预留的地址空间而不是实际占用，.NET（pwsh）、JVM 和 Go 子进程在 2 GB 上限下会在真正运行前中止；需要该限制时仍可显式配置。
 - 修复 shell 探测只检查可执行文件是否存在、不检查能否启动的问题：`detect_shell` 现在先用一条 `exit 0` 验证候选 shell，`pwsh` 因缺少 libicu 或无法预留内存而崩溃时会回退到 `bash`/`sh`（Windows 回退到 `powershell`），`ShellError` 会带上每个候选的失败原因；显式配置的 `shell.path` 启动失败会直接报错而不是静默换 shell。探测结果按可执行文件缓存，每个进程只付一次启动开销。
 - 修复 `subagent` 端到端测试在 shell 不可用时只观察到 2 次供应商请求的问题：断言现在会附带父进程收到的工具结果，便于定位子进程失败原因；环境完全没有可用 shell 时改为跳过。
 
-## 0.5.0
+## 0.5.0 - 2026-10-25
+
+### 变更
+
+- HTTP 层从 `httpx` 迁移到 `httpx2`——由 Pydantic 维护的 `httpx` 延续版本，公共 API 保持一致。`httpx2` 现在是唯一的运行时依赖，provider、web 和 vision 客户端全部改用 `httpx2.Client` / `httpx2.Response`。
+- 放弃 Python 3.10 支持：`httpx2` 要求 Python 3.11+，因此 `requires-python` 改为 `>=3.11`，CI 矩阵从 3.11 开始，Ruff 目标为 `py311`。
+- TLS 校验改用操作系统信任库，而不是 `certifi` 的证书包（这也是 `httpx2` 的默认行为）。`SSL_CERT_FILE` / `SSL_CERT_DIR` 和显式的 `verify=` 仍然优先。
+- 格式化器固定到 `ruff==0.17.3` 并按 0.17 的规则重新格式化。
+
+### 修复
+
+- 修复超时 shell 命令遗留子进程的问题：超时现在会杀掉整个进程树（Windows 使用 `taskkill /T`，其他平台使用子进程所在的进程组），而不只是直接 shell 进程，因此被遗弃的测试运行器不会再持续占满 CPU。超时的 `subagent` 提示词同样改为从文件而非管道读取。
+
+### 文档
+
+- `read_image` 的文档改为供应商无关：只要供应商配置了 `vision` 块，任何 OpenAI 兼容端点都能获得该工具，不受供应商自身 `protocol` 限制。
+
+## 0.4.0 - 2026-10-25
 
 ### 新增
 
-- 新增 `max` 推理强度档位：最高一级，按原样转发为 `reasoning_effort`（Chat）/ `reasoning.effort`（Responses），`--thinking`、`thinking` 和 `/effort` 均接受该值。
 - 新增 `subagent` 工具：agent 可以通过配置的 shell 启动一个全新的 `minimalcode -p` 子进程并使用它的最终答复，适合代码审查、广度分析和独立验证。任务正文通过 stdin 传入，子进程继承 `--home`、供应商、模型、推理强度和工作区，嵌套层数由 `subagent.max_depth`（默认 `2`，通过 `MINIMALCODE_SUBAGENT_DEPTH` 记录）限制。新增配置：`subagent.enabled`、`subagent.max_depth`、`subagent.max_turns`、`subagent.timeout_seconds`。
-- 新增 `/effort` 交互命令，无需重启即可查看或切换推理强度（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max`）；`none` 关闭思考，`/status` 会显示当前强度。
-- 版本号升级到 0.5.0。
+- 新增 `/effort` 交互命令，无需重启即可查看或切换推理强度（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`；`max` 到 0.6.0 才加入）；`none` 关闭思考，`/status` 会显示当前强度。
 - 新增 `read_image` 工具：本地 JPEG/PNG/GIF/WebP 图片发送给供应商的视觉模型，返回文字描述或对问题的回答。该工具由供应商的 `vision` 配置块启用，对 DeepSeek 默认开启，并保持在工作区内。
 - 单次任务的默认模型/工具循环上限从 50 提升到 1000 轮。
 - 新增交互式终端的流式 Markdown 与 README 渲染。
@@ -595,61 +634,40 @@
 
 ### 变更
 
-- HTTP 层从 `httpx` 迁移到 `httpx2`——由 Pydantic 维护的 `httpx` 延续版本，公共 API 保持一致。`httpx2` 现在是唯一的运行时依赖，provider、web 和 vision 客户端全部改用 `httpx2.Client` / `httpx2.Response`。
-- 放弃 Python 3.10 支持：`httpx2` 要求 Python 3.11+，因此 `requires-python` 改为 `>=3.11`，CI 矩阵从 3.11 开始，Ruff 目标为 `py311`。
-- TLS 校验改用操作系统信任库，而不是 `certifi` 的证书包（这也是 `httpx2` 的默认行为）。`SSL_CERT_FILE` / `SSL_CERT_DIR` 和显式的 `verify=` 仍然优先。
-- 不再打印标题标记：`## Title` 只输出蓝色样式的标题文字，与粗体、斜体去掉分隔符的行为一致。
 - shell 工具活动会把 stdout/stderr 裁剪为首尾各若干行，长命令不再刷屏；模型仍会收到完整输出。
+- 不再打印标题标记：`## Title` 只输出蓝色样式的标题文字，与粗体、斜体去掉分隔符的行为一致。
 - 无论是否安装 `ripgrep`，`grep` 和 `find` 现在都会跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、各类缓存和虚拟环境）。
 - 当前启用的供应商中未解析的 `${VAR}` 占位符现在会抛出指明变量名的配置错误，而不再作为字面文本发给供应商。
 - `web_fetch` 接受供应商返回的 `null` 标题，只拒绝非字符串标题。
-- shell 命令通过有界的内存流捕获输出，因此超时命令即使还有后台子进程存活，也能返回已有部分输出，而不会阻塞或耗尽内存/磁盘。
-- 系统提示词每个 agent 只构建一次，而不是每轮模型调用一次，`SYSTEM.md`/`AGENTS.md` 不再每次往返都重新读取。
-- Web 搜索结果现在会被规范化：非对象条目被丢弃，数量受 `max_count` 限制，过长的 `content`/`text`/`snippet` 字段按 `max_content_chars` 截断。
-- `write` 改为执行 `tools.max_file_bytes`，不再使用无关的 `max_file_chars * 8` 启发式。
-- `config show` 不再把 `max_tokens`、`prompt_tokens`、`tokenizer` 等 token 预算和计数器当作敏感字段打码，而 `access_token` 这类键仍然隐藏。
-- 配置的 `max_results` 超过工具硬上限时会被收敛到上限，而不是在默认限制下被静默忽略。
 - 当 Pi 只有 `models.json` 而没有 `settings.json` 时，`import-pi` 也能正常工作。
-- 项目改用 Apache License 2.0：`LICENSE` 保存完整文本，`pyproject.toml` 声明 `license = "Apache-2.0"` 与 `license-files`，构建 wheel 或 sdist 需要 setuptools 77 或更新版本。
+- `config show` 不再把 `max_tokens`、`prompt_tokens`、`tokenizer` 等 token 预算和计数器当作敏感字段打码，而 `access_token` 这类键仍然隐藏。
+- 会话检索按文件修改时间排序，`--continue` 因此选到最近写入的会话，而不是文件名最大的那个。
+- 代码按 `ruff format` 统一格式。
 
 ### 修复
 
-- 流式响应如果在缺少 `finish_reason` 或 `[DONE]` 的情况下结束，现在会被报告为未完成，而不是当作成功的截断答复；未完成的工具调用不会被执行。
-- 来自模型、shell 和错误信息的不受信输出在写入终端前会移除终端转义序列，包括被拆分到多个流式 delta 中的序列。
-- 解析后位于其声明目录之外的项目指令文件（例如被符号链接的 `AGENTS.md`）会被忽略，而不再注入系统提示词。
-- 非法的 `thinking` 取值以及格式错误的供应商 `protocol`/`base_url`/数值/布尔配置会在加载配置时被拒绝，而不是稍后或在子 agent 中失败。
-- `/effort` 现在会同步更新工具运行时而不只是 provider，因此 subagent 使用选定的推理强度。
-- `web_search` 会遵循请求的/默认的结果数量，而不只是 `max_count`；供应商返回的所有字符串字段（包括标题和 URL）都受长度限制。
-- `edit` 会对结果文件执行 `tools.max_file_bytes`，而不只是检查原文件。
-- Python 版 `grep` 回退使用 smart-case、跳过相同的忽略目录、截断超长行，并在超时限制下运行，因此灾难性正则不会挂死 agent。
-- `grep`/`find` 只读取所需数量的结果行；`read` 限制单行内存占用，并在 `start_line` 超出文件末尾时报告，而不是返回虚假的行范围。
-- shell 输出改用有界捕获而不是无上限的临时文件；缺少 `taskkill` 或按下 Ctrl-C 时，不再遗留仍在运行的进程树，也不会在超时路径上抛异常。
-- 压缩（compaction）转录按模型窗口大小裁剪；总结答复的 finish reason 不完整时不再允许替换历史记录。
-- 缺少元数据的会话文件现在默认使用请求的工作区，而不是在 sessions 目录里运行工具。
-- `config` 会拒绝多余的位置参数，而不是静默忽略。
-- 供应商 POST 只在连接失败和限流/服务不可用时重试，避免读取中断后产生重复工作。
-- 修复超时 shell 命令遗留子进程的问题：超时现在会杀掉整个进程树（Windows 使用 `taskkill /T`，其他平台使用子进程所在的进程组），而不只是直接 shell 进程，因此被遗弃的测试运行器不会再持续占满 CPU。超时的 `subagent` 提示词同样改为从文件而非管道读取。
 - 修复单行超过 `max_file_chars` 时 `read` 返回空内容的问题；现在会返回该超长行的前缀并标记 `truncated`。
 - 修复 `edit` 会重写整个文件的行尾、以及 `old_text` 使用 LF 时在 CRLF 文件上匹配失败的问题；现在只重写匹配到的片段。
 - 修复 Markdown 渲染在深度缩进行上卡住的问题：每个 delta 从上一个结束的位置继续扫描，而不是重新扫描行前缀。
+- 缩进的闭合围栏现在会结束代码块，因此列表项中嵌套围栏之后的二级标题和其他 Markdown 会正常渲染，而不再被当作代码内容。
+- Markdown 渲染不再丢弃答复末尾的反斜杠。
+- 当 `#` 标记被拆分到多个流式 delta 时，`##` 和 `###` 标题不会再被渲染成更低级别的标题。
 - `write` 和 `edit` 保留已有文件的权限位，而不再替换为 `0600`；新建文件仍使用 `0600`。
 - 非法的工具参数会在分发前被检测出来，处理函数抛出的 `TypeError` 不再被误报为参数错误。
 - `/new` 会保留 `--no-highlight` 和非流式输出设置。
-- 模型请求的 shell 超时会被 `shell.timeout_seconds` 收敛到上限。
+- 模型请求的 shell 超时会被 `shell.timeout_seconds` 收敛到上限；`timeout` 不是数字或为 `NaN` 时返回工具错误，而不是让 `float()` 抛异常。
 - Web fetch 响应会拒绝非字符串内容，未解析的供应商环境变量占位符会以变量名报错。
+- web 工具的 `enabled` 必须是布尔值，`base_url`、端口、超时和结果上限在构造客户端时校验，`count`/`need_content`/`ori_question`/`localization` 在发起请求前校验，响应句柄在 `finally` 中关闭。
+- `--no-session` 不能再与 `--continue`/`--session` 同时使用，空的 `--session` 报配置错误，`--max-turns` 的上限为 10000。
+- `--cwd` 会覆盖恢复会话的工作区，而不是只对新建会话生效。
 - 损坏或非对象的会话头不再抛出 `AttributeError`；`list()` 会跳过它们，并按文件名解析。
-- 完整会话 ID 现在会匹配已记录的会话元数据，而不只是缩短后的文件名。
-- 存在于磁盘但无法读取的配置文件现在抛出配置错误，而不是静默回退到内置默认值。
-- 模型返回空答复时会报告任务未完成，而不是当作成功的空回答；提前停止的诊断信息也不再向 stderr 倾倒完整答复。
-- 单轮失败不再终止交互式会话；provider 和 I/O 错误会被告知，提示符继续可用。
-- Markdown 渲染不再丢弃答复末尾的反斜杠。
-- 当 `#` 标记被拆分到多个流式 delta 时，`##` 和 `###` 标题不会再被渲染成更低级别的标题。
-- 缩进的闭合围栏现在会结束代码块，因此列表项中嵌套围栏之后的二级标题和其他 Markdown 会正常渲染，而不再被当作代码内容。
-- 会话文件从第一次写入就使用私有权限，而不是事后再收紧；usage 写入失败也不再丢弃模型的答复。
-- `sessions` 不再因 `session_id` 不是字符串的元数据而崩溃。
-- 供应商和 web 工具的数值配置会拒绝非有限值（`Infinity`），而不是抛出 `OverflowError`。
-- Responses 请求不再发送严格服务端会拒绝的空 `role`/`content` 条目。
-- Python 回退路径下 `grep` 与 `find` 对 `**/*.py` 这类递归 glob 的判断保持一致，且回退会跳过大于 `tools.max_file_bytes` 的文件。
+- 完整会话 ID 现在会匹配已记录的会话元数据，而不只是缩短后的文件名；`session_id` 不是字符串的元数据不再让 `sessions` 崩溃。
+- 会话写入失败会回滚内存中的历史，磁盘状态与后续请求不再不一致；会话文件从第一次写入就使用私有权限，而不是事后再收紧，usage 写入失败也不再丢弃模型的答复。
+- `~/.pi` 目录解析失败、`contextWindow` 非法或 `baseUrl` 不是 HTTP(S) URL 时，`import-pi` 报配置错误或跳过该供应商，而不是抛 `ValueError` 或写出坏配置。
+- 配置文件与 `AGENTS.md`/`SYSTEM.md` 改用 `utf-8-sig` 读取，BOM 不再进入提示词或首行匹配。
+- 供应商：流式与非流式（整段 JSON）响应共用同一套解析，事件流里的错误会作为 `ProviderError` 抛出，工具参数无论以 JSON 字符串还是对象到达都会归一化；Responses 请求不再发送严格服务端会拒绝的空 `role`/`content` 条目。
+- 模型返回空答复时会报告任务未完成，而不是当作成功的空回答；单轮失败也不再终止交互式会话，provider 和 I/O 错误会被告知，提示符继续可用。
+- 工作区 key 只在 Windows 上做大小写折叠，Linux 上仅大小写不同的两个目录不再共用同一批会话文件；`latest()` 会跳过读不出 meta 的会话文件，而不是让 `--continue` 直接失败。
 
 ## 0.3.0 - 2026-10-24
 
@@ -664,7 +682,7 @@
 - Web 工具只对官方 DeepSeek API 开放，其他供应商一律屏蔽。
 - 新增按供应商区分的工具定义和 web API 回归测试。
 
-## 0.1.0
+## 0.1.0 - 2026-10-24
 
 - 引入 `MinimalCode` 包和 `minimalcode` 命令。
 - 新增 PowerShell 7、Windows PowerShell 5.1、bash 和 sh 的 shell 回退。
