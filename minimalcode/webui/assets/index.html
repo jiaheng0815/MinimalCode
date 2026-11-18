@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>MinimalCode</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="frame">
+      <div class="sider-mask" id="sider-mask" hidden></div>
+      <aside class="sider" id="sider">
+        <div class="sider-top">
+          <div class="app-name">MinimalCode</div>
+          <button type="button" class="icon-button" id="sider-toggle" title="收起边栏" aria-label="收起边栏">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6.5 3v10"/></svg>
+          </button>
+        </div>
+        <button type="button" class="new-chat" id="new-chat">
+          <span class="new-chat-icon">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg>
+          </span>开启新对话
+        </button>
+        <button type="button" class="new-folder" id="new-folder">
+          <span class="new-folder-icon">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.4c0-.6.5-1.1 1.1-1.1h3l1.2 1.4h5c.6 0 1.1.5 1.1 1.1v5.8c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1Z"/><path d="M8 6.7v3.2M6.4 8.3h3.2"/></svg>
+          </span>新建文件夹
+        </button>
+        <div class="sider-list-wrap">
+          <div class="sider-list" id="sider-list"></div>
+        </div>
+        <div class="sider-bottom">
+          <button type="button" class="sider-settings" id="open-settings">
+            <span class="sider-settings-icon">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/></svg>
+            </span>
+            <span class="sider-settings-label">设置</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <button type="button" class="icon-button mobile-menu" id="mobile-menu" title="打开边栏" aria-label="打开边栏">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6.5 3v10"/></svg>
+        </button>
+        <div class="content">
+          <section class="welcome" id="welcome">
+            <div class="greeting">今天有什么可以帮到你？</div>
+            <div class="welcome-input" id="welcome-input"></div>
+          </section>
+
+          <section class="view" id="view" hidden>
+            <div class="view-header">
+              <div class="view-title" id="view-title">新对话</div>
+            </div>
+            <div class="message-list" id="message-list">
+              <div class="message-column" id="messages"></div>
+            </div>
+            <div class="input-container">
+              <div class="session-input" id="session-input"></div>
+              <div class="caveat">内容由 AI 生成，请仔细甄别</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="chat-input home" id="composer">
+      <div class="textarea-wrapper">
+        <textarea
+          id="prompt"
+          rows="1"
+          placeholder="请输入消息"
+          spellcheck="false"
+          aria-label="请输入消息"
+        ></textarea>
+      </div>
+      <div class="function-row">
+        <div class="toggles">
+          <button type="button" class="toggle selected" id="thinking-toggle" title="先思考后回答，解决推理问题">
+            <span class="toggle-icon">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a3.7 3.7 0 0 0-3.7 3.7c0 1.2.5 2 1.2 2.6.5.5.7.8.7 1.4v.6h3.6v-.6c0-.6.2-.9.7-1.4.7-.6 1.2-1.4 1.2-2.6A3.7 3.7 0 0 0 8 1.8Z"/><path d="M6.2 12.2h3.6M6.8 14h2.4"/></svg>
+            </span>
+            <span class="toggle-label">深度思考</span>
+          </button>
+          <button type="button" class="toggle" id="workspace-toggle" title="选择本地文件夹">
+            <span class="toggle-icon">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.4c0-.6.5-1.1 1.1-1.1h3l1.2 1.4h5c.6 0 1.1.5 1.1 1.1v5.8c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1Z"/></svg>
+            </span>
+            <span class="toggle-label" id="workspace-label">工作目录</span>
+          </button>
+        </div>
+        <div class="right">
+          <button type="button" class="send-button disabled" id="send" title="发送" aria-label="发送">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.6M4 7.4 8 3.4l4 4"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="settings-overlay" hidden>
+      <div class="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="modal-header">
+          <div class="modal-title" id="settings-title">设置</div>
+          <button type="button" class="icon-button modal-close" id="settings-close" title="关闭" aria-label="关闭">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+        <div class="modal-main">
+          <div class="settings-main">
+            <nav class="settings-nav">
+              <button type="button" class="nav-item nav-item-active" data-panel="model">模型设置</button>
+              <button type="button" class="nav-item" data-panel="general">通用设置</button>
+            </nav>
+            <div class="settings-content">
+              <div class="settings-panel" data-panel="model">
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">API 厂家</div>
+                    <div class="settings-description" id="provider-description"></div>
+                  </div>
+                  <select class="select" id="provider-select"></select>
+                </div>
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">API 格式</div>
+                    <div class="settings-description">换协议时只改格式，不改接入地址</div>
+                  </div>
+                  <select class="select" id="protocol-select"></select>
+                </div>
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">模型</div>
+                    <div class="settings-description">留空则使用该厂家的默认模型</div>
+                  </div>
+                  <input class="text-input" id="model-input" list="model-options" autocomplete="off" spellcheck="false" />
+                  <datalist id="model-options"></datalist>
+                </div>
+                <div class="settings-cell settings-cell-stack">
+                  <div class="settings-label">API Key</div>
+                  <div class="api-key">
+                    <div class="api-key-saved" id="api-key-saved" hidden>
+                      <span class="api-key-mask">已保存 ••••••••••••</span>
+                      <div class="divider"></div>
+                      <button type="button" class="api-key-confirm" id="api-key-change">修改</button>
+                    </div>
+                    <div class="api-key-input" id="api-key-input">
+                      <input id="key-input" type="password" autocomplete="off" placeholder="请输入 API Key" />
+                      <button type="button" class="api-key-confirm" id="api-key-confirm">确定</button>
+                    </div>
+                  </div>
+                  <div class="settings-description" id="api-key-hint"></div>
+                </div>
+              </div>
+              <div class="settings-panel" data-panel="general" hidden>
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">主题</div>
+                    <div class="settings-description">跟随系统时按操作系统的深色设置切换</div>
+                  </div>
+                </div>
+                <div class="theme-options">
+                  <button type="button" class="theme-option" data-theme="light">浅色</button>
+                  <button type="button" class="theme-option" data-theme="dark">深色</button>
+                  <button type="button" class="theme-option" data-theme="system">跟随系统</button>
+                </div>
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">工作目录</div>
+                    <div class="settings-description" id="workspace-description"></div>
+                  </div>
+                  <button type="button" class="button outlined" id="change-workspace">更改</button>
+                </div>
+                <div class="settings-cell">
+                  <div class="settings-text">
+                    <div class="settings-label">设置文件</div>
+                    <div class="settings-description" id="settings-path"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="button outlined" id="settings-cancel">取消</button>
+          <button type="button" class="button primary" id="settings-save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="folder-overlay" hidden>
+      <div class="modal folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-title">
+        <div class="modal-header">
+          <div class="modal-title" id="folder-title">选择本地文件夹</div>
+          <button type="button" class="icon-button modal-close" id="folder-close" title="关闭" aria-label="关闭">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+        <div class="modal-main">
+          <div class="folder-path-row">
+            <button type="button" class="button outlined" id="folder-up" title="上一级">↑</button>
+            <input class="text-input" id="folder-path" spellcheck="false" autocomplete="off" aria-label="文件夹路径" />
+            <button type="button" class="button outlined" id="folder-go">转到</button>
+          </div>
+          <div class="folder-roots" id="folder-roots"></div>
+          <ul class="folder-list" id="folder-list"></ul>
+          <div class="settings-description" id="folder-hint"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="button outlined" id="folder-cancel">取消</button>
+          <button type="button" class="button primary" id="folder-use">使用此文件夹</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

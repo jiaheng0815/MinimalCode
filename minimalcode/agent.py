@@ -503,6 +503,14 @@ class Agent:
         # ``complete_text``; there is no usage object to record.
         return self.provider.complete_text(messages)
 
+    def _begin_round(self) -> None:
+        """Announce a new model request inside the tool loop.
+
+        The terminal writes every round into one stream, so it has nothing to
+        do here; a front end that shows reasoning, answer, and tool activity
+        per round overrides this to start a new block.
+        """
+
     def _close_thinking(self) -> None:
         """Finish the reasoning block and resync the Markdown line state."""
         if self._thinking_renderer is None:
@@ -793,6 +801,9 @@ class Agent:
             request_title = getattr(self.provider, "set_title_request", None)
             if callable(request_title):
                 request_title(not self.session.title)
+            # Compaction requests its own summary, so the block boundary is
+            # announced only for the request whose output the user is watching.
+            self._begin_round()
             messages = self._messages()
             self._prompt_session_count = len(self.session.messages)
             try:

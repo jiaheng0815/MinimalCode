@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.6.0.
+Applies to MinimalCode 1.8.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -72,7 +72,8 @@ kind instead of falling back to `sh` semantics.
 is built, and an unknown name is a configuration error rather than a silent
 no-op: intersecting with a typo would otherwise leave the agent with no usable
 tools. `--read-only` intersects the same set with the read-only tools (`read`,
-`read_range`, `grep`, `find`, `read_image`, `web_search`, `web_fetch`), so the flag and the
+`read_range`, `grep`, `find`, `read_image`, `web_search`, `web_fetch`, `ocr`,
+`transcribe`), so the flag and the
 file compose in one direction only. Disabled tools are dropped from the request's
 `tools` array and refused by `dispatch`, which also covers a replayed session or
 a provider that ignores the schema list.
@@ -330,6 +331,26 @@ Instruction files are re-read at the start of every run: global `AGENTS.md`, the
 Highlighting only applies when stdout is a terminal. `--json`, redirected
 output, `NO_COLOR`, and `--no-highlight` all keep the raw Markdown.
 
+## Reminder
+
+DeepSeek's own clients tell the model the current date, the user's location, the
+platform, and the language. Over the API that is a `latest_reminder` message
+placed immediately before the user message it belongs to, formatted as
+`<date>,<weekday>,<location>,<platform>,<language>`.
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `enabled` | `true` | Build the reminder at all |
+| `location` | `""` | Optional; may be empty and may contain commas |
+| `platform` | `"App"` | `App` or `Web` |
+| `language` | `"English"` | Language name written in that language, e.g. `English`, `中文` |
+
+The weekday is written in `language` (`中文` → `星期一`); a language without a
+weekday table falls back to English rather than sending a half-translated word.
+The role is DeepSeek-specific, so a provider preset also has to opt in with
+`"latest_reminder": true`; the built-in `deepseek-anthropic` preset does, the
+`deepseek` (Responses) and `deepseek-web` presets cannot.
+
 Reasoning deltas reported by the provider (`reasoning_content`, `reasoning`, a
 Responses reasoning summary, or Anthropic thinking) are printed in the `h6`
 heading style before the answer, and only when highlighting is active. They are
@@ -358,6 +379,9 @@ back on the next turn. Finished answers do not retain them.
 | `headers` | no | Additional HTTP headers |
 | `extra_body` | no | Additional request fields such as `temperature` |
 | `trust_env` | no | Apply environment/system proxies; loopback `base_url` values default to `false` |
+| `session_title` | no | `{"enabled": true}` asks the provider for a short conversation title |
+| `safety_check` | no | `{"level": "low"}` (default) or `{"level": "high"}` for server-side content safety |
+| `latest_reminder` | no | `true` when the endpoint accepts the `latest_reminder` role |
 
 Provider entries are validated when settings load: `protocol`, `base_url`,
 numeric limits, booleans, and object fields are checked before the first request.
@@ -366,6 +390,15 @@ again when that provider becomes active.
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
 
+`session_title`, `safety_check`, and `latest_reminder` are DeepSeek extensions,
+so they are opt-in per preset: a strict OpenAI-compatible server that receives
+`title` or `safety_check` rejects the request. `title` and `safety_check` are
+merged after `extra_body`, so a configured extra field cannot reshape them.
+Only the first request of a session asks for a title — the provider may hold the
+response open for up to five seconds while it generates one — and the result is
+stored as its own `title` event in the JSONL session. With
+`safety_check: {"level": "high"}` a refusal ends the turn and is reported as an
+early stop instead of being shown as a normal answer.
 `prompt_cache: true` on an `anthropic_messages` provider marks one cache
 breakpoint on the last tool definition, which covers the system prompt and the
 tool list together; without tools the system block is marked instead. One
@@ -482,6 +515,14 @@ Presets pin the endpoint and the credential variable only. `context_window` is a
 
 `/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Use `/model` without arguments to list the active model and only the providers whose credentials are available: an inline `api_key`, an auth header, a set `api_key_env`, or `require_api_key: false`. Providers with a missing key are omitted instead of listed as unavailable.
 
+The settings panel of the web UI (`minimalcode --web`) writes the same keys as
+`config set-provider` / `config set-model`, plus two provider-scoped overrides
+the CLI has no command for: `providers.<name>.model` (pins the model for that
+vendor) and `providers.<name>.protocol` (changes the API format without touching
+`base_url`, for a gateway that serves more than one wire format). An API key
+typed in the page is stored as `providers.<name>.api_key`; the page only ever
+reports whether a key is configured, never the key itself.
+
 `deepseek_web` drives the consumer web endpoint rather than an API: the same
 requests the browser makes, on the free account's quota. It needs the account's
 web token, plus the optional wasm runtime:
@@ -561,6 +602,8 @@ checks. The built-in DeepSeek provider enables them with:
   "default_count": 10,
   "max_count": 50,
   "max_content_chars": 120000,
+  "default_need_content": false,
+  "min_rerank_score": 0,
   "api_key_env": "DEEPSEEK_API_KEY",
   "headers": {}
 }
@@ -579,6 +622,18 @@ dropped, at most the requested count (capped by `max_count`) results are kept,
 and every string field is truncated to `max_content_chars` with a
 `<content truncated>` marker. `web_fetch` applies the same limit to page content
 and the title.
+
+The result list is then ordered by `rerank_score` (descending, ties keep the
+provider's order) and deduplicated by URL. Sorting happens before the
+duplicate check, so a mirrored page contributes its best-scoring copy instead of
+whichever copy the provider happened to return first. `min_rerank_score` drops
+results the provider scored below it — 1.5 is its own threshold for a good
+result, and `0` (the default) keeps everything. `default_need_content` is what
+`web_search` sends when the model omits `need_content`.
+
+The `web_search` query accepts the provider's search operators unchanged:
+`site:host`, `-site:host`, `-word`, `-"exact phrase"`, `"exact phrase"`,
+`lang:zh,en`, `after:2025`, `after:2025-01-01`, `before:2026`.
 
 `web_tools.base_url` and its credential are trusted provider configuration.
 `web_fetch` validates that the requested target is HTTP(S), but the target URL
@@ -632,6 +687,87 @@ JPEG, PNG, GIF, and WebP are accepted. Images are read through the same
 workspace check as `read`, so files outside the workspace require
 `tools.allow_outside_workspace: true`.
 
+## Media tools
+
+A `media` block adds OCR, speech recognition, speech synthesis, and document
+parsing. All four share one HTTP client; a capability is enabled by naming its
+path, so an endpoint without `tts_path` simply never offers `speech`:
+
+```json
+"media": {
+  "enabled": true,
+  "base_url": "https://api.deepseek.com",
+  "ocr_path": "v1/tools/ocr",
+  "asr_path": "v1/tools/asr",
+  "tts_path": "v1/tools/tts",
+  "files_path": "files",
+  "timeout_seconds": 180,
+  "max_upload_bytes": 104857600,
+  "max_audio_bytes": 8388608,
+  "max_pages": 1000,
+  "max_chars": 120000,
+  "voice_id": "stella",
+  "format": "wav",
+  "purpose": "text_recognition",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "headers": {}
+}
+```
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Build the client at all |
+| `base_url` | provider `base_url` | API root; the tools paths are appended to it |
+| `ocr_path` | `""` | Path of the OCR endpoint, enables `ocr` |
+| `asr_path` | `""` | Path of the speech-recognition endpoint, enables `transcribe` |
+| `tts_path` | `""` | Path of the synthesis endpoint, enables `speech` |
+| `files_path` | `""` | Path of the Files API, enables `/attach` |
+| `timeout_seconds` | `180` | HTTP timeout for one request |
+| `max_upload_bytes` | `104857600` | Largest document sent (DeepSeek's ceiling is 100 MiB) |
+| `max_audio_bytes` | `8388608` | Largest audio file sent (DeepSeek's ceiling is 8 MiB) |
+| `max_pages` | `1000` | OCR pages kept from one response |
+| `max_chars` | `120000` | Maximum characters returned to the model |
+| `voice_id` | `"stella"` | `stella` or `tide` |
+| `format` | `"wav"` | `wav` or `pcm` |
+| `purpose` | `"text_recognition"` | Default parse mode: `text_recognition`, `rich_layout_recognition`, or `user_data` |
+
+These requests are billable per page, per audio second, and per character, so
+the client never retries them: a read timeout after the server started
+processing would bill the same input twice. Limits are checked locally first, so
+an oversized file never leaves the machine.
+
+`ocr` and `transcribe` are read-only tools and stay available under
+`--read-only`; `speech` writes an audio file and does not. `/attach` is not a
+model tool: it uploads a document, and the returned `file_id` is attached to the
+next user message, where each protocol wraps it in its own content block
+(`file`, `document`, `input_file`). The same file name and content hash reuse a
+`file_id`, so attaching a document twice costs one parse.
+`file_id`, so attaching a document twice costs one parse.
+
+## Clawd on Desk
+
+`integrations.clawd` reports session and tool lifecycle to the
+[Clawd on Desk](https://github.com/rullerzhou-afk/clawd-on-desk) desktop pet.
+It only sends metadata (agent id, session id, state, event name, tool name,
+working directory, platform); prompts, tool arguments, and file contents never
+leave the process.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Report lifecycle events at all |
+| `agent_id` | `""` | Agent id Clawd recognizes; empty means use the id from `clawd install` |
+| `runtime_file` | `null` | `null` reads `~/.clawd/runtime.json`; a path pins one Clawd instance |
+| `timeout_seconds` | `1.0` | Timeout for one POST to Clawd's `/state` endpoint |
+
+Reporting runs on a daemon thread with a one-second timeout, so a slow or
+closed Clawd never delays the tool loop; a failed probe is not retried for five
+seconds. Subagent children run with `MINIMALCODE_NO_CLAWD=1`, so only the
+parent reports. `minimalcode clawd install` writes the agent into Clawd's
+`clawd-prefs.json` and `remove` takes it back out; both refuse to run while
+Clawd is running, because Clawd holds its preferences in memory and writes the
+whole snapshot back.
+
+## MCP
 ## MCP
 
 MinimalCode can attach Model Context Protocol servers and expose their tools to

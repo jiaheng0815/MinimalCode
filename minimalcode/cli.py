@@ -95,6 +95,27 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", help="Workspace directory")
     parser.add_argument("--home", help="Config directory (default ~/.MinimalCode)")
     parser.add_argument(
+        "--web",
+        action="store_true",
+        help=(
+            "Serve the chat web UI instead of the interactive terminal; the "
+            "page picks the API vendor, API format, model, and workspace"
+        ),
+    )
+    parser.add_argument(
+        "--web-host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Web UI bind address (default 127.0.0.1, loopback only)",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=8090,
+        metavar="PORT",
+        help="Web UI port (default 8090; 0 picks a free port)",
+    )
+    parser.add_argument(
         "--sandbox",
         dest="sandbox_enabled",
         action=argparse.BooleanOptionalAction,
@@ -1574,6 +1595,27 @@ def run(argv: Sequence[str] | None = None) -> int:
         settings = load_settings(args.home, require_file=True)
     _apply_sandbox_overrides(settings, args)
     env_config = _apply_anthropic_env(settings, args) if args.anthropic_env else None
+    if args.web:
+        if prompt:
+            parser.error("--web cannot be combined with a prompt")
+        if args.session or args.continue_session:
+            parser.error("--web cannot be combined with --session or --continue")
+        if not 0 <= args.web_port <= 65535:
+            parser.error("--web-port must be from 0 to 65535")
+        from .webui import serve
+
+        # The page owns provider, model, and workspace from here on; the CLI
+        # values below are only the initial selection.
+        return serve(
+            settings,
+            cwd,
+            host=args.web_host,
+            port=args.web_port,
+            provider=args.provider,
+            model=args.model,
+            read_only=args.read_only,
+            save_session=not args.no_session,
+        )
     shell = detect_shell(settings.get("shell.path"))
     provider = None
     web_client = None

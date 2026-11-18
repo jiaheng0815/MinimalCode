@@ -47,7 +47,7 @@ version = {attr = "minimalcode.__version__"}
 include = ["minimalcode*"]
 
 [tool.setuptools.package-data]
-minimalcode = ["defaults.json", "provider/sha3_wasm_bg.wasm"]
+minimalcode = ["defaults.json", "provider/sha3_wasm_bg.wasm", "webui/assets/*"]
 
 [tool.ruff]
 line-length = 88

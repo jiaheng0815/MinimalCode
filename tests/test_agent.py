@@ -299,6 +299,37 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(tool_messages), 40)
         self.assertIn("limit is", tool_messages[0]["content"])
 
+    def test_each_model_request_announces_one_round(self) -> None:
+        """A front end needs one block per request to keep the order 思考→正文→工具."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace, provider="fake", model="fake-model", save=False
+            )
+            rounds: list[int] = []
+
+            class RoundRecordingAgent(Agent):
+                def _begin_round(self) -> None:
+                    rounds.append(len(rounds) + 1)
+
+            agent = RoundRecordingAgent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            result = agent.run("write result.txt")
+        # A tool round followed by a final answer is two model requests.
+        self.assertTrue(result.completed)
+        self.assertEqual(rounds, [1, 2])
+
     def test_tool_loop_writes_file_and_records_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

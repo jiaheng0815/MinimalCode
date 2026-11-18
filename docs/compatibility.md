@@ -1,20 +1,93 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.6.0. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.8.0. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
-1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, and 1.6.0 added
-no further breaking import changes (`minimalcode.httpclient`,
-`minimalcode.clipboard`, and `minimalcode.mcp` are new modules, not renamed
-ones).
+1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
+and 1.8.0 added no further breaking import changes (`minimalcode.httpclient`,
+`minimalcode.clipboard`, `minimalcode.mcp`, `minimalcode.media`, and
+`minimalcode.webui` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.6.0. Every change is additive: MCP
-servers become extra tools, `mcp` settings appear in the merged defaults, and
-`Agent.status()` gains one key. An existing settings file without an `mcp`
-block behaves exactly as it did in 1.5.4 and starts no extra process.
+format, or import path was removed in 1.7.0 or 1.8.0. Every change is additive:
+new tools join `tools.allow` and the read-only set, every new settings block is
+optional, and a `settings.json` written for 1.6.0 keeps working unchanged. The
+1.8.0 web UI drives the same agent and the same JSONL files, so a conversation
+started in the browser is the file `--continue` resumes in the terminal.
+
+## What 1.8.0 added
+
+- `minimalcode.webui` with `serve` and `create_server` in `__all__`.
+  `WebRuntime`, `WebAgent`, and `browse_directories` live in
+  `minimalcode.webui.runtime`, and a test that stubs the model client patches
+  `minimalcode.webui.runtime.create_provider`.
+- `--web`, `--web-host`, and `--web-port`. `--web` serves the page instead of
+  the interactive loop and refuses a prompt, `--session`, or `--continue`.
+- `SessionStore.delete`, which unlinks only files inside the `sessions/`
+  directory and raises `ValueError` for any other path.
+- `Agent._begin_round`, a no-op hook called before each model request;
+  `WebAgent` overrides it to open a display block per round.
+- HTTP surface: `GET /api/state`, `/api/history`, `/api/sessions`, and
+  `/api/browse`; `POST /api/chat` (SSE), `/api/settings`, `/api/session`,
+  `/api/session/delete`, `/api/session/folder`, `/api/folder`,
+  `/api/folder/delete`, `/api/thinking`, `/api/workspace`, and `/api/new`.
+- `webui/assets/*` in the package data, so the page ships inside the wheel.
+- Sidebar and reasoning state live beside the transcript, not in it:
+  `<home>/webui/folders.json` holds the folder index and
+  `<home>/webui/thinking.json` holds display-only reasoning, so the JSONL a
+  session writes keeps its 1.7.0 format.
+
+## What 1.8.0 changed
+
+- `Agent` gained the `_begin_round` hook; every existing display hook keeps its
+  behaviour, so terminal output is unchanged.
+- A settings write, workspace switch, or conversation switch that arrives
+  while a turn is running returns 409 instead of pulling the runtime out from
+  under a running tool.
+- The web settings panel writes only the keys the user changed
+  (`provider`, `model`, and `providers.<name>.{protocol,model,api_key}`) and
+  updates the live `Settings` mapping in place instead of reloading it, so
+  command-line overrides survive a model switch.
+
+## What 1.7.0 added
+
+- `minimalcode.media` with `ProviderMediaClient`, `DOCUMENT_PURPOSES`,
+  `OCR_PURPOSES`, `SPEECH_FORMATS`, and `VOICE_IDS` in `__all__`.
+- Tools `ocr`, `transcribe`, and `speech`. `--read-only` keeps `ocr` and
+  `transcribe` (they only read and upload) but not `speech`, which writes a
+  file.
+- `/attach <path> [purpose]`, `/listen <audio-path>`, `/say [text]`, and the
+  non-interactive `--attach <path>`.
+- `providers.<name>.media` (four endpoints plus size, page, character, voice,
+  and format limits), `providers.<name>.session_title.enabled`,
+  `providers.<name>.safety_check.level`, and the
+  `providers.<name>.latest_reminder` flag.
+- Session titles: a `title` event in the JSONL, `SessionStore.set_title`,
+  `Session.title`, `ProviderReply.title`, and a title column in
+  `minimalcode sessions`.
+- `reminder.py` with `build_reminder`, `supports_reminder`, `weekday_name`,
+  `PLATFORMS`, and `UNSUPPORTED_PROTOCOLS` in `__all__`, driven by the new
+  `reminder` settings block.
+- `minimalcode clawd [status|install|remove|test]` and the `integrations.clawd`
+  block (`enabled`, `agent_id`, `runtime_file`, `timeout_seconds`).
+- `web_tools.min_rerank_score` and `web_tools.default_need_content`.
+
+## What 1.7.0 changed
+
+- `web_search` sorts by `rerank_score` before de-duplicating, so the mirrors of
+  one URL keep the best-scored copy instead of the first one seen;
+  `need_content` falls back to `web_tools.default_need_content` when the model
+  omits it.
+- `Agent.__init__` accepts `clawd=`, and `Agent` reports session, prompt, tool,
+  subagent, compaction, and turn events to it. Retries now reach both surfaces
+  through the new `_provider_notice` hook instead of binding `notify` straight
+  to `_activity`.
+- Subagent children are started with `MINIMALCODE_NO_CLAWD=1`, so only the
+  parent reports; the depth variable keeps its 1.6.0 name.
+- A refusal (`refusal` or `content_filter`) ends the turn and is reported as an
+  early stop, not as a normal answer that could be resumed.
 
 ## What 1.6.0 added
 
@@ -130,8 +203,6 @@ Every change is a defect fix or an additive protocol:
 - Piped stdio is UTF-8 (children get `PYTHONUTF8=1`), `thinking` in
   `settings.json` is case-insensitive, and a multi-line paste starting with `/`
   reaches the model instead of being dropped as an unknown command.
-
-## What 1.5.0 changed
 
 ## What 1.5.0 changed
 

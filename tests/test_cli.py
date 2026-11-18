@@ -1410,3 +1410,46 @@ class SlashLikePasteTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         return load_settings(Path(temp.name) / ".MinimalCode")
+
+
+class WebModeTests(unittest.TestCase):
+    """`--web` hands the same settings to the browser instead of the terminal."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name) / ".MinimalCode"
+
+    def _run(self, argv: list[str]) -> int:
+        with patch.object(sys.stdin, "isatty", return_value=True):
+            return run([*argv, "--home", str(self.home)])
+
+    def test_web_mode_serves_the_page_instead_of_a_turn(self) -> None:
+        calls: list[tuple] = []
+
+        def fake_serve(settings, workspace, **kwargs):
+            calls.append((settings, workspace, kwargs))
+            return 0
+
+        with patch("minimalcode.webui.serve", fake_serve):
+            code = self._run(["--web", "--model", "some-model"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        settings, workspace, kwargs = calls[0]
+        self.assertEqual(workspace, Path.cwd().resolve())
+        self.assertEqual(kwargs["model"], "some-model")
+        self.assertEqual(kwargs["host"], "127.0.0.1")
+        self.assertEqual(kwargs["port"], 8090)
+        self.assertFalse(kwargs["read_only"])
+        self.assertTrue((self.home / "settings.json").exists())
+        self.assertEqual(settings.source, self.home / "settings.json")
+
+    def test_web_mode_rejects_a_prompt_or_a_session(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self._run(["--web", "hello"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self._run(["--web", "--session", "abc"])
+
+    def test_web_port_is_validated(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self._run(["--web", "--web-port", "70000"])
