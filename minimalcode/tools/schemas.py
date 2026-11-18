@@ -28,12 +28,17 @@ TOOL_NAMES = frozenset(
         "read_image",
         "web_search",
         "web_fetch",
+        "ocr",
+        "transcribe",
+        "speech",
     }
 )
 
 # Tools that cannot change the workspace or start a process. They are the whole
 # of `--read-only`, and the only tools that may run concurrently: a batch of
 # reads has no ordering dependency, while `write` followed by `shell` does.
+# `ocr` and `transcribe` upload a file but write nothing back, so they keep
+# working under `--read-only`; `speech` writes an audio file and does not.
 READ_ONLY_TOOLS = frozenset(
     {
         "read",
@@ -43,6 +48,8 @@ READ_ONLY_TOOLS = frozenset(
         "read_image",
         "web_search",
         "web_fetch",
+        "ocr",
+        "transcribe",
     }
 )
 
@@ -337,13 +344,22 @@ def _web_schemas(web_client: ProviderWebClient) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web through the configured provider.",
+                "description": (
+                    "Search the web through the configured provider. The query "
+                    "may use search operators: site:host, -site:host, -word, "
+                    '-"exact phrase", "exact phrase", lang:zh,en, after:YYYY, '
+                    "before:YYYY-MM-DD. Duplicate URLs are dropped and results "
+                    "are ordered by the provider's relevance score."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search query, 1-128 characters",
+                            "description": (
+                                "Search query, 1-128 characters, with optional "
+                                "search operators"
+                            ),
                         },
                         "count": {
                             "type": "integer",
@@ -354,8 +370,12 @@ def _web_schemas(web_client: ProviderWebClient) -> list[dict[str, Any]]:
                             ),
                         },
                         "need_content": {
-                            "type": "boolean",
-                            "description": "Include page content when available",
+                            "type": ["boolean", "null"],
+                            "description": (
+                                "Include page content when available; omit to "
+                                "use the provider default "
+                                f"({web_client.default_need_content})"
+                            ),
                         },
                         "ori_question": {
                             "type": ["string", "null"],
@@ -392,6 +412,100 @@ def _web_schemas(web_client: ProviderWebClient) -> list[dict[str, Any]]:
     ]
 
 
+# Document, audio, and speech schemas. Each one is advertised only when its
+# endpoint is configured, so the model never sees a capability the current
+# provider would refuse.
+OCR_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "ocr",
+        "description": (
+            "Extract text from a PDF, Word, PowerPoint, or image file page by "
+            "page with the provider's OCR API. Use it to read a scanned "
+            "document or a screenshot-bearing report that plain text tools "
+            "cannot decode; the result is returned as text here, not stored."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"},
+                "purpose": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "'text_recognition' (default) drops document images; "
+                        "'rich_layout_recognition' keeps them in place"
+                    ),
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TRANSCRIBE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "transcribe",
+        "description": (
+            "Transcribe an audio file into text with the provider's speech "
+            "recognition API. The audio must be 16-bit PCM WAV or Ogg Opus, "
+            "at most 8 MiB and 120 seconds."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Audio file path"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SPEECH_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "speech",
+        "description": (
+            "Synthesize speech from text and write the audio file into the "
+            "workspace. There is no playback here: report the written path."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to speak; Markdown is stripped",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Output audio file path (.wav)",
+                },
+                "voice_id": {
+                    "type": ["string", "null"],
+                    "description": "Voice: 'stella' (default) or 'tide'",
+                },
+            },
+            "required": ["text", "path"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _media_schemas(media_client: Any) -> list[dict[str, Any]]:
+    """Return the media schemas whose endpoint the provider actually configured."""
+    schemas: list[dict[str, Any]] = []
+    if getattr(media_client, "ocr_enabled", False):
+        schemas.append(OCR_SCHEMA)
+    if getattr(media_client, "asr_enabled", False):
+        schemas.append(TRANSCRIBE_SCHEMA)
+    if getattr(media_client, "tts_enabled", False):
+        schemas.append(SPEECH_SCHEMA)
+    return schemas
+
+
 def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
     vision_client: ProviderVisionClient | None = None,
@@ -399,6 +513,7 @@ def available_tool_schemas(
     *,
     allowed: frozenset[str] | None = None,
     mcp_schemas: list[dict[str, Any]] | None = None,
+    media_client: Any = None,
 ) -> list[dict[str, Any]]:
     """Return the schemas enabled by the active clients and depth limit.
 
@@ -407,7 +522,8 @@ def available_tool_schemas(
     ``tools.allow`` / ``--read-only`` restriction so a disabled tool is never
     advertised: a schema the model can see but not call only wastes a turn.
     ``mcp_schemas`` are the declarations discovered from MCP servers; they are
-    filtered by the same allowlist as the built-in tools.
+    filtered by the same allowlist as the built-in tools. ``media_client`` is
+    duck-typed because it is only asked which of its capabilities are enabled.
     """
     schemas = list(TOOL_SCHEMAS)
     if subagent:
@@ -416,6 +532,8 @@ def available_tool_schemas(
         schemas.append(READ_IMAGE_SCHEMA)
     if web_client is not None and web_client.enabled:
         schemas.extend(_web_schemas(web_client))
+    if media_client is not None and getattr(media_client, "enabled", False):
+        schemas.extend(_media_schemas(media_client))
     if mcp_schemas:
         schemas.extend(mcp_schemas)
     if allowed is None:

@@ -29,6 +29,7 @@ class ResponsesProtocolMixin:
     stream_enabled: bool
     send_reasoning_effort: bool
     config: dict[str, Any]
+    extensions: dict[str, Any]
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         raise NotImplementedError
@@ -127,6 +128,9 @@ class ResponsesProtocolMixin:
             payload.update(
                 {key: value for key, value in extra.items() if key not in reserved}
             )
+        # Applied after extra_body: a preset turns these on, and a free-form
+        # override must not be able to reshape a documented extension.
+        payload.update(self.extensions)
         return payload
 
     @staticmethod
@@ -445,6 +449,7 @@ class ResponsesProtocolMixin:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            title=self._response_title(final_response),
         )
 
     def _parse_responses_payload(
@@ -486,7 +491,18 @@ class ResponsesProtocolMixin:
             tool_calls=calls,
             finish_reason=self._response_finish(data, bool(calls)),
             usage=normalize_usage(data.get("usage")),
+            title=self._response_title(data),
         )
+
+    @staticmethod
+    def _response_title(data: Any) -> str | None:
+        """Return the conversation title carried by a Responses payload."""
+        if not isinstance(data, dict):
+            return None
+        title = data.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None
+        return " ".join(title.split())
 
     def _parse_responses_sse_body(
         self,

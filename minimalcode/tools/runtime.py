@@ -16,6 +16,7 @@ from ..subagent import depth_from_env as subagent_depth_from_env
 from ..vision import ProviderVisionClient
 from ..web import ProviderWebClient
 from .files import FileToolsMixin
+from .media_tools import MediaToolsMixin
 from .process import ProcessToolsMixin
 from .remote import RemoteToolsMixin
 from .schemas import READ_ONLY_TOOLS, TOOL_NAMES
@@ -43,6 +44,7 @@ class ToolRuntime(
     SearchToolsMixin,
     ProcessToolsMixin,
     RemoteToolsMixin,
+    MediaToolsMixin,
 ):
     """Execute model tool calls with workspace and sandbox enforcement.
 
@@ -58,6 +60,7 @@ class ToolRuntime(
         *,
         web_client: ProviderWebClient | None = None,
         vision_client: ProviderVisionClient | None = None,
+        media_client: Any = None,
         provider_name: str | None = None,
         model: str | None = None,
         thinking: str | None = None,
@@ -71,6 +74,9 @@ class ToolRuntime(
         self.web_enabled = bool(web_client and web_client.enabled)
         self.vision_client = vision_client
         self.vision_enabled = bool(vision_client and vision_client.enabled)
+        # Duck-typed on purpose: the media client owns OCR, speech, and speech
+        # synthesis endpoints, and this runtime only asks which are enabled.
+        self.media_client = media_client
         self.provider_name = provider_name
         self.model = model
         self.thinking = thinking
@@ -248,6 +254,9 @@ class ToolRuntime(
             "read_image": self.read_image,
             "web_search": self.web_search,
             "web_fetch": self.web_fetch,
+            "ocr": self.ocr,
+            "transcribe": self.transcribe,
+            "speech": self.speech,
         }
         handler = handlers.get(name)
         if handler is None and not (is_mcp_tool(name) and self.mcp.owns(name)):
@@ -288,6 +297,9 @@ class ToolRuntime(
             "append_file",
             "edit",
             "read_image",
+            "ocr",
+            "transcribe",
+            "speech",
         }:
             detail = clip(str(arguments.get("path", "")))
         elif name == "grep":

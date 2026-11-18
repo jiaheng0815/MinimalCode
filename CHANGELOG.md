@@ -1,5 +1,42 @@
 # 更新日志
 
+## 1.7.0 - 2026-11-17
+
+DeepSeek 工具 API 全面接入：OCR、语音识别、语音合成、文件解析、会话标题、用户元信息标记、内容安全与联网工具，并重做了搜索结果的排序与去重。
+
+### 新增
+
+- 新增 `minimalcode/media.py`：一个 `ProviderMediaClient` 复用同一个 `httpx2` 连接池，覆盖 DeepSeek 工具 API 的四个端点——`/v1/tools/ocr`、`/v1/tools/asr`、`/v1/tools/tts` 与 `files`。这些调用按页、按音频秒、按字符计费，所以**不做自动重试**：读超时后服务端可能已经开始处理，重试会重复计费；重试与否交给调用方决定。配置在 `providers.<name>.media`：`enabled`、`base_url`、`ocr_path`、`asr_path`、`tts_path`、`files_path`、`timeout_seconds`、`max_upload_bytes`、`max_audio_bytes`、`max_pages`、`max_chars`、`voice_id`、`format`、`purpose`。
+- 新增工具 `ocr`：PDF、Word、PowerPoint、PNG/JPEG/WebP/GIF/BMP/TIFF 逐页识别为文字。`purpose` 为 `text_recognition`（默认，丢弃文档里的图）或 `rich_layout_recognition`（保留图的位置）。返回 `pages`（含每页 `index`、`text`、`finish_reason`）与拼接后的 `text`；某页 `finish_reason` 为 `length` 时标记 `truncated`。文件先经过沙箱路径策略与 100 MiB 上限检查，再离开本机。
+- 新增工具 `transcribe`：语音识别输入。16 位 PCM WAV 或 Ogg Opus，≤ 8 MiB、≤ 120 秒，返回 `text`、`duration_ms`、`request_id`。
+- 新增工具 `speech`：语音合成输出。把文本合成为音频并写入工作区路径（默认 `wav`），返回写入的路径与字节数。不自动播放：终端环境没有可靠的播放器，报告路径由调用方处理。
+- 新增 `/attach <path> [purpose]`：通过 Files API 上传并解析文档，拿到 `file_id` 后随**下一条**用户消息一起发送，模型因此能按原始版式阅读该文档（`rich_layout_recognition` 会把文档里的图一起交给模型）。同一路径 + 相同内容只会上传一次：`upload()` 用 SHA-256 做键复用 `file_id`，重复 `/attach` 不再付费解析。
+- 新增 `/listen <audio-path>`：把音频转写成文字，并把转写结果作为本轮的用户消息发送，因此语音输入与打字走完全相同的路径。
+- 新增 `/say [text]`：朗读给定文本，未给文本时朗读上一条回答，音频写入工作区 `speech-<时间戳>.wav`。
+- 新增会话标题：provider 预设里开启 `session_title.enabled` 后，请求体带上 `title: {"enabled": true}`，标题随回答一起返回（流式在最后一个 chunk 的 `delta.title`，非流式在 `message.title`；Messages 在 `message_delta.delta.title`，Responses 在顶层 `title`）。只有会话的**第一次**请求会索取标题——服务端最多为标题多等 5 秒，而标题拿到后不会再变。标题写入独立的 `title` 事件，`sessions` 命令与新字段 `title` 一起显示；`--session` 恢复后仍然保留。
+- 新增用户元信息标记：`reminder` 块配置 `enabled`、`location`、`platform`（`App`/`Web`）、`language`，每个用户回合前插入一条 `{"role": "latest_reminder", "content": "<date>,<weekday>,<location>,<platform>,<language>"}`。星期按 `language` 自身语言书写（`中文` → `星期一`），未收录的语言回退英文。该角色只有 DeepSeek 的 Messages / Chat Completions 接受，所以由 provider 预设的 `latest_reminder: true` 逐家开启；Responses 与 `deepseek_web` 不会注入。
+- 新增模型内容安全：provider 预设里 `safety_check.level` 为 `high` 时请求体带上 `{"safety_check": {"level": "high"}}`。拒答（Messages 的 `stop_reason: "refusal"`、Responses 的 `incomplete_details.reason: "content_filter"`、Chat 的 `finish_reason: "content_filter"`）被当作回合提前结束上报，不会当成正常回答。
+- 网页搜索升级：结果按 `rerank_score` 降序、同分保持 provider 原序；先排序再去重，因此同一 URL 的多个镜像保留的是**分数最高**的那份（之前按出现顺序保留，可能丢掉更好的副本）；`web_tools.min_rerank_score` 可以过滤低质结果（默认 0 = 不过滤，≥1.5 为 provider 判定的优质）。`web_tools.default_need_content` 让 `need_content` 有默认值，模型省略该参数时采用它。工具描述里列出可用的搜索语法：`site:`、`-site:`、`-词`、`-"短语"`、`"精确短语"`、`lang:zh,en`、`after:`、`before:`。
+- 新增 `providers.<name>.media` 与上面各扩展字段的配置校验：`session_title`/`safety_check`/`media` 必须是对象，`latest_reminder` 必须是布尔，`safety_check.level` 只能是 `low`/`high`，`reminder.platform` 只能是 `App`/`Web`，写错时报错并指出配置文件。
+
+- 桌宠集成：新增 `minimalcode/clawd.py`，把会话生命周期上报给 [Clawd on Desk](https://github.com/rullerzhou-afk/clawd-on-desk) 的本地 `/state` 端点——提问（thinking）、工具执行（working）、子代理（juggling）、压缩（sweeping）、回合结束（attention）、失败（error）与会话结束。只发元数据：agent id、会话 id、状态、事件名、工具名、工作目录和平台，不发提示词、工具参数或文件内容。上报走一个后台守护线程，单次请求 1 秒超时；Clawd 没运行时探测失败后 5 秒内不再重试，因此不会拖慢工具循环。
+- 桌宠集成：新增 `minimalcode clawd [status|install|remove|test]` 命令。`install` 把 MinimalCode 作为「自定义 HTTP Agent」写入 Clawd 的 `clawd-prefs.json`，`remove` 撤回。Clawd 把偏好设置放在内存里、并在移动桌宠或改设置时把整份快照写回文件，所以这两个动作在 Clawd 运行时拒绝执行：先退出 Clawd，注册后再打开它。`status` 显示运行状态、agent id 和偏好文件的 schema 版本；`test` 真发一条探测事件并解释 Clawd 的答复（200 已接受、204 未知或被关掉、无响应即未运行）。
+- 桌宠集成：`install` 在偏好文件不存在时创建一个只含 `customApplications` 的文档，因此源码 checkout 不必先启动一次 Clawd 就能注册；文件存在但读取或解析失败时仍然报错，不覆盖用户已有设置。
+- 桌宠集成：源码版与安装版的兼容性经核对无需补丁——Clawd 的「自定义 HTTP Agent」实现在 `src/custom-applications.js`、`src/server-agent-id.js`、`src/server-route-state.js`，这三个文件在 `v1.6.0` 标签与当前源码 HEAD 之间没有改动；两边共用同一份 `clawd-prefs.json`（`app.getPath("userData")`）与 `~/.clawd/runtime.json`。
+
+### 变更
+
+- 版本号升级到 1.7.0。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema；新增的工具名会进入 `tools.allow` 的可用集合，`--read-only` 保留 `ocr` 与 `transcribe`（只读文件、只上传），但不保留 `speech`（会写文件）。
+- `minimalcode.media` 的 `__all__` 导出 `ProviderMediaClient`、`OCR_PURPOSES`、`DOCUMENT_PURPOSES`、`SPEECH_FORMATS`、`VOICE_IDS`；`minimalcode.reminder` 导出 `build_reminder`、`supports_reminder`、`weekday_name`、`PLATFORMS`、`UNSUPPORTED_PROTOCOLS`。
+- 文档附件在会话里只保存一种中立形式（`attachments: [{"file_id": ...}]`），由 `OpenAICompatibleProvider._document_messages` 在协议层一次性转换成 Chat 的 `file`、Messages 的 `document` 与 Responses 的 `input_file`。会话文件因此可以在切换 provider 后重放：历史里的 `file_id` 会按新协议重新包装。
+- `ProviderReply` 新增 `title` 字段；`OpenAICompatibleProvider` 新增 `extensions`、`set_title_request()`、`title_enabled`、`safety_level`、`latest_reminder_enabled`。`title`/`safety_check` 在 `extra_body` 之后合并，因此配置的附加字段无法覆盖它们。
+- `Session` 新增 `title` 字段与 `set_title()`；标题以独立的 `title` 事件写入 JSONL，`SessionStore.list()` 新增 `title` 键（只扫描文件头部 64 行，不解析整份记录）。
+- `ToolRuntime` 新增 `media_client` 参数与 `attach_document()`，`available_tool_schemas()` 新增关键字参数 `media_client`；`Agent` 新增 `attach()` 与 `pending_attachments`。
+- `web_search` 的 `need_content` 现在允许省略（`null`）以采用 `web_tools.default_need_content`；显式传 `true`/`false` 的行为不变。
+- `Agent` 新增 `clawd` 构造参数，以及 `session_start()` / `close()` 方法。不传 `clawd` 时使用空实现，因此没有桌宠的调用方（包括现有全部测试）不会发出任何网络请求。
+- 未注册时不发送任何事件：Clawd 会接受不认识的 agent id 并把它并进 Claude Code 的子代理流，那比保持静默更糟。
+- `Agent.new_session()` 会把 Clawd 的会话卡片切到新会话 id，而不是留下一个停留在 idle 的旧卡片。
+
 ## 1.6.0 - 2026-11-11
 
 ### 新增

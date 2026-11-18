@@ -59,10 +59,12 @@ class Session:
     path: Path | None
     cwd: Path
     messages: list[dict[str, Any]] = field(default_factory=list)
-    # Provider/model recorded in the session meta. Resuming must not silently
-    # send a history recorded for one wire protocol to another provider.
     provider: str = ""
     model: str = ""
+    # Short title the provider generated for this conversation. Stored as its
+    # own event so a resumed session keeps it and `--list-sessions` can show it
+    # instead of the first line of the prompt.
+    title: str = ""
 
     def append_event(self, event: dict[str, Any]) -> None:
         if self.path is None:
@@ -101,13 +103,31 @@ class Session:
                 handle.write("\n")
             handle.write(line)
             handle.flush()
-            os.fsync(handle.fileno())
 
     def append_message(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
         try:
             self.append_event({"type": "message", "message": message})
         except (OSError, TypeError, ValueError):
+            self.messages.pop()
+            raise
+
+    def set_title(self, title: str) -> None:
+        """Record the conversation title once, as its own event.
+
+        A separate event keeps the title out of the message list, so it can
+        never be replayed to a provider that would reject an unknown field.
+        """
+        cleaned = " ".join(str(title).split())
+        if not cleaned or cleaned == self.title:
+            return
+        self.title = cleaned
+        try:
+            self.append_event({"type": "title", "title": cleaned})
+        except (OSError, TypeError, ValueError):
+            # A title is cosmetic: losing it must not fail a turn whose answer
+            # already arrived.
+            return
             self.messages.pop()
             raise
 
@@ -386,6 +406,7 @@ class SessionStore:
         session_id = path.stem
         recorded_provider = ""
         recorded_model = ""
+        recorded_title = ""
         if path.suffix.lower() != ".jsonl":
             raise ValueError(f"not a session file (expected .jsonl): {path}")
         # Never default to the sessions directory: a metadata-less file loaded
@@ -431,6 +452,10 @@ class SessionStore:
                             messages = [
                                 item for item in compacted if isinstance(item, dict)
                             ]
+                    elif event.get("type") == "title":
+                        title = event.get("title")
+                        if isinstance(title, str):
+                            recorded_title = title
         except OSError as exc:
             raise FileNotFoundError(f"cannot read session {path}: {exc}") from exc
         try:
@@ -444,7 +469,18 @@ class SessionStore:
             messages=messages,
             provider=recorded_provider,
             model=recorded_model,
+            title=recorded_title,
         )
+
+    def delete(self, path: Path) -> None:
+        """Remove one recorded conversation.
+
+        Only files the store itself wrote can be deleted: a path handed in from
+        outside the sessions directory is refused instead of unlinked.
+        """
+        if not self._within_root(path):
+            raise ValueError(f"session is not in the store: {path}")
+        Path(path).unlink(missing_ok=True)
 
     def list(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -459,7 +495,35 @@ class SessionStore:
                     "provider": str(first.get("provider") or ""),
                     "model": str(first.get("model") or ""),
                     "created_at": str(first.get("created_at") or ""),
+                    "title": self._session_title(path),
                     "path": str(path),
                 }
             )
         return rows
+
+    # The title event is written once, right after the first answer, so it sits
+    # within the first handful of lines; a bounded scan keeps listing many
+    # sessions cheap instead of parsing every transcript in full.
+    _TITLE_SCAN_LINES = 64
+
+    def _session_title(self, path: Path) -> str:
+        """Return the conversation title recorded in ``path``, or an empty string."""
+        try:
+            with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+                for index, line in enumerate(handle):
+                    if index >= self._TITLE_SCAN_LINES:
+                        break
+                    if '"title"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "title":
+                        continue
+                    title = event.get("title")
+                    if isinstance(title, str):
+                        return title
+        except OSError:
+            return ""
+        return ""

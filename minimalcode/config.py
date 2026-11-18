@@ -29,7 +29,11 @@ EFFORT_LEVELS = (
     "max",
 )
 SETTINGS_FILENAME = "settings.json"
-
+# Values accepted by the `latest_reminder` platform field and the `safety_check`
+# level. Duplicated here rather than imported from `reminder.py` because that
+# module imports this one.
+REMINDER_PLATFORMS = frozenset({"App", "Web"})
+SAFETY_LEVELS = frozenset({"low", "high"})
 DEFAULT_SETTINGS: dict[str, Any] = json.loads(
     files("minimalcode").joinpath("defaults.json").read_text(encoding="utf-8")
 )
@@ -342,6 +346,75 @@ def _expand_root_settings(data: dict[str, Any]) -> dict[str, Any]:
     return expanded
 
 
+def _validate_integrations(integrations: dict[str, Any], path: Path) -> None:
+    """Validate the optional desktop-integration blocks.
+
+    Every integration is opt-in decoration around the terminal UI, so a bad
+    value must fail loudly here instead of silently disabling reporting at
+    runtime.
+    """
+    clawd = integrations.get("clawd")
+    if not isinstance(clawd, dict):
+        raise ConfigError(f"{path}: integrations.clawd must be an object")
+    if not isinstance(clawd.get("enabled"), bool):
+        raise ConfigError(f"{path}: integrations.clawd.enabled must be a boolean")
+    if not isinstance(clawd.get("agent_id"), str):
+        raise ConfigError(f"{path}: integrations.clawd.agent_id must be a string")
+    runtime_file = clawd.get("runtime_file")
+    if runtime_file is not None and (
+        not isinstance(runtime_file, str) or not runtime_file.strip()
+    ):
+        raise ConfigError(
+            f"{path}: integrations.clawd.runtime_file must be null or a "
+            "non-empty string"
+        )
+    _validate_number(
+        clawd.get("timeout_seconds"),
+        path,
+        "integrations.clawd.timeout_seconds",
+        minimum=0.1,
+        maximum=10,
+    )
+
+
+def _validate_reminder(reminder: dict[str, Any], path: Path) -> None:
+    """Validate the user meta information sent as a ``latest_reminder`` turn."""
+    if not isinstance(reminder.get("enabled"), bool):
+        raise ConfigError(f"{path}: reminder.enabled must be a boolean")
+    location = reminder.get("location")
+    if not isinstance(location, str):
+        raise ConfigError(f"{path}: reminder.location must be a string")
+    platform = reminder.get("platform")
+    if platform not in REMINDER_PLATFORMS:
+        raise ConfigError(
+            f"{path}: reminder.platform must be one of "
+            f"{', '.join(sorted(REMINDER_PLATFORMS))}"
+        )
+    language = reminder.get("language")
+    if not isinstance(language, str) or not language.strip():
+        raise ConfigError(f"{path}: reminder.language must be a non-empty string")
+
+
+def _validate_session_title(title: dict[str, Any], path: Path, key: str) -> None:
+    """Validate a provider's conversation-title switch."""
+    if not isinstance(title.get("enabled"), bool):
+        raise ConfigError(f"{path}: {key}.enabled must be a boolean")
+
+
+def _validate_safety_check(safety: dict[str, Any], path: Path, key: str) -> None:
+    """Validate a provider's model content-safety level.
+
+    ``low`` is the API default (no server-side review loop) and ``high`` turns
+    on the provider's basic risk control, so anything else is a typo that would
+    otherwise run with no moderation at all.
+    """
+    level = safety.get("level")
+    if level not in SAFETY_LEVELS:
+        raise ConfigError(
+            f"{path}: {key}.level must be one of {', '.join(sorted(SAFETY_LEVELS))}"
+        )
+
+
 def _validate(data: dict[str, Any], path: Path) -> None:
     provider = data.get("provider")
     model = data.get("model")
@@ -377,9 +450,14 @@ def _validate(data: dict[str, Any], path: Path) -> None:
         "output",
         "sandbox",
         "mcp",
+        "integrations",
+        "reminder",
     ):
         if not isinstance(data.get(key), dict):
             raise ConfigError(f"{path}: {key} must be an object")
+
+    _validate_integrations(data["integrations"], path)
+    _validate_reminder(data["reminder"], path)
 
     shell = data["shell"]
     shell_path = shell.get("path")
@@ -598,9 +676,26 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         value = provider.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"{path}: provider {name!r} {key} must be a string")
-    for key in ("web_tools", "vision"):
+    for key in ("web_tools", "vision", "media", "session_title", "safety_check"):
         if key in provider and not isinstance(provider[key], dict):
             raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
+    # The three DeepSeek extensions below are opt-in per provider: they are
+    # rejected by strict OpenAI-compatible servers, so a preset only turns them
+    # on for an endpoint that documents them.
+    if isinstance(provider.get("session_title"), dict):
+        _validate_session_title(
+            provider["session_title"], path, f"providers.{name}.session_title"
+        )
+    if isinstance(provider.get("safety_check"), dict):
+        _validate_safety_check(
+            provider["safety_check"], path, f"providers.{name}.safety_check"
+        )
+    if "latest_reminder" in provider and not isinstance(
+        provider["latest_reminder"], bool
+    ):
+        raise ConfigError(
+            f"{path}: provider {name!r} latest_reminder must be a boolean"
+        )
 
 
 def _validate_string_list(value: Any, path: Path, key: str) -> None:
@@ -867,6 +962,17 @@ class Settings:
 
     def effective_model(self, override: str | None = None) -> str:
         return override or str(self.data["model"])
+
+    def reminder(self, now: Any = None) -> str | None:
+        """Return the `latest_reminder` content for this configuration.
+
+        Imported lazily because :mod:`minimalcode.reminder` reads this module's
+        constants; the agent calls this once per turn, right before the user
+        message it annotates.
+        """
+        from .reminder import build_reminder
+
+        return build_reminder(self, now=now)
 
 
 def load_settings(

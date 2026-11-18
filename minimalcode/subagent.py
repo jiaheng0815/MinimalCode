@@ -17,6 +17,10 @@ from pathlib import Path
 from .shell import ShellSpec
 
 DEPTH_ENV = "MINIMALCODE_SUBAGENT_DEPTH"
+# The parent already reports SubagentStart/SubagentStop to the desktop pet. A
+# child that reported on its own would flash a second card that disappears when
+# the subagent exits, so the whole integration stays off inside a child.
+CLAWD_ENV = "MINIMALCODE_NO_CLAWD"
 
 PREAMBLE = (
     "You are a subagent dispatched by a parent MinimalCode agent. "
@@ -100,6 +104,7 @@ def child_env(depth: int, *, python_path: Path | None = None) -> dict[str, str]:
         entries.insert(0, root)
     return {
         DEPTH_ENV: str(max(0, int(depth))),
+        CLAWD_ENV: "1",
         "PYTHONPATH": os.pathsep.join(entries),
         # The child is driven through pipes: the task arrives on stdin and the
         # answer leaves on stdout. A Windows pipe defaults to the ANSI code page,

@@ -59,6 +59,27 @@ class SessionTests(unittest.TestCase):
             self.assertIsNone(session.path)
             self.assertEqual(len(session.messages), 1)
 
+    def test_delete_removes_only_files_the_store_owns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            session.append_message({"role": "user", "content": "hello"})
+            self.assertTrue(session.path.is_file())
+
+            store.delete(session.path)
+            self.assertFalse(session.path.exists())
+            self.assertEqual(store.list(), [])
+
+            outsider = root / "notes.jsonl"
+            outsider.write_text('{"type": "meta"}\n', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                store.delete(outsider)
+            self.assertTrue(outsider.is_file())
+
     def test_compaction_rewrites_a_bloated_session_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

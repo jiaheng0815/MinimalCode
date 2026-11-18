@@ -39,6 +39,9 @@ _ANTHROPIC_STOP_REASONS = {
     "max_tokens": "max_tokens",
     # A paused server-tool turn cannot be continued by this agent loop.
     "pause_turn": "incomplete",
+    # Content moderation ended the answer; the agent reports it as a refusal
+    # instead of a truncated reply.
+    "refusal": "refusal",
 }
 
 
@@ -83,9 +86,9 @@ class AnthropicProtocolMixin:
     model: str
     thinking: str
     stream_enabled: bool
-    send_reasoning_effort: bool
     max_tokens: int
     config: dict[str, Any]
+    extensions: dict[str, Any]
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         raise NotImplementedError
@@ -145,6 +148,11 @@ class AnthropicProtocolMixin:
                         blocks.append(block)
                 elif part_type == "image" and isinstance(part.get("source"), dict):
                     blocks.append({"type": "image", "source": part["source"]})
+                elif part_type == "document" and isinstance(part.get("source"), dict):
+                    # A parsed document attached through /attach is already in
+                    # Messages form; pass it through instead of flattening it to
+                    # an empty text block.
+                    blocks.append({"type": "document", "source": part["source"]})
                 else:
                     text = content_text(part)
                     if text:
@@ -256,6 +264,19 @@ class AnthropicProtocolMixin:
                     system_parts.append(text)
                 continue
 
+            if role == "latest_reminder":
+                # DeepSeek's user meta information is its own role, and it must
+                # stay immediately before the user message it belongs to, so the
+                # turn is kept out of the user/assistant merge below.
+                text = content_text(message.get("content"))
+                if text:
+                    converted.append(
+                        {
+                            "role": "latest_reminder",
+                            "content": [{"type": "text", "text": text}],
+                        }
+                    )
+                continue
             if role == "tool":
                 content = message.get("content")
                 blocks = self._anthropic_content_blocks(content)
@@ -410,6 +431,9 @@ class AnthropicProtocolMixin:
             payload.update(
                 {key: value for key, value in extra.items() if key not in reserved}
             )
+        # Applied after extra_body: a preset turns these on, and a free-form
+        # override must not be able to reshape a documented extension.
+        payload.update(self.extensions)
         return payload
 
     def _anthropic_stream_request(
@@ -463,6 +487,8 @@ class AnthropicProtocolMixin:
         stop_reason: Any = None
         saw_message_stop = False
         usage_raw: dict[str, Any] = {}
+        # The conversation title rides on `message_delta`, once per response.
+        self._reply_title = None
 
         def state_for(index: int, block_type: str) -> dict[str, Any]:
             state = blocks.get(index)
@@ -592,8 +618,12 @@ class AnthropicProtocolMixin:
                     continue
                 if event_type == "message_delta":
                     delta = event.get("delta")
-                    if isinstance(delta, dict) and delta.get("stop_reason"):
-                        stop_reason = delta["stop_reason"]
+                    if isinstance(delta, dict):
+                        if delta.get("stop_reason"):
+                            stop_reason = delta["stop_reason"]
+                        raw_title = delta.get("title")
+                        if isinstance(raw_title, str) and raw_title.strip():
+                            self._reply_title = " ".join(raw_title.split())
                     # `message_delta.usage` is cumulative for the output count,
                     # but a gateway may repeat `input_tokens: 0` here; a zero
                     # placeholder must not erase what `message_start` reported.
@@ -696,6 +726,7 @@ class AnthropicProtocolMixin:
             # Thinking signatures are only replayed while a tool call is open;
             # a finished answer does not need them in the session history.
             provider_content=provider_content if tool_calls else None,
+            title=self._reply_title,
         )
 
     def _parse_anthropic_payload(
@@ -779,6 +810,12 @@ class AnthropicProtocolMixin:
             ),
             usage=_anthropic_usage(data.get("usage")),
             provider_content=provider_content if tool_calls else None,
+            # The non-streaming response carries the title at the top level.
+            title=(
+                " ".join(data["title"].split())
+                if isinstance(data.get("title"), str) and data["title"].strip()
+                else None
+            ),
         )
 
     def _anthropic_regular_request(

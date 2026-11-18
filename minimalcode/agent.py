@@ -83,11 +83,12 @@ _INCOMPLETE_FINISH_REASONS = {
     "failed",
     "cancelled",
     "canceled",
-    "incomplete",
     "incomplete_stream",
     "in_progress",
     "queued",
     "server_error",
+    # Content moderation ended the answer (Messages `stop_reason: refusal`).
+    "refusal",
 }
 # A compaction replaces the dropped prefix with this many synthetic messages, so
 # a cut has to remove more than that to make the history smaller.
@@ -326,6 +327,7 @@ class Agent:
         quiet: bool = False,
         stream_output: bool = True,
         markdown_highlight: bool | None = None,
+        clawd: Any = None,
     ):
         self.settings = settings
         self.provider = provider
@@ -344,7 +346,7 @@ class Agent:
         # Retry notices travel through the activity stream, so --quiet and
         # --json stay silent while an interactive turn shows the retries.
         if hasattr(self.provider, "notify"):
-            self.provider.notify = self._activity
+            self.provider.notify = self._provider_notice
         highlight_enabled = (
             bool(settings.get("output.markdown_highlight", True))
             if markdown_highlight is None
@@ -388,8 +390,18 @@ class Agent:
             "cached_tokens": 0,
             "reasoning_tokens": 0,
         }
+        # Documents uploaded by `/attach` wait here until the next user message
+        # carries them; a `file_id` has no meaning outside a user turn.
+        self.pending_attachments: list[dict[str, Any]] = []
+
+        from .clawd import disabled_bridge
 
         self._repair_history()
+        self._clawd = clawd if clawd is not None else disabled_bridge()
+
+    def session_start(self) -> None:
+        """Announce this session to the Clawd desktop pet."""
+        self._clawd.session_start()
 
     def _repair_history(self) -> None:
         """Close tool_calls left without results by an interrupted turn.
@@ -531,6 +543,16 @@ class Agent:
             )
             self.error_output.flush()
 
+    def _provider_notice(self, message: str) -> None:
+        """Show a provider retry in the terminal and on the desktop pet.
+
+        The user is usually waiting for an answer while the provider backs off,
+        so the retry is worth the same notification bubble Clawd uses for
+        "needs attention" events.
+        """
+        self._clawd.notify()
+        self._activity(message)
+
     def _parse_tool_arguments(self, raw_arguments: str) -> dict[str, Any]:
         try:
             arguments = json.loads(raw_arguments or "{}")
@@ -541,16 +563,28 @@ class Agent:
         return arguments
 
     def _run_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        # A subagent drives Clawd's juggling animation instead of the plain
+        # typing one, so its start/end events carry their own names.
+        subagent = name == "subagent"
+        if subagent:
+            self._clawd.subagent_start()
+        else:
+            self._clawd.tool_start(name)
         try:
-            return self.tools.dispatch(name, arguments)
+            result = self.tools.dispatch(name, arguments)
         except (ToolError, OSError, TypeError, ValueError) as exc:
-            return {"status": "error", "message": str(exc)}
+            result = {"status": "error", "message": str(exc)}
         except Exception as exc:  # noqa: BLE001 - a bad tool must not end the turn
             # Any unexpected failure inside a handler is still reported to the
             # model as a tool result; re-raising would abort the whole turn and
             # leave the user message without an answer. Subagent workers rely on
             # the same contract, so this never raises inside a thread either.
-            return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+            result = {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+        if subagent:
+            self._clawd.subagent_end()
+        else:
+            self._clawd.tool_end(name, ok=result.get("status") != "error")
+        return result
 
     def _execute_tool(self, name: str, raw_arguments: str) -> dict[str, Any]:
         try:
@@ -694,16 +728,53 @@ class Agent:
                 thread.join()
         return [outcomes[index] for index in range(len(calls))]
 
+    def attach(self, path: str, purpose: str | None = None) -> dict[str, Any]:
+        """Upload a document and queue it for the next user message."""
+        result = self.tools.attach_document(path, purpose)
+        self.pending_attachments.append(
+            {
+                "file_id": result["file_id"],
+                "filename": result["filename"],
+                "purpose": result["purpose"],
+            }
+        )
+        return result
+
+    def _user_message(self, user_text: str) -> dict[str, Any]:
+        """Build the stored user message, consuming any queued attachments."""
+        message: dict[str, Any] = {"role": "user", "content": user_text}
+        if self.pending_attachments:
+            message["attachments"] = self.pending_attachments
+            self.pending_attachments = []
+        return message
+
+    def _reminder_message(self) -> dict[str, Any] | None:
+        """Build the `latest_reminder` turn this provider can accept, if any.
+
+        The role is DeepSeek-specific and only valid immediately before a user
+        message, so it is produced per turn instead of being stored once.
+        """
+        if not getattr(self.provider, "latest_reminder_enabled", False):
+            return None
+        content = self.settings.reminder()
+        if not content:
+            return None
+        return {"role": "latest_reminder", "content": content}
+
     def run(self, user_text: str) -> AgentResult:
         if not user_text.strip():
             raise ValueError("user message is empty")
+        self._clawd.prompt()
         # Read AGENTS.md / CLAUDE.md again for this run: instructions may have
         # changed on disk since the previous turn (including via /summary).
         self.refresh_instructions()
         self._repair_history()
         usage_before = dict(self.total_usage)
         estimated_before = self.estimated_turns
-        self.session.append_message({"role": "user", "content": user_text})
+        reminder = self._reminder_message()
+        if reminder is not None:
+            self.session.append_message(reminder)
+        self.session.append_message(self._user_message(user_text))
         final_text = ""
         final_completed = False
         final_finish_reason: str | None = None
@@ -711,7 +782,17 @@ class Agent:
 
         for turn in range(1, self.max_turns + 1):
             if self.should_compact():
-                self._compact(force=False)
+                self._clawd.compact_start()
+                try:
+                    self._compact(force=False)
+                finally:
+                    self._clawd.compact_end()
+            # Only the first request of a session asks for a title: the provider
+            # waits up to five seconds for it after the answer, and a session
+            # that already has a name cannot gain anything from asking again.
+            request_title = getattr(self.provider, "set_title_request", None)
+            if callable(request_title):
+                request_title(not self.session.title)
             messages = self._messages()
             self._prompt_session_count = len(self.session.messages)
             try:
@@ -723,6 +804,8 @@ class Agent:
                 )
             finally:
                 self._finish_delta()
+            if reply.title:
+                self.session.set_title(reply.title)
             self._accumulate_usage(reply.usage, messages, reply.content)
             if reply.content or reply.tool_calls:
                 self.session.append_message(reply.as_message())
@@ -798,6 +881,10 @@ class Agent:
                 final_text=final_text,
                 finish_reason=final_finish_reason,
             )
+        if final_completed:
+            self._clawd.turn_end()
+        else:
+            self._clawd.turn_failed()
         return AgentResult(
             text=final_text,
             completed=final_completed,
@@ -842,6 +929,11 @@ class Agent:
             if len(preview) > 200:
                 preview = preview[:197] + "..."
             message = f"Provider stopped early: {preview}"
+        if finish_reason in {"refusal", "content_filter"}:
+            # Content moderation ended the answer. The partial text still goes
+            # out — it was already streamed — but it must not read like a
+            # truncation the caller could resume.
+            message = f"Content safety refused this response. {message}"
         if finish_reason and finish_reason not in {"stop", "completed", "tool_calls"}:
             message = f"{message} (finish reason: {finish_reason})"
         message = sanitize_terminal_text(message)
@@ -946,7 +1038,11 @@ class Agent:
         return True
 
     def compact(self) -> bool:
-        return self._compact(force=True)
+        self._clawd.compact_start()
+        try:
+            return self._compact(force=True)
+        finally:
+            self._clawd.compact_end()
 
     def summarize(self) -> str:
         """Ask the provider to condense the whole session into durable notes."""
@@ -1027,6 +1123,9 @@ class Agent:
     def new_session(self, session: Session, tool_runtime: ToolRuntime) -> None:
         """Start a fresh conversation while keeping the active provider."""
         schemas = self._tool_schemas(tool_runtime)
+        # Clawd tracks one session id per card, so the old card is retired
+        # before the new id starts reporting.
+        self._clawd.session_end()
         self.session = session
         self.tools = tool_runtime
         self.tool_schemas = schemas
@@ -1036,6 +1135,12 @@ class Agent:
         self.estimated_turns = 0
         self._system_prompt = None
         self.total_usage = dict.fromkeys(self.total_usage, 0)
+        self._clawd.retarget(session.session_id, session.cwd)
+        self._clawd.session_start()
+
+    def close(self) -> None:
+        """Retire this session's Clawd card and stop the reporter thread."""
+        self._clawd.shutdown()
 
     def switch_runtime(
         self,

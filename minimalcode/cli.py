@@ -63,6 +63,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-m", "--model", help="Provider model ID")
     parser.add_argument(
+        "--attach",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Upload a document before the first turn and attach it to that "
+            "user message; repeatable"
+        ),
+    )
+    parser.add_argument(
         "--thinking",
         type=str.lower,
         choices=EFFORT_LEVELS,
@@ -78,8 +88,8 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Keep the read-only tools (read, grep, find, read_image, web_search, "
-            "web_fetch, and MCP tools the server marks read-only) and refuse "
-            "every tool that can change the workspace"
+            "web_fetch, ocr, transcribe, and MCP tools the server marks "
+            "read-only) and refuse every tool that can change the workspace"
         ),
     )
     parser.add_argument("--cwd", help="Workspace directory")
@@ -153,6 +163,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 _MANAGEMENT_COMMANDS = (
+    "clawd",
     "config",
     "import-pi",
     "init",
@@ -190,6 +201,45 @@ def _management_argv(argv: Sequence[str]) -> list[str] | None:
     if index >= len(argv) or argv[index] not in _MANAGEMENT_COMMANDS:
         return None
     return [argv[index], *prefix, *argv[index + 1 :]]
+
+
+def _clawd_probe() -> int:
+    """POST one probe event and report Clawd's verdict.
+
+    The written preference file says nothing about what the running Clawd has
+    loaded, so this is the only check that proves the reporting path works.
+    """
+    from .clawd import probe_state, registered_agent_id, runtime_path
+
+    agent_id = registered_agent_id()
+    if not agent_id:
+        print(
+            "not registered; exit Clawd, run `minimalcode clawd install`, "
+            "then start Clawd again"
+        )
+        return 1
+    status = probe_state(
+        agent_id=agent_id,
+        session_id="minimalcode-clawd-probe",
+        cwd=Path.cwd(),
+        runtime_file=runtime_path(),
+    )
+    if status is None:
+        print(f"Clawd on Desk is not running ({runtime_path()})")
+        return 1
+    if status == 200:
+        print(sanitize_terminal_text(f"accepted as {agent_id}"))
+        return 0
+    if status == 204:
+        print(
+            sanitize_terminal_text(
+                f"Clawd rejected {agent_id}: unknown or disabled. Restart Clawd "
+                "after install, and check Settings -> AI Coding Tools"
+            )
+        )
+        return 1
+    print(sanitize_terminal_text(f"unexpected status {status}"))
+    return 1
 
 
 def _management_command(argv: Sequence[str]) -> int | None:
@@ -283,6 +333,84 @@ def _management_command(argv: Sequence[str]) -> int | None:
         )
         return 0
 
+    if command == "clawd":
+        from .clawd import (
+            prefs_paths,
+            prefs_version,
+            read_endpoint,
+            register_custom_application,
+            registered_agent_id,
+            runtime_path,
+            unregister_custom_application,
+        )
+
+        parser = argparse.ArgumentParser(prog="minimalcode clawd")
+        parser.add_argument(
+            "action",
+            nargs="?",
+            choices=("status", "install", "remove", "test"),
+            default="status",
+        )
+        parser.add_argument("--home")
+        args = parser.parse_args(argv[1:])
+        if args.action == "test":
+            return _clawd_probe()
+        if args.action == "install":
+            if read_endpoint(runtime_path()) is not None:
+                # Clawd keeps its preferences in memory and writes the whole
+                # snapshot back when the pet is moved or a setting changes, so
+                # a registration written while it runs can disappear before the
+                # next start. Refusing beats reporting a success that vanishes.
+                print(
+                    "Clawd on Desk is running; exit it first, then run "
+                    "`minimalcode clawd install` again",
+                    file=sys.stderr,
+                )
+                return 1
+            agent_id, written = register_custom_application()
+            print(sanitize_terminal_text(f"registered {agent_id}"))
+            if not written:
+                print("already registered")
+            else:
+                # A missing preference file is created here, so a source
+                # checkout can be prepared before its first start.
+                print(
+                    "start Clawd on Desk (installed build, or `npm start` in a "
+                    "source checkout) to load the registration",
+                    file=sys.stderr,
+                )
+            return 0
+        if args.action == "remove":
+            if read_endpoint(runtime_path()) is not None:
+                print(
+                    "Clawd on Desk is running; exit it first, then run "
+                    "`minimalcode clawd remove` again",
+                    file=sys.stderr,
+                )
+                return 1
+            removed = unregister_custom_application()
+            if removed is None:
+                print("no registration found")
+            else:
+                print(sanitize_terminal_text(f"removed {removed}"))
+            return 0
+        endpoint = read_endpoint(runtime_path())
+        status = "not running" if endpoint is None else f"running ({endpoint})"
+        agent_id = registered_agent_id()
+        registration = agent_id or "not registered (run: minimalcode clawd install)"
+        version = prefs_version()
+        rows = [
+            f"status : {status}",
+            f"agent  : {registration}",
+            f"schema : {version if version is not None else 'unknown'}",
+            f"runtime: {runtime_path()}",
+        ]
+        for path in prefs_paths():
+            rows.append(f"file   : {path}")
+        for row in rows:
+            print(sanitize_terminal_text(row))
+        return 0
+
     if command == "sessions":
         from .session import SessionStore
 
@@ -296,7 +424,10 @@ def _management_command(argv: Sequence[str]) -> int | None:
                 f"{row['created_at']}  {row['session_id'][:10]}  "
                 f"{row['provider']}/{row['model']}  {row['workspace']}"
             )
+            if row.get("title"):
+                line = f"{line}  {row['title']}"
             print(sanitize_terminal_text(line))
+        return 0
         return 0
 
     if command == "shell":
@@ -683,6 +814,7 @@ def _switch_runtime(
     model: str,
 ) -> tuple[str, str]:
     """Build and install a new provider without losing the session history."""
+    from .media import ProviderMediaClient
     from .provider import create_provider
     from .tools import ToolRuntime
     from .vision import ProviderVisionClient
@@ -696,17 +828,20 @@ def _switch_runtime(
     )
     web_client: ProviderWebClient | None = None
     vision_client: ProviderVisionClient | None = None
+    media_client: ProviderMediaClient | None = None
     try:
         web_client = ProviderWebClient(name, provider.config)
         vision_client = ProviderVisionClient(
             name, provider.config, model=resolved_model
         )
+        media_client = ProviderMediaClient(name, provider.config)
         tools = ToolRuntime(
             settings,
             agent.session.cwd,
             agent.shell,
             web_client=web_client,
             vision_client=vision_client,
+            media_client=media_client,
             provider_name=name,
             model=resolved_model,
             thinking=provider.thinking,
@@ -721,10 +856,16 @@ def _switch_runtime(
             web_client.close()
         if vision_client is not None:
             vision_client.close()
+        if media_client is not None:
+            media_client.close()
         provider.close()
         raise
     old_provider.close()
-    for client in (old_tools.web_client, old_tools.vision_client):
+    for client in (
+        old_tools.web_client,
+        old_tools.vision_client,
+        getattr(old_tools, "media_client", None),
+    ):
         if client is not None:
             client.close()
     return name, resolved_model
@@ -826,6 +967,78 @@ def _handle_mcp(agent: Agent, text: str) -> None:
         print("no MCP servers configured (add mcp.servers to settings.json)")
     for note in payload.get("notes", []):
         print(sanitize_terminal_text(f"note: {note}"), file=sys.stderr)
+
+
+def _handle_attach(agent: Agent, text: str) -> None:
+    """Upload a document so that the next message can reference it natively."""
+    parts = text.split()
+    if len(parts) < 2:
+        print("usage: /attach <path> [purpose]", file=sys.stderr)
+        return
+    path = parts[1]
+    purpose = parts[2] if len(parts) > 2 else None
+    try:
+        result = agent.attach(path, purpose)
+    except (MinimalCodeError, OSError, ValueError) as exc:
+        print(
+            f"attach failed: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return
+    print(
+        sanitize_terminal_text(
+            f"attached {result['filename']} as {result['file_id']} "
+            f"({result['purpose']}); it rides along with the next message"
+        )
+    )
+
+
+def _handle_listen(agent: Agent, text: str) -> str | None:
+    """Transcribe an audio file and return the text to send as the message."""
+    parts = text.split()
+    if len(parts) < 2:
+        print("usage: /listen <audio-path>", file=sys.stderr)
+        return None
+    try:
+        result = agent.tools.transcribe(parts[1])
+    except (MinimalCodeError, OSError, ValueError) as exc:
+        print(
+            f"listen failed: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return None
+    transcript = str(result.get("text") or "").strip()
+    if not transcript:
+        print("listen: the provider returned no text", file=sys.stderr)
+        return None
+    print(sanitize_terminal_text(f"[heard] {transcript}"))
+    return transcript
+
+
+def _handle_say(agent: Agent, text: str) -> None:
+    """Synthesize speech for the given text, or for the last answer."""
+    parts = text.split(maxsplit=1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    if not body:
+        for message in reversed(agent.session.messages):
+            if message.get("role") == "assistant" and isinstance(
+                message.get("content"), str
+            ):
+                body = message["content"].strip()
+                break
+    if not body:
+        print("usage: /say <text>", file=sys.stderr)
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        result = agent.tools.speech(body, f"speech-{stamp}.wav")
+    except (MinimalCodeError, OSError, ValueError) as exc:
+        print(
+            f"say failed: {sanitize_terminal_text(str(exc))}",
+            file=sys.stderr,
+        )
+        return
+    print(sanitize_terminal_text(f"wrote {result['bytes']} bytes to {result['path']}"))
 
 
 def _run_once(agent: Agent, args: argparse.Namespace, prompt: str) -> int:
@@ -1266,15 +1479,32 @@ def _chat_loop(
         if head == "/mcp":
             _handle_mcp(agent, text)
             continue
+        if head == "/attach":
+            _handle_attach(agent, text)
+            continue
+        if head == "/say":
+            _handle_say(agent, text)
+            continue
+        if head == "/listen":
+            transcript = _handle_listen(agent, text)
+            if transcript is None:
+                continue
+            # The transcription becomes this turn's message, so a spoken
+            # question goes through exactly the same path as a typed one.
+            text = transcript
         if command == "/help":
             print(
                 "/new  /clear  /compact  /summary  /session  /status  "
-                "/model  /effort  /mcp  /exit"
+                "/model  /effort  /mcp  /attach  /listen  /say  /exit"
             )
             print("multiline: end a line with \\ to continue, or paste a block")
             print(
                 f"image: paste with {_paste_shortcut()}, then Enter "
                 "(needs provider vision)"
+            )
+            print(
+                "document: /attach <path> then send the message; "
+                "audio: /listen <path>, speech: /say <text>"
             )
             continue
         if text.startswith("/") and "\n" not in text:
@@ -1348,6 +1578,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     provider = None
     web_client = None
     vision_client = None
+    media_client = None
     agent = None
     mcp_manager = None
     try:
@@ -1421,17 +1652,23 @@ def run(argv: Sequence[str] | None = None) -> int:
         vision_client = ProviderVisionClient(
             provider_name, provider.config, model=model
         )
+        from .media import ProviderMediaClient
+
+        media_client = ProviderMediaClient(provider_name, provider.config)
         tools = ToolRuntime(
             settings,
             effective_cwd,
             shell,
             web_client=web_client,
             vision_client=vision_client,
+            media_client=media_client,
             provider_name=provider_name,
             model=model,
             thinking=provider.thinking,
             read_only=args.read_only,
         )
+        from .clawd import create_bridge
+
         agent = Agent(
             settings=settings,
             provider=provider,
@@ -1442,7 +1679,27 @@ def run(argv: Sequence[str] | None = None) -> int:
             quiet=args.quiet or args.json_output,
             stream_output=not args.json_output,
             markdown_highlight=False if args.no_highlight else None,
+            clawd=create_bridge(
+                settings,
+                session_id=session.session_id,
+                cwd=session.cwd,
+            ),
         )
+        agent.session_start()
+        for attach_path in args.attach or []:
+            # Upload before the first turn so `--attach` works in the same
+            # non-interactive runs that cannot use `/attach`.
+            try:
+                attached = agent.attach(attach_path)
+            except (MinimalCodeError, OSError, ValueError) as exc:
+                raise ConfigError(f"cannot attach {attach_path}: {exc}") from exc
+            if not (args.quiet or args.json_output):
+                print(
+                    sanitize_terminal_text(
+                        f"attached {attached['filename']} as {attached['file_id']}"
+                    ),
+                    file=sys.stderr,
+                )
 
         if prompt:
             return _run_once(agent, args, prompt)
@@ -1460,12 +1717,18 @@ def run(argv: Sequence[str] | None = None) -> int:
         if agent is not None:
             web_client = agent.tools.web_client
             vision_client = agent.tools.vision_client
+            media_client = getattr(agent.tools, "media_client", None)
             provider = agent.provider
             mcp_manager = getattr(agent.tools, "mcp", None)
+            # Retire the Clawd card and stop its reporter thread; the bridge is
+            # fail-open, so a pet that is not running costs nothing here.
+            agent.close()
         if web_client is not None:
             web_client.close()
         if vision_client is not None:
             vision_client.close()
+        if media_client is not None:
+            media_client.close()
         if provider is not None:
             provider.close()
         if mcp_manager is not None:

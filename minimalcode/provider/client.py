@@ -73,6 +73,30 @@ class OpenAICompatibleProvider(
             raise ProviderError(f"provider {name!r} has an invalid base_url") from exc
         if parsed_base.scheme not in {"http", "https"} or not hostname:
             raise ProviderError(f"provider {name!r} has an invalid base_url")
+        lower_name = name.lower()
+        lowered_host = hostname.lower()
+        deepseek_api = (
+            lower_name == "deepseek"
+            or lower_name.startswith("deepseek-")
+            or lowered_host == "deepseek.com"
+            or lowered_host.endswith(".deepseek.com")
+            or any(
+                key in config
+                for key in ("session_title", "safety_check", "latest_reminder")
+            )
+        )
+        # DeepSeek reserves `find` when any of its server-side tools is active,
+        # including the implicit tools used by `title` and `safety_check`.
+        # Keep the public tool name stable for tools.allow, dispatch, and
+        # sessions, but use a non-reserved name on every wire representation.
+        self._tool_aliases = (
+            {"find": "minimalcode_find"}
+            if deepseek_api and protocol != "deepseek_web"
+            else {}
+        )
+        self._reverse_tool_aliases = {
+            wire: canonical for canonical, wire in self._tool_aliases.items()
+        }
         try:
             self.context_window = int(config.get("context_window", 128_000))
             self.timeout_seconds = float(config.get("timeout_seconds", 120))
@@ -92,6 +116,30 @@ class OpenAICompatibleProvider(
         self.stream_enabled = bool(config.get("stream", True))
         self.include_usage = bool(config.get("include_usage", True))
         self.send_reasoning_effort = bool(config.get("send_reasoning_effort", False))
+        # DeepSeek request extensions, opt-in per provider preset: strict
+        # OpenAI-compatible servers reject unknown request fields, so a preset
+        # turns them on only where the endpoint documents them. Built here once
+        # so the three payload builders cannot drift from each other.
+        title_config = config.get("session_title")
+        self.title_enabled = bool(
+            isinstance(title_config, dict) and title_config.get("enabled") is True
+        )
+        safety_config = config.get("safety_check")
+        self.safety_level = (
+            str(safety_config.get("level") or "low")
+            if isinstance(safety_config, dict)
+            else "low"
+        )
+        self.latest_reminder_enabled = bool(config.get("latest_reminder", False))
+        extensions: dict[str, Any] = {}
+        if self.title_enabled:
+            # The provider appends a short conversation title to the answer, so
+            # the agent can store it without a second request.
+            extensions["title"] = {"enabled": True}
+        if self.safety_level == "high":
+            # Server-side input/output risk control; a refusal ends the turn.
+            extensions["safety_check"] = {"level": "high"}
+        self.extensions = extensions
         # Optional sink for retry notices; the agent points this at its activity
         # stream so ten silent retries do not look like a hang.
         self.notify: Callable[[str], None] | None = None
@@ -145,12 +193,20 @@ class OpenAICompatibleProvider(
         """Close the underlying HTTP client and its connection pool."""
         self._client.close()
 
-    def __enter__(self):
-        return self
-
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+    def set_title_request(self, enabled: bool) -> None:
+        """Ask for, or stop asking for, a conversation title on the next turn.
+
+        The provider generates the title alongside the answer, so only the first
+        request of a session asks for one: after that the session already has a
+        name, and the extra wait before the response ends buys nothing.
+        """
+        self.extensions.pop("title", None)
+        if enabled and self.title_enabled:
+            self.extensions["title"] = {"enabled": True}
 
     def _endpoint(self) -> str:
         """Return the full protocol endpoint, accepting a full URL as-is.
@@ -188,6 +244,149 @@ class OpenAICompatibleProvider(
             (parsed.scheme, parsed.netloc, new_path, parsed.query, parsed.fragment)
         )
 
+    def _document_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Turn stored document attachments into this protocol's content parts.
+
+        A session stores an uploaded document in one protocol-neutral form
+        (``attachments: [{"file_id": ...}]``) so the same history can be
+        replayed after a provider switch. Each dialect wants a different block,
+        so the conversion happens once, here, instead of in every payload
+        a ``document`` with a ``file`` source, and Responses calls it an
+        ``input_file`` item. The ``deepseek_web`` protocol has no way to
+        reference a ``file_id``, so an attachment is dropped there.
+        """
+        # Most sessions never attach a document: return the list untouched so the
+        # common turn does not pay for a copy it would discard.
+        if not any(
+            isinstance(message, dict) and "attachments" in message
+            for message in messages
+        ):
+            return messages
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict) or "attachments" not in message:
+                converted.append(message)
+                continue
+            clean = {
+                key: value for key, value in message.items() if key != "attachments"
+            }
+            ids = [
+                str(item.get("file_id"))
+                for item in message.get("attachments") or []
+                if isinstance(item, dict) and item.get("file_id")
+            ]
+            content = clean.get("content")
+            parts = (
+                list(content)
+                if isinstance(content, list)
+                else ([{"type": "text", "text": content}] if content else [])
+            )
+            parts.extend(self._document_part(file_id) for file_id in ids)
+            clean["content"] = parts
+            converted.append(clean)
+        return converted
+
+    def _document_part(self, file_id: str) -> dict[str, Any]:
+        """Return one parsed-document block in the active protocol's shape."""
+        if self.protocol == "anthropic_messages":
+            # Messages takes a document whose source is the Files API id.
+            return {
+                "type": "document",
+                "source": {"type": "file", "file_id": file_id},
+            }
+        if self.protocol == "openai_responses":
+            return {"type": "input_file", "file_id": file_id}
+        return {"type": "file", "file_id": file_id}
+
+    def _wire_tools(
+        self, tools: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        """Return tool declarations with provider-reserved names replaced."""
+        if not tools or not self._tool_aliases:
+            return tools
+        wire_tools: list[dict[str, Any]] = []
+        for tool in tools:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            wire_name = self._tool_aliases.get(name, name)
+            if wire_name == name:
+                wire_tools.append(tool)
+                continue
+            updated = dict(tool)
+            updated_function = dict(function)
+            updated_function["name"] = wire_name
+            updated["function"] = updated_function
+            wire_tools.append(updated)
+        return wire_tools
+
+    def _wire_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Rewrite tool names in replayed assistant and tool history."""
+        if not self._tool_aliases:
+            return messages
+        wire_messages: list[dict[str, Any]] = []
+        changed = False
+        for message in messages:
+            if not isinstance(message, dict):
+                wire_messages.append(message)
+                continue
+            updated = message
+            calls = message.get("tool_calls")
+            if isinstance(calls, list):
+                wire_calls: list[Any] | None = None
+                for index, call in enumerate(calls):
+                    function = call.get("function") if isinstance(call, dict) else None
+                    name = function.get("name") if isinstance(function, dict) else None
+                    wire_name = self._tool_aliases.get(name, name)
+                    if wire_name == name:
+                        continue
+                    if wire_calls is None:
+                        wire_calls = list(calls)
+                    updated_call = dict(call)
+                    updated_function = dict(function)
+                    updated_function["name"] = wire_name
+                    updated_call["function"] = updated_function
+                    wire_calls[index] = updated_call
+                if wire_calls is not None:
+                    updated = dict(updated)
+                    updated["tool_calls"] = wire_calls
+                    changed = True
+            if updated.get("role") == "tool":
+                name = updated.get("name")
+                wire_name = self._tool_aliases.get(name, name)
+                if wire_name != name:
+                    updated = dict(updated)
+                    updated["name"] = wire_name
+                    changed = True
+            raw_blocks = updated.get("provider_content")
+            if isinstance(raw_blocks, list):
+                wire_blocks: list[Any] | None = None
+                for index, block in enumerate(raw_blocks):
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name")
+                    wire_name = self._tool_aliases.get(name, name)
+                    if wire_name == name:
+                        continue
+                    if wire_blocks is None:
+                        wire_blocks = list(raw_blocks)
+                    updated_block = dict(block)
+                    updated_block["name"] = wire_name
+                    wire_blocks[index] = updated_block
+                if wire_blocks is not None:
+                    updated = dict(updated)
+                    updated["provider_content"] = wire_blocks
+                    changed = True
+            wire_messages.append(updated)
+        return wire_messages if changed else messages
+
+    def _canonical_tool_names(self, reply: ProviderReply) -> ProviderReply:
+        """Map provider-facing tool aliases back to the dispatcher's names."""
+        for call in reply.tool_calls:
+            call.name = self._reverse_tool_aliases.get(call.name, call.name)
+        return reply
+
     def stream_chat(
         self,
         messages: list[dict[str, Any]],
@@ -197,36 +396,40 @@ class OpenAICompatibleProvider(
         on_thinking: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         """Send one conversation turn using the configured wire protocol."""
-        if self.protocol == "deepseek_web":
-            return self._ds_web_turn(
-                messages, tools, on_text=on_text, on_thinking=on_thinking
-            )
+        messages = self._document_messages(messages)
+        messages = self._wire_messages(messages)
+        tools = self._wire_tools(tools)
         if self.protocol == "anthropic_messages":
             payload = self._anthropic_payload(messages, tools)
             if self.stream_enabled:
-                return self._anthropic_stream_request(
+                reply = self._anthropic_stream_request(
                     payload, on_text=on_text, on_thinking=on_thinking
                 )
-            return self._anthropic_regular_request(
-                payload, on_text=on_text, on_thinking=on_thinking
-            )
-        if self.protocol == "openai_responses":
+            else:
+                reply = self._anthropic_regular_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+        elif self.protocol == "openai_responses":
             payload = self._responses_payload(messages, tools)
             if self.stream_enabled:
-                return self._responses_stream_request(
+                reply = self._responses_stream_request(
                     payload, on_text=on_text, on_thinking=on_thinking
                 )
-            return self._responses_regular_request(
-                payload, on_text=on_text, on_thinking=on_thinking
-            )
-        payload = self._chat_payload(messages, tools)
-        if self.stream_enabled:
-            return self._chat_stream_request(
-                payload, on_text=on_text, on_thinking=on_thinking
-            )
-        return self._chat_regular_request(
-            payload, on_text=on_text, on_thinking=on_thinking
-        )
+            else:
+                reply = self._responses_regular_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+        else:
+            payload = self._chat_payload(messages, tools)
+            if self.stream_enabled:
+                reply = self._chat_stream_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+            else:
+                reply = self._chat_regular_request(
+                    payload, on_text=on_text, on_thinking=on_thinking
+                )
+        return self._canonical_tool_names(reply)
 
     def complete(self, messages: list[dict[str, Any]]) -> ProviderReply:
         """Request one plain-text completion and reject abnormal finish reasons."""

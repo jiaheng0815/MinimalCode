@@ -255,3 +255,8 @@ class ChildEnvEncodingTests(unittest.TestCase):
         env = child_env(1, python_path=Path("root"))
         self.assertEqual(env["PYTHONUTF8"], "1")
         self.assertEqual(env[DEPTH_ENV], "1")
+        # The parent already reports SubagentStart/SubagentStop; a child that
+        # reported too would flash a card that vanishes when it exits.
+        from minimalcode.subagent import CLAWD_ENV
+
+        self.assertEqual(env[CLAWD_ENV], "1")

@@ -52,7 +52,7 @@ class RemoteToolsMixin:
         self,
         query: str,
         count: int | None = None,
-        need_content: bool = False,
+        need_content: bool | None = None,
         ori_question: str | None = None,
         localization: str | None = None,
     ) -> dict[str, Any]:

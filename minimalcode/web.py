@@ -35,6 +35,10 @@ class ProviderWebClient:
         self.default_count = 0
         self.max_count = 0
         self.max_content_chars = 0
+        # Search upgrades: ask for page content by default, drop mirrors of the
+        # same URL, and keep only results the provider scored high enough.
+        self.default_need_content = False
+        self.min_rerank_score = 0.0
         self._search_path = ""
         self._fetch_path = ""
         self._client: httpx2.Client | None = None
@@ -103,6 +107,17 @@ class ProviderWebClient:
         self._endpoint = base_url
         self._search_path = str(web["search_path"]).strip("/")
         self._fetch_path = str(web["fetch_path"]).strip("/")
+        self.default_need_content = bool(web.get("default_need_content", False))
+        try:
+            self.min_rerank_score = float(web.get("min_rerank_score", 0.0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ToolError(
+                f"provider {name!r} has an invalid web_tools.min_rerank_score"
+            ) from exc
+        if not math.isfinite(self.min_rerank_score) or self.min_rerank_score < 0:
+            raise ToolError(
+                f"provider {name!r} has an invalid web_tools.min_rerank_score"
+            )
         self.enabled = True
 
     def close(self) -> None:
@@ -125,7 +140,7 @@ class ProviderWebClient:
         self,
         query: str,
         count: int | None = None,
-        need_content: bool = False,
+        need_content: bool | None = None,
         ori_question: str | None = None,
         localization: str | None = None,
     ) -> dict[str, Any]:
@@ -137,7 +152,7 @@ class ProviderWebClient:
             not isinstance(count, int) or isinstance(count, bool)
         ):
             raise ToolError("count must be an integer")
-        if not isinstance(need_content, bool):
+        if need_content is not None and not isinstance(need_content, bool):
             raise ToolError("need_content must be a boolean")
         if ori_question is not None and not isinstance(ori_question, str):
             raise ToolError("ori_question must be a string or null")
@@ -149,7 +164,9 @@ class ProviderWebClient:
         payload: dict[str, Any] = {
             "query": query.strip(),
             "count": effective_count,
-            "need_content": need_content,
+            "need_content": (
+                self.default_need_content if need_content is None else need_content
+            ),
         }
         if ori_question:
             payload["ori_question"] = ori_question
@@ -162,11 +179,47 @@ class ProviderWebClient:
         # Provider output is untrusted: keep only object results, cap the count,
         # and bound every text field so one search cannot flood the context.
         objects = [item for item in results if isinstance(item, dict)]
-        normalized = [
-            self._normalize_result(item)
-            for item in objects[: min(effective_count, self.max_count)]
-        ]
-        return {"status": "success", "results": normalized}
+        normalized = [self._normalize_result(item) for item in objects]
+        return {"status": "success", "results": self._rank(normalized, effective_count)}
+
+    def _rank(self, results: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        """Deduplicate and order results by the provider's relevance score.
+
+        Mirrors and reprints of one page are common across search engines, and
+        the rerank score already blends relevance, authority, and freshness.
+        Keeping the best-scoring copy of each URL therefore returns more real
+        answers per ``count`` than forwarding the raw list, which is what the
+        model pays for.
+        """
+        seen: set[str] = set()
+        scored: list[tuple[float, int, dict[str, Any]]] = []
+        for index, item in enumerate(results):
+            try:
+                score = float(item.get("rerank_score") or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                score = 0.0
+            if not math.isfinite(score):
+                score = 0.0
+            scored.append((score, index, item))
+        # `index` keeps the provider's own order for equal scores.
+        scored.sort(key=lambda entry: (-entry[0], entry[1]))
+        ranked: list[dict[str, Any]] = []
+        cap = min(limit, self.max_count)
+        for score, _, item in scored:
+            url = item.get("url")
+            key = url.strip().rstrip("/").lower() if isinstance(url, str) else ""
+            if key:
+                if key in seen:
+                    # Sorting first means the copy kept here is the best-scored
+                    # one; keeping the first occurrence dropped the better copy.
+                    continue
+                seen.add(key)
+            if self.min_rerank_score > 0 and score < self.min_rerank_score:
+                continue
+            ranked.append(item)
+            if len(ranked) >= cap:
+                break
+        return ranked
 
     def _normalize_result(self, item: dict[str, Any]) -> dict[str, Any]:
         return {key: self._normalize_value(value) for key, value in item.items()}

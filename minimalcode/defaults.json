@@ -48,6 +48,12 @@
     "markdown_highlight": true,
     "theme": "dark"
   },
+  "reminder": {
+    "enabled": true,
+    "location": "",
+    "platform": "App",
+    "language": "English"
+  },
   "mcp": {
     "enabled": true,
     "startup_timeout_seconds": 20,
@@ -55,6 +61,14 @@
     "max_output_chars": 60000,
     "max_tools": 200,
     "servers": {}
+  },
+  "integrations": {
+    "clawd": {
+      "enabled": true,
+      "agent_id": "",
+      "runtime_file": null,
+      "timeout_seconds": 1.0
+    }
   },
   "providers": {
     "deepseek": {
@@ -77,6 +91,8 @@
         "default_count": 10,
         "max_count": 50,
         "max_content_chars": 120000,
+        "default_need_content": false,
+        "min_rerank_score": 0,
         "headers": {}
       },
       "vision": {
@@ -88,7 +104,31 @@
         "max_chars": 8000,
         "detail": "auto",
         "headers": {}
-      }
+      },
+      "media": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com",
+        "ocr_path": "v1/tools/ocr",
+        "asr_path": "v1/tools/asr",
+        "tts_path": "v1/tools/tts",
+        "files_path": "files",
+        "timeout_seconds": 180,
+        "max_upload_bytes": 104857600,
+        "max_audio_bytes": 8388608,
+        "max_pages": 1000,
+        "max_chars": 120000,
+        "voice_id": "stella",
+        "format": "wav",
+        "purpose": "text_recognition",
+        "headers": {}
+      },
+      "session_title": {
+        "enabled": true
+      },
+      "safety_check": {
+        "level": "low"
+      },
+      "latest_reminder": false
     },
     "deepseek-anthropic": {
       "protocol": "anthropic_messages",
@@ -101,7 +141,14 @@
       "send_reasoning_effort": true,
       "max_tokens": 8192,
       "headers": {},
-      "extra_body": {}
+      "extra_body": {},
+      "session_title": {
+        "enabled": true
+      },
+      "safety_check": {
+        "level": "low"
+      },
+      "latest_reminder": true
     },
     "deepseek-web": {
       "protocol": "deepseek_web",

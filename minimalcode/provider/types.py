@@ -27,6 +27,9 @@ class ProviderReply:
     # tool call is open. Other protocols ignore this field, and the Chat payload
     # builder strips it before sending.
     provider_content: list[dict[str, Any]] | None = None
+    # Short conversation title the provider generated alongside the answer. Only
+    # the first request of a session asks for one, so this is usually None.
+    title: str | None = None
 
     def as_message(self) -> dict[str, Any]:
         """Render the reply as an assistant message for the conversation log."""

@@ -31,15 +31,20 @@ class ChatProtocolMixin:
     stream_enabled: bool
     include_usage: bool
     send_reasoning_effort: bool
+    extensions: dict[str, Any]
 
     def _open(self, payload: dict[str, Any]) -> httpx2.Response:
         raise NotImplementedError
 
     @staticmethod
     def _chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop the Anthropic-only history field from Chat messages."""
+        """Drop the fields that belong to another protocol's history format."""
         return [
-            {key: value for key, value in message.items() if key != "provider_content"}
+            {
+                key: value
+                for key, value in message.items()
+                if key not in {"provider_content", "attachments"}
+            }
             for message in messages
             if isinstance(message, dict) and isinstance(message.get("role"), str)
         ]
@@ -73,6 +78,9 @@ class ChatProtocolMixin:
             payload.update(
                 {key: value for key, value in extra.items() if key not in reserved}
             )
+        # Applied after extra_body: a preset turns these on, and a free-form
+        # override must not be able to reshape a documented extension.
+        payload.update(self.extensions)
         return payload
 
     def _chat_stream_request(
@@ -121,6 +129,10 @@ class ChatProtocolMixin:
         finish_reason: str | None = None
         saw_terminal = False
         usage: dict[str, int] = {}
+        # The conversation title arrives once, in the final chunk's delta. It is
+        # kept on the instance because this method returns the reply, not the
+        # title, and the caller reads it after the stream ends.
+        self._reply_title = None
 
         try:
             for data in self._sse_events(lines):
@@ -165,6 +177,9 @@ class ChatProtocolMixin:
                     content_parts.append(text)
                     if on_text is not None:
                         on_text(text)
+                raw_title = delta.get("title")
+                if isinstance(raw_title, str) and raw_title.strip():
+                    self._reply_title = " ".join(raw_title.split())
 
                 if on_thinking is not None:
                     # DeepSeek/Qwen stream `reasoning_content`; OpenRouter uses
@@ -309,6 +324,7 @@ class ChatProtocolMixin:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            title=self._reply_title,
         )
 
     def _parse_chat_payload(
@@ -363,6 +379,7 @@ class ChatProtocolMixin:
                     )
                 )
         finish_reason = choice.get("finish_reason")
+        raw_title = message.get("title")
         return ProviderReply(
             content=content,
             tool_calls=calls,
@@ -372,6 +389,11 @@ class ChatProtocolMixin:
             # "finish reason ''".
             finish_reason=str(finish_reason) if finish_reason else None,
             usage=normalize_usage(data.get("usage")),
+            title=(
+                " ".join(raw_title.split())
+                if isinstance(raw_title, str) and raw_title.strip()
+                else None
+            ),
         )
 
     def _chat_regular_request(

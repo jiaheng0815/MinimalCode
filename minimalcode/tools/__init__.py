@@ -8,7 +8,7 @@ The implementation is split by concern:
 * :mod:`minimalcode.tools.search_tools` - grep/find runtime methods
 * :mod:`minimalcode.tools.process` - shell/subagent execution
 * :mod:`minimalcode.tools.remote` - provider web and vision clients
-* :mod:`minimalcode.tools.validation` - model-argument checks
+* :mod:`minimalcode.tools.media_tools` - provider OCR, speech, and audio
 * :mod:`minimalcode.tools.runtime` - shared state and dispatch
 
 ``__all__`` is the complete public surface. Names that lived on the pre-0.7
