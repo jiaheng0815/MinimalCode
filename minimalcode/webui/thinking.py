@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,23 @@ _VERSION = 1
 # A long tool loop can reason once per round; keep the newest turns only so one
 # conversation cannot grow this file without a bound.
 _MAX_ENTRIES = 200
+
+
+def _serialized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Hold the document lock for one load-modify-save cycle.
+
+    ``remember`` runs on the turn's own thread and ``forget`` on a request
+    thread, so without the lock a delete landing between the load and the save
+    of a finishing turn would resurrect the blocks it just dropped.
+    """
+
+    def wrapper(self: ThinkingLog, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    wrapper.__name__ = getattr(method, "__name__", "wrapper")
+    wrapper.__doc__ = method.__doc__
+    return wrapper
 
 
 def _clean_rounds(raw: object) -> list[dict[str, Any]]:
@@ -55,6 +74,9 @@ class ThinkingLog:
 
     def __init__(self, settings: Settings) -> None:
         self.path = settings.home / "webui" / "thinking.json"
+        # One lock per log instance: the runtime holds a single ThinkingLog and
+        # every request goes through it.
+        self._lock = threading.Lock()
 
     # -- storage ----------------------------------------------------------
 
@@ -107,6 +129,7 @@ class ThinkingLog:
 
     # -- reads and writes -------------------------------------------------
 
+    @_serialized
     def remember(self, session_id: str, reply: str, rounds: object) -> None:
         """Record one finished turn's reasoning under its answer text."""
         cleaned = _clean_rounds(rounds)
@@ -151,6 +174,7 @@ class ThinkingLog:
                     break
         return found
 
+    @_serialized
     def forget(self, session_id: str) -> None:
         """Drop the reasoning of a conversation that no longer exists."""
         data = self._load()

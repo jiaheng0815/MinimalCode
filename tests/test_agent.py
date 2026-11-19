@@ -1081,6 +1081,138 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(session.messages[0]["role"], "user")
             self.assertNotEqual(session.messages[2]["role"], "tool")
 
+    def test_compaction_never_grows_the_history(self) -> None:
+        """A cut that drops one message and adds the summary pair grows it.
+
+        ``_compaction_boundaries`` falls back to index 1 when the only user
+        message sits right after the head, so accepting any boundary that is
+        "not the summary pair" made every compaction one message longer.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            settings.data["context"]["keep_messages"] = 4
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            session.append_message({"role": "assistant", "content": "head"})
+            session.append_message({"role": "user", "content": "go"})
+            for index in range(6):
+                session.append_message(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {"id": f"c{index}", "function": {"name": "read"}}
+                        ],
+                    }
+                )
+                session.append_message(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"c{index}",
+                        "name": "read",
+                        "content": "r",
+                    }
+                )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            before = len(session.messages)
+            self.assertTrue(agent._compact(force=False))
+            self.assertLessEqual(len(session.messages), before)
+            self.assertEqual(session.messages[0]["role"], "user")
+
+    def test_switching_provider_keeps_the_retry_notice_hook(self) -> None:
+        """A switched provider must report retries the way ``__init__`` does.
+
+        The two install sites used to disagree: the retry notice also feeds the
+        desktop pet, and after a `/model` style switch that bubble went silent.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            tools = ToolRuntime(settings, workspace, shell)
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=tools,
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+
+            class RetryingProvider(FakeProvider):
+                notify = None
+
+            replacement = RetryingProvider()
+            agent.switch_runtime(replacement, tools)
+
+            self.assertEqual(replacement.notify, agent._provider_notice)
+
+    def test_a_failed_user_message_append_keeps_the_attachments(self) -> None:
+        """An upload is queued once; a failed append must not eat it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings = load_settings(root / ".MinimalCode")
+            shell = detect_shell()
+            session = SessionStore(settings).create(
+                workspace,
+                provider="fake",
+                model="fake-model",
+                save=False,
+            )
+            agent = Agent(
+                settings=settings,
+                provider=FakeProvider(),
+                session=session,
+                tool_runtime=ToolRuntime(settings, workspace, shell),
+                shell=shell,
+                quiet=True,
+                stream_output=False,
+            )
+            agent.pending_attachments = [
+                {"file_id": "file-1", "filename": "notes.pdf", "purpose": "text"}
+            ]
+
+            with (
+                patch(
+                    "minimalcode.session.Session.append_message",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaises(OSError),
+            ):
+                agent.run("read the document")
+
+            self.assertEqual(
+                [item["file_id"] for item in agent.pending_attachments], ["file-1"]
+            )
+
     def test_repair_fills_null_content_behind_an_empty_tool_call_list(self) -> None:
         from minimalcode.agent import _repair_tool_history
 

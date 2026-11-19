@@ -537,6 +537,71 @@ class RuntimeTests(WebUiCase):
         with self.assertRaises(ConfigError):
             runtime.set_thinking("no")
 
+    def test_a_conversation_from_another_workspace_cannot_be_opened(self) -> None:
+        """The sidebar only lists this workspace, and nothing else is in reach."""
+        runtime = self.runtime()
+        with patch("minimalcode.webui.runtime.create_provider", fake_create_provider):
+            runtime.chat("hello", lambda event, data: None)
+        session_id = runtime.history()["session"]["id"]
+
+        other_dir = Path(self.tmp.name) / "elsewhere"
+        other_dir.mkdir()
+        other = WebRuntime(self.settings, other_dir)
+        self.addCleanup(other.close)
+
+        self.assertEqual(other.sessions(), [])
+        with self.assertRaises(ConfigError):
+            other.open_session(session_id)
+
+    def test_a_failed_provider_switch_keeps_the_running_one(self) -> None:
+        """A selection that cannot be built must not describe the live agent."""
+        runtime = self.runtime()
+        with patch("minimalcode.webui.runtime.create_provider", fake_create_provider):
+            runtime.chat("hello", lambda event, data: None)
+        before = runtime.describe()
+
+        def failing_factory(*args, **kwargs):
+            raise ConfigError("provider is not configured")
+
+        with (
+            patch("minimalcode.webui.runtime.create_provider", failing_factory),
+            self.assertRaises(ConfigError),
+        ):
+            runtime.apply_settings({"model": "another-model"})
+
+        after = runtime.describe()
+        self.assertEqual(after["provider"], before["provider"])
+        self.assertEqual(after["model"], before["model"])
+
+    def test_a_settings_change_cannot_start_inside_a_turn(self) -> None:
+        """The idle check and the change it protects share one gate."""
+        runtime = self.runtime()
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowProvider(FakeProvider):
+            def stream_chat(self, messages, **kwargs):
+                started.set()
+                release.wait(10)
+                return super().stream_chat(messages, **kwargs)
+
+        def factory(*args, **kwargs):
+            return SlowProvider(), "fake", "fake-model"
+
+        worker = threading.Thread(
+            target=runtime.chat, args=("hello", lambda event, data: None), daemon=True
+        )
+        with patch("minimalcode.webui.runtime.create_provider", factory):
+            worker.start()
+            self.assertTrue(started.wait(10))
+            with self.assertRaises(Busy):
+                runtime.new_session()
+            with self.assertRaises(Busy):
+                runtime.delete_folder("anything")
+            release.set()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+
 
 class HttpTests(WebUiCase):
     def setUp(self) -> None:
@@ -775,6 +840,49 @@ class HttpTests(WebUiCase):
             headers={"Origin": f"http://127.0.0.1:{self.port}"},
         )
         self.assertEqual(status, 200)
+
+    def test_another_local_origin_is_refused(self) -> None:
+        """另一个本地应用的页面不是同源。
+
+        只要 Origin 的主机名是回环就放行，会让任何跑在本机别的端口上的页面
+        （或者一个有 XSS 漏洞的 localhost 页面）POST /api/chat，从而在工作区里
+        执行命令。同源要主机名和端口都一样。
+        """
+        status, _ = self.request(
+            "POST",
+            "/api/new",
+            {},
+            headers={"Origin": f"http://127.0.0.1:{self.port + 1}"},
+        )
+        self.assertEqual(status, 403)
+        status, _ = self.request(
+            "POST",
+            "/api/new",
+            {},
+            headers={"Origin": f"http://localhost:{self.port}"},
+        )
+        self.assertEqual(status, 403)
+        status, _ = self.request(
+            "POST",
+            "/api/new",
+            {},
+            headers={"Origin": f"http://127.0.0.1:{self.port}"},
+        )
+        self.assertEqual(status, 200)
+
+    def test_restored_reasoning_is_expanded_and_toggleable(self) -> None:
+        """刷新重建的思考块默认展开，标题既是开关也是键盘可达的按钮。"""
+        status, script = self.request("GET", "/app.js")
+        self.assertEqual(status, 200)
+        text = script.decode()
+        self.assertIn("function setThinkingOpen", text)
+        restored = text.split("function restoreThinking", 1)[1].split("\n}", 1)[0]
+        # 恢复时沿用浏览器偏好而不是无条件折叠：流式时整段推理是看得见的，
+        # 刷新后如果强制折叠，用户看到的就是「思考不见了」。
+        self.assertNotIn("thinkBody.hidden = true", restored)
+        self.assertIn("setThinkingOpen(round, app.thinkingOpen)", restored)
+        self.assertIn('setAttribute("aria-expanded"', text)
+        self.assertIn("toggleThinking", text)
 
     def test_chat_streams_server_sent_events(self) -> None:
         with patch("minimalcode.webui.runtime.create_provider", fake_create_provider):

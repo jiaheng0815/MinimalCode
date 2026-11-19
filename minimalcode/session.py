@@ -88,9 +88,15 @@ class Session:
         # already on disk.
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
         needs_newline = False
-        if os.fstat(fd).st_size:
-            os.lseek(fd, -1, os.SEEK_END)
-            needs_newline = os.read(fd, 1) != b"\n"
+        try:
+            if os.fstat(fd).st_size:
+                os.lseek(fd, -1, os.SEEK_END)
+                needs_newline = os.read(fd, 1) != b"\n"
+        except OSError:
+            # Nothing owns the descriptor yet, so a failed probe has to close it
+            # or every append on an unreadable file leaks one.
+            os.close(fd)
+            raise
         with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as handle:
             try:
                 os.chmod(self.path, 0o600)
@@ -121,15 +127,15 @@ class Session:
         cleaned = " ".join(str(title).split())
         if not cleaned or cleaned == self.title:
             return
+        previous = self.title
         self.title = cleaned
         try:
             self.append_event({"type": "title", "title": cleaned})
         except (OSError, TypeError, ValueError):
             # A title is cosmetic: losing it must not fail a turn whose answer
-            # already arrived.
-            return
-            self.messages.pop()
-            raise
+            # already arrived. Putting the old value back keeps the agent from
+            # treating the failed write as recorded and never asking again.
+            self.title = previous
 
     def replace_messages(
         self,
@@ -166,7 +172,7 @@ class Session:
             return None
 
     def _prune_bloat(self, state: dict[str, Any], *, size_before: int | None) -> bool:
-        """Rewrite the file to ``meta + state`` when appending duplicated it.
+        """Rewrite the file to ``meta + title + state`` when appending duplicated it.
 
         A compact event carries the whole replacement history, so a session that
         compacts twice stores the same messages twice and `--continue` replays
@@ -175,6 +181,11 @@ class Session:
         the file is clearly larger than the state it would keep. The size delta
         also acts as a weak concurrency check: if another process appended
         between the write and the stat, the file is left alone.
+
+        The title event is written once, near the top of the file, so keeping
+        only the header and the state would drop the conversation's name for
+        good: ``sessions`` would fall back to the first prompt and the agent
+        would ask the provider for a new title on every later run.
         """
         if self.path is None or size_before is None:
             return False
@@ -191,7 +202,10 @@ class Session:
             # `SessionStore.latest` identifies a session by its first line, so a
             # file without a meta header keeps its original shape.
             return False
-        return self._rewrite(header + _compact_json(state) + "\n")
+        title = ""
+        if self.title:
+            title = _compact_json({"type": "title", "title": self.title}) + "\n"
+        return self._rewrite(header + title + _compact_json(state) + "\n")
 
     def _header_line(self) -> str | None:
         """Return the session header, with later provider switches applied.

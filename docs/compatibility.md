@@ -1,20 +1,41 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.8.0. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.8.1. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-and 1.8.0 added no further breaking import changes (`minimalcode.httpclient`,
-`minimalcode.clipboard`, `minimalcode.mcp`, `minimalcode.media`, and
-`minimalcode.webui` are new modules, not renamed ones).
+1.8.0, and 1.8.1 added no further breaking import changes
+(`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
+`minimalcode.media`, and `minimalcode.webui` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.7.0 or 1.8.0. Every change is additive:
-new tools join `tools.allow` and the read-only set, every new settings block is
-optional, and a `settings.json` written for 1.6.0 keeps working unchanged. The
-1.8.0 web UI drives the same agent and the same JSONL files, so a conversation
+format, or import path was removed in 1.7.0, 1.8.0 or 1.8.1. Every change is
+additive: new tools join `tools.allow` and the read-only set, every new settings
+block is optional, and a `settings.json` written for 1.6.0 keeps working
+unchanged. The 1.8.0 web UI drives the same agent and the same JSONL files, so a
+conversation started in the browser is the file `--continue` resumes in the
+terminal.
+
+## What 1.8.1 fixed
+
+- The web page restores a finished turn's reasoning expanded, not collapsed:
+  the blocks come back from `GET /api/history`, the title toggles them for the
+  mouse and the keyboard alike, and the choice is remembered per browser.
+- `/api/*` requests carrying another loopback origin are refused. `Origin` must
+  match the `Host` header's hostname *and* port, so a page served by another
+  local app can no longer drive a tool loop that runs commands in the workspace.
+- Settings, session, and workspace changes take the same gate a starting turn
+  takes, so one can no longer land between the "is a turn running?" check and
+  the reset that follows it. A provider switch that cannot be built keeps the
+  live provider, its clients, and its MCP servers, and rolls the reported
+  provider/model back.
+- `webui/folders.json` and `webui/thinking.json` serialize their
+  load-modify-save cycles; both documents keep `version: 1`.
+- A compaction rewrite keeps the session's `title` event, a failed title write
+  keeps the previous title, queued attachments survive a failed message append,
+  and a compaction cut never makes the history longer.
 started in the browser is the file `--continue` resumes in the terminal.
 
 ## What 1.8.0 added

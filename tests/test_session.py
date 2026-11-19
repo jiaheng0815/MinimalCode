@@ -137,6 +137,50 @@ class SessionTests(unittest.TestCase):
             first = json.loads(session.path.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(first["session_id"], session.session_id)
 
+    def test_prune_keeps_the_recorded_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            assert session.path is not None
+            session.set_title("文件整理与发布")
+            filler = "x" * 40_000
+            for index in range(6):
+                session.append_message({"role": "user", "content": f"{filler}{index}"})
+            session.replace_messages(
+                [{"role": "user", "content": filler}],
+                summary="summary",
+                dropped_messages=6,
+            )
+
+            # The title event sits near the top of the file, so a rewrite that
+            # keeps only meta + state drops the conversation's name for good:
+            # `sessions` falls back to the first prompt and the agent asks the
+            # provider for a new title on every later run.
+            loaded = store.load(session.path)
+            self.assertEqual(loaded.title, "文件整理与发布")
+            self.assertEqual(store.list()[0]["title"], "文件整理与发布")
+
+    def test_a_failed_title_write_keeps_the_old_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            store = SessionStore(load_settings(root / ".MinimalCode"))
+            session = store.create(workspace, provider="test", model="model", save=True)
+            session.set_title("first")
+
+            with patch.object(
+                Session, "append_event", side_effect=OSError("disk full")
+            ):
+                session.set_title("second")
+
+            # A title that never reached the file must not look recorded, or the
+            # next turn stops asking the provider for one.
+            self.assertEqual(session.title, "first")
+
     def test_small_session_compaction_stays_append_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

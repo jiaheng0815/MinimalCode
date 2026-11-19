@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,23 @@ from ..config import ConfigError, Settings
 
 _VERSION = 1
 _MAX_NAME = 40
+
+
+def _serialized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Hold the document lock for one load-modify-save cycle.
+
+    Two browser tabs -- or a folder create racing an assignment -- would
+    otherwise each write a snapshot taken before the other's change, so one of
+    the two changes would silently disappear.
+    """
+
+    def wrapper(self: FolderLibrary, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    wrapper.__name__ = getattr(method, "__name__", "wrapper")
+    wrapper.__doc__ = method.__doc__
+    return wrapper
 
 
 def _clean_name(raw: object) -> str:
@@ -44,6 +63,9 @@ class FolderLibrary:
 
     def __init__(self, settings: Settings) -> None:
         self.path = settings.home / "webui" / "folders.json"
+        # One lock per library instance: the runtime serves every request from
+        # the same object, so this is the whole contention surface.
+        self._lock = threading.Lock()
 
     # -- storage ----------------------------------------------------------
 
@@ -152,6 +174,7 @@ class FolderLibrary:
 
     # -- writes -----------------------------------------------------------
 
+    @_serialized
     def create(self, workspace: Path, name: object) -> dict[str, Any]:
         cleaned = _clean_name(name)
         data = self._load()
@@ -164,6 +187,7 @@ class FolderLibrary:
         self._save(data)
         return dict(folder)
 
+    @_serialized
     def rename(self, workspace: Path, identifier: object, name: object) -> None:
         cleaned = _clean_name(name)
         data = self._load()
@@ -178,6 +202,7 @@ class FolderLibrary:
         target["name"] = cleaned
         self._save(data)
 
+    @_serialized
     def delete(self, workspace: Path, identifier: object) -> None:
         """Remove one folder; its conversations fall back to uncategorized."""
         data = self._load()
@@ -189,6 +214,7 @@ class FolderLibrary:
                 bucket["assignments"].pop(session_id, None)
         self._save(data)
 
+    @_serialized
     def assign(self, workspace: Path, session_id: str, identifier: object) -> None:
         """File ``session_id`` into a folder, or out of every folder for ''."""
         data = self._load()
@@ -200,6 +226,7 @@ class FolderLibrary:
             bucket["assignments"][session_id] = self._find(bucket, wanted)["id"]
         self._save(data)
 
+    @_serialized
     def forget(self, workspace: Path, session_id: str) -> None:
         """Drop the assignment of a conversation that no longer exists."""
         data = self._load()

@@ -37,12 +37,17 @@ const app = {
   folders: [],
   messages: [],
   streaming: false,
-  theme: localStorage.getItem("minimalcode-theme") || "system",
+  // 读取偏好时不能抛异常：隐私模式下 localStorage 不可用，而这里一旦抛出，
+  // boot() 之前脚本就停了，整页只剩空壳。
+  theme: storageGet("minimalcode-theme") || "system",
   tab: "model",
   browsing: null,
   turn: null,
   // 折叠状态只存在于这台浏览器，文件夹本身由服务端保存。
   collapsed: readCollapsed(),
+  // 思考块默认展开：流式时整段推理本来就是看得见的，刷新重建后也保持一致；
+  // 手动折叠过一次，后面的页面跟着折叠（同一台浏览器）。
+  thinkingOpen: readThinkingOpen(),
   // 宽屏下边栏是否收起。收起后唯一的展开入口是 .main 里的 mobile-menu，
   // 因为 .sider 自己被 hidden 了。
   siderHidden: false,
@@ -57,6 +62,30 @@ function readCollapsed() {
   } catch {
     return new Set();
   }
+}
+
+function storageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* 隐私模式下 localStorage 不可写：偏好只在本次页面里生效。 */
+  }
+}
+
+function readThinkingOpen() {
+  return storageGet("minimalcode-thinking-collapsed") !== "1";
+}
+
+function saveThinkingOpen(open) {
+  storageSet("minimalcode-thinking-collapsed", open ? "0" : "1");
 }
 
 const dom = {};
@@ -335,7 +364,11 @@ function startRound(turn) {
   const reply = el("div", "reply-area");
   reply.hidden = true;
   const replyTitle = el("div", "reply-title");
-  replyTitle.innerHTML = `<span class="reply-title-icon">${ICON_THINK}</span><span class="reply-title-text shimmer">正在思考</span>`;
+  // 标题是一个可点、可聚焦的开关：展开/折叠这段推理，键盘同样能操作。
+  replyTitle.setAttribute("role", "button");
+  replyTitle.setAttribute("tabindex", "0");
+  replyTitle.setAttribute("aria-expanded", "true");
+  replyTitle.innerHTML = `<span class="reply-title-icon">${ICON_THINK}</span><span class="reply-title-text shimmer">正在思考</span><span class="reply-title-chevron">${ICON_CHEVRON}</span>`;
   const thinkBody = el("div", "ds-think-content");
   const thinkMarkdown = el("div", "ds-markdown");
   thinkBody.append(thinkMarkdown);
@@ -346,10 +379,6 @@ function startRound(turn) {
   tools.hidden = true;
   round.append(reply, content, tools);
   turn.rounds.append(round);
-  replyTitle.addEventListener("click", () => {
-    if (reply.hidden) return;
-    thinkBody.hidden = !thinkBody.hidden;
-  });
   turn.current = {
     element: round,
     reply,
@@ -363,7 +392,28 @@ function startRound(turn) {
     thinkDone: false,
     started: Date.now(),
   };
-  return turn.current;
+  const created = turn.current;
+  replyTitle.addEventListener("click", () => toggleThinking(created));
+  replyTitle.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggleThinking(created);
+  });
+  return created;
+}
+
+function setThinkingOpen(round, open) {
+  round.thinkBody.hidden = !open;
+  round.replyTitle.classList.toggle("collapsed", !open);
+  round.replyTitle.setAttribute("aria-expanded", open ? "true" : "false");
+  app.thinkingOpen = Boolean(open);
+  saveThinkingOpen(app.thinkingOpen);
+}
+
+function toggleThinking(round) {
+  // 没有推理内容的那一段不展开：点了也只是一块空白。
+  if (!round || round.reply.hidden) return;
+  setThinkingOpen(round, round.thinkBody.hidden);
 }
 
 function createAssistantMessage() {
@@ -429,21 +479,24 @@ function finishThinking(turn, round) {
   if (!label) return;
   label.classList.remove("shimmer");
   label.textContent = `已思考（用时 ${seconds} 秒）`;
+  // 折叠偏好来自这台浏览器：默认保持展开，和刷新后重建的观感一致；
+  // 偏好折叠时正文一开始就把推理收起来，而不是等下一次刷新。
+  if (!app.thinkingOpen) setThinkingOpen(target, false);
 }
+
 function restoreThinking(round, entry) {
-  // 刷新后 /api/history 带回这一段推理：折叠显示，点标题展开，
-  // 否则整段历史推理会把页面铺满。
+  // 刷新后 /api/history 带回这一段推理。展开状态沿用这台浏览器的偏好
+  // （默认展开，和流式时一样看得见），标题始终可以点开/收起。
   round.reply.hidden = false;
   round.thinkDone = true;
   round.thinking = entry.text;
   paintMarkdown(round.thinkMarkdown, entry.text);
-  round.thinkBody.hidden = true;
+  setThinkingOpen(round, app.thinkingOpen);
   const label = round.replyTitle.querySelector(".reply-title-text");
   if (!label) return;
   label.classList.remove("shimmer");
   label.textContent = entry.seconds ? `已思考（用时 ${entry.seconds} 秒）` : "已思考";
 }
-
 
 function applyEvent(event, payload, turn) {
   if (event === "round") {
@@ -638,7 +691,7 @@ function folderActions(folder) {
 function toggleFolder(id) {
   if (app.collapsed.has(id)) app.collapsed.delete(id);
   else app.collapsed.add(id);
-  localStorage.setItem("minimalcode-folders-collapsed", JSON.stringify([...app.collapsed]));
+  storageSet("minimalcode-folders-collapsed", JSON.stringify([...app.collapsed]));
   renderSider();
 }
 
@@ -1150,7 +1203,9 @@ function showFolderDialog() {
 }
 
 async function useFolder() {
-  const path = app.browsing ? app.browsing.path : dom.folderPath.value.trim();
+  // 输入框里的路径优先：浏览过别的目录之后手打一个路径，用的是手打的那个。
+  const typed = dom.folderPath.value.trim();
+  const path = typed || (app.browsing ? app.browsing.path : "");
   try {
     renderState(await api("/api/workspace", { path }));
     dom.folderOverlay.hidden = true;
@@ -1294,10 +1349,11 @@ function bindEvents() {
   for (const option of dom.settingsOverlay.querySelectorAll(".theme-option")) {
     option.addEventListener("click", () => {
       app.theme = option.dataset.theme;
-      localStorage.setItem("minimalcode-theme", app.theme);
+      storageSet("minimalcode-theme", app.theme);
       applyTheme();
     });
   }
+  dom.providerSelect.addEventListener("change", fillProviderFields);
   dom.providerSelect.addEventListener("change", fillProviderFields);
   dom.apiKeyChange.addEventListener("click", () => {
     dom.apiKeySaved.hidden = true;
@@ -1363,6 +1419,20 @@ function bindEvents() {
   });
 }
 
+function refreshBusyState() {
+  // 刷新页面时正好有一轮在跑：/api/state 的 busy 会一直停在 true，发送按钮
+  // 就永远灰着。轮询到这一轮结束为止，其它状态照旧。
+  if (!app.state || !app.state.busy) return;
+  setTimeout(async () => {
+    try {
+      renderState(await api("/api/state"));
+    } catch {
+      return;
+    }
+    refreshBusyState();
+  }, 1500);
+}
+
 async function boot() {
   cacheDom();
   applyTheme();
@@ -1375,6 +1445,7 @@ async function boot() {
   } catch (error) {
     toast(`无法连接本地服务：${error.message}`);
   }
+  refreshBusyState();
   dom.prompt.focus();
 }
 

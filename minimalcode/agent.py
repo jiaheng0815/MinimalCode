@@ -409,6 +409,11 @@ class Agent:
         Ctrl-C or a provider failure can stop the loop between an assistant
         tool call and its result. Replaying that history makes most providers
         reject the next request, so the gap is filled before every run.
+
+        Filling the gap changes the message list, so the prompt size recorded
+        for the previous request no longer describes a prefix of it: keeping it
+        would make ``should_compact`` slice the wrong tail and either compact
+        too early or never.
         """
         repaired, changed = _repair_tool_history(self.session.messages)
         if changed:
@@ -417,6 +422,8 @@ class Agent:
                 summary="Recovered an interrupted tool turn.",
                 dropped_messages=0,
             )
+            self.last_prompt_tokens = 0
+            self._prompt_session_count = 0
 
     def refresh_instructions(self) -> None:
         """Drop the cached system prompt so the next build re-reads instructions.
@@ -749,11 +756,16 @@ class Agent:
         return result
 
     def _user_message(self, user_text: str) -> dict[str, Any]:
-        """Build the stored user message, consuming any queued attachments."""
+        """Build the stored user message carrying any queued attachments.
+
+        The queue is emptied by ``run`` only after the message reached the
+        transcript: consuming it here would drop the uploaded ``file_id`` from
+        both the session and the queue when the append fails, so a retried turn
+        would silently send no document.
+        """
         message: dict[str, Any] = {"role": "user", "content": user_text}
         if self.pending_attachments:
-            message["attachments"] = self.pending_attachments
-            self.pending_attachments = []
+            message["attachments"] = list(self.pending_attachments)
         return message
 
     def _reminder_message(self) -> dict[str, Any] | None:
@@ -782,7 +794,12 @@ class Agent:
         reminder = self._reminder_message()
         if reminder is not None:
             self.session.append_message(reminder)
-        self.session.append_message(self._user_message(user_text))
+        user_message = self._user_message(user_text)
+        self.session.append_message(user_message)
+        if user_message.get("attachments"):
+            # The upload is now part of the transcript; the queue is cleared
+            # only here so a failed append can still send it on the next turn.
+            self.pending_attachments = []
         final_text = ""
         final_completed = False
         final_finish_reason: str | None = None
@@ -980,15 +997,21 @@ class Agent:
         # Compaction replaces everything before the cut with a summary pair.
         # Rewriting the pair a previous compaction wrote would summarize the
         # summary and leave the history the same length, so that cut only counts
-        # when real messages go with it; every other boundary is accepted as
-        # soon as it drops something, because even two large early messages are
-        # worth replacing with a summary.
+        # when real messages go with it. Every other boundary is accepted as
+        # soon as it does not grow the history: two large early messages are
+        # worth replacing with a summary, but a cut that drops one and adds the
+        # pair back makes the transcript longer on every compaction.
         head_is_summary = _is_compacted_head(messages)
+        smallest = _COMPACT_HEAD_MESSAGES
+        if head_is_summary:
+            # Rewriting the pair a previous compaction wrote only pays off when
+            # real messages go with it.
+            smallest += 1
         cut = next(
             (
                 index
                 for index in _compaction_boundaries(messages, target)
-                if index > _COMPACT_HEAD_MESSAGES or not head_is_summary
+                if index >= smallest
             ),
             None,
         )
@@ -1168,7 +1191,9 @@ class Agent:
         """
         schemas = self._tool_schemas(tool_runtime)
         if hasattr(provider, "notify"):
-            provider.notify = self._activity
+            # Same hook ``__init__`` installs: a retry notice is also a Clawd
+            # bubble, and a switched provider must not silently drop that.
+            provider.notify = self._provider_notice
         self.provider = provider
         self.tools = tool_runtime
         self.tool_schemas = schemas

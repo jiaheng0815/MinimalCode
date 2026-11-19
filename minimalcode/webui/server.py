@@ -52,6 +52,31 @@ def _host_only(value: str) -> str | None:
         return None
 
 
+def _authority(value: str) -> tuple[str, str] | None:
+    """Return ``(hostname, port)`` for a ``Host`` or ``Origin`` header.
+
+    The port matters as much as the name: a page served by another app on
+    loopback (``http://127.0.0.1:3000``) is a different origin, and it must not
+    reach a server that can run commands in the workspace. A missing port is
+    filled in from the scheme so an ``http://host`` origin still matches
+    ``Host: host:80``.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = urlsplit(text if "://" in text else "//" + text)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    if port is None:
+        port = 443 if parsed.scheme in {"https", "wss"} else 80
+    return hostname.lower(), str(port)
+
+
 def _is_loopback(host: str | None) -> bool:
     return host is not None and host.lower() in _LOOPBACK_NAMES
 
@@ -247,9 +272,11 @@ class WebHandler(BaseHTTPRequestHandler):
             return True
         if origin.strip() == "null":
             return False
-        if _is_loopback(_host_only(origin)):
-            return True
-        return bool(host) and _host_only(origin) == hostname
+        # Same origin means the same host *and* the same port. Accepting any
+        # loopback origin would let another local app (a dev server on :3000, a
+        # page with an XSS hole) post to /api/chat and run shell commands here.
+        target = _authority(host)
+        return target is not None and _authority(origin) == target
 
     def _read_json(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length") or "0"

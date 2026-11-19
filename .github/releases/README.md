@@ -10,7 +10,7 @@ Create the GitHub releases in tag order:
 ```bash
 for version in 0.1.0 0.2.0 0.3.0 0.4.0 0.5.0 0.6.0 0.7.0 0.8.0 \
   1.0.0 1.1.0 1.2.0 1.3.0 1.3.1 1.3.2 1.4.0 1.4.1 1.4.2 1.4.3 \
-  1.5.0 1.5.1 1.5.2 1.5.3 1.5.4 1.6.0 1.7.0 1.8.0; do
+  1.5.0 1.5.1 1.5.2 1.5.3 1.5.4 1.6.0 1.7.0 1.8.0 1.8.1; do
   gh release create "v$version" \
     --title "$version" \
     --notes-file ".github/releases/v$version.md" \

@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.8.0.
+Applies to MinimalCode 1.8.1.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -140,9 +140,13 @@ Reasoning is display-only and never enters the JSONL transcript, so
 finished turn's blocks are matched back to its assistant message by answer text,
 newest entry first, so a compacted or hand-edited transcript loses old blocks
 instead of borrowing someone else's. `GET /api/history` attaches them to the
-assistant message and `app.js` rebuilds the same 思考 blocks (collapsed, title
-clickable) instead of dropping them on a reload; deleting a conversation forgets
-its entry, and one conversation keeps its newest 200 turns.
+assistant message and `app.js` rebuilds the same 思考 blocks instead of dropping
+them on a reload; deleting a conversation forgets its entry, and one
+conversation keeps its newest 200 turns. A restored block follows the browser's
+own preference (expanded by default, so it matches what the streaming view
+showed) and its title is the toggle: `setThinkingOpen()` is the only place that
+flips it, the preference lives in `localStorage`, and the title carries
+`role="button"`, `tabindex`, and `aria-expanded` so the keyboard reaches it too.
 The sider toggle lives inside the sider, so collapsing it would hide the only
 control that brings it back. The page therefore keeps its reopen affordance
 outside: the
@@ -177,8 +181,25 @@ provider and tool runtime but keeps the loaded session (`Agent.switch_runtime`),
 which is what `/model` does in the terminal; reopening a recorded session
 instead adopts it and appends a `meta` event if the provider changed. The page
 can reach a tool loop, so the server binds loopback by default and refuses a
-request whose `Host` or `Origin` is not this server.
-request whose `Host` or `Origin` is not this server.
+request whose `Host` or `Origin` is not this server: `_authority()` compares the
+hostname *and* the port, because another app on loopback (a dev server on
+`:3000`, a page with an XSS hole) is a different origin and must not post to
+`/api/chat`.
+
+Every endpoint that changes the runtime takes `_mutate` before it looks at
+`_lock`, and `WebRuntime.chat()` takes the same gate right before it acquires the
+turn lock. That is what keeps a settings/session/workspace change from landing
+between the "is a turn running?" check and the reset that follows it. The gate is
+released before the turn starts, so `describe()["busy"]` still reports only the
+turn. A rebuild that cannot be built (missing key, unset `${VAR}`) leaves the
+live provider, its web/vision/media clients, and its MCP servers in place, and
+`apply_settings()` rolls `provider_name`/`model` back so the page keeps
+describing the provider it is really using.
+
+`FolderLibrary` and `ThinkingLog` each guard their load-modify-save cycle with a
+per-instance lock: two tabs (or a delete racing a finishing turn) would otherwise
+write a snapshot taken before the other's change, and `thinking.json` would even
+resurrect a conversation that was just deleted.
 
 The HTTP surface is deliberately small; every route below is loopback-only.
 

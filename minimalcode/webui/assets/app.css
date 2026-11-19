@@ -882,6 +882,28 @@ button {
   font: var(--dsw-font-markdown-base);
 }
 
+/* 标题是思考块的开关：箭头指示当前状态，键盘聚焦时给出可见的框。 */
+.reply-title-chevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.reply-title-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+.reply-title.collapsed .reply-title-chevron {
+  transform: rotate(-90deg);
+}
+
+.reply-title:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
 .reply-title-text.shimmer {
   color: transparent;
   background: linear-gradient(

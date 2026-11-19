@@ -1,5 +1,45 @@
 # 更新日志
 
+## 1.8.1 - 2026-11-19
+
+网页刷新的思考过程不会再消失，而且可以自由折叠/展开；同一轮审查里找到的会话、压缩与网页运行时缺陷一并修掉。
+
+### 修复
+
+- 网页：刷新后思考过程重新可见。`GET /api/history` 一直带着 `thinking`，但页面 `restoreThinking()` 无条件把推理体折叠起来——流式时看得见的整段推理，刷新后只剩一行「已思考（用时 N 秒）」，看上去就是丢了。现在恢复时沿用这台浏览器的偏好（默认展开，和流式时一致），标题右侧加了箭头提示可以展开，点击、`Enter`、空格都能折叠/展开，`aria-expanded` 随状态变化；折叠过一次之后，新页面与「正文开始后自动收起」都沿用同一偏好（`localStorage: minimalcode-thinking-collapsed`）。
+- 网页：思考块的标题原来是纯 `div`，只有鼠标能点。现在补上 `role="button"`、`tabindex` 与 `:focus-visible` 样式，键盘同样能展开/折叠。
+- 网页：`useFolder()` 优先用「上一次浏览到的目录」，手打进 `#folder-path` 的路径被丢掉，于是会切到一个没打算用的文件夹；现在输入框里的路径优先。
+- 网页：刷新页面时正好有一轮在跑，`/api/state` 的 `busy` 会一直停在 `true`，发送按钮就永远灰着。现在启动后轮询到这一轮结束为止。
+- 网页：隐私模式下 `localStorage` 会抛 `SecurityError`，而 `app` 初始化里的 `localStorage.getItem` 在 `boot()` 之前执行，一抛就整页白屏。主题、文件夹折叠、思考偏好的读写现在都走带兜底的 `storageGet` / `storageSet`。
+- 网页（安全）：`Origin` 检查原来是「主机名是回环就放行」，本机别的端口上的页面（或一个被 XSS 的 localhost 页面）因此可以 `POST /api/chat`，在工作区里执行命令。现在要求 `Origin` 与 `Host` 的主机名**和端口**都一致。
+- 网页：换 provider / 模型失败时（缺少 Key、`${VAR}` 未设置、预设不可达），`_reload_agent()` 先把旧客户端从 `self._clients` 摘下来再重建，失败后旧客户端既不会被关闭、也不会再被 `close()` 追踪；`apply_settings()` 那时也已经把 `provider_name` / `model` 改成新值，页面会显示一个实际没在用的 provider。现在先建后换，失败时回滚，旧的 provider / 客户端 / MCP 子进程照常收尾。
+- 网页：`_require_idle()` 只检查锁、不持有锁，检查通过到真正改动之间可以插进一轮对话，`_reset()` 就会把正在跑的 provider 关掉。现在设置、会话、工作区改动与 `chat()` 共用一把 `_mutate` 闸门。
+- 网页：`folders.json` 与 `thinking.json` 的「读—改—写」没有互斥，两个标签页（或一次删除撞上一个正在收尾的回合）会互相覆盖，`thinking.json` 甚至会把刚删掉的会话写回来。两个文档现在各自带锁。
+- 网页：`open_session()` 只按会话 id 在全库查找，没有像 `sessions()` 那样按工作区过滤，于是能打开另一个工作区的记录；而侧边栏不列它，也删不掉它。
+- 网页：`_write_delta` / `_write_thinking` 没有像活动行那样过 `strip_ansi`，provider 回显的终端颜色码会进到页面与 `thinking.json`。
+- 会话：压缩重写只保留「meta + 压缩状态」，把写在文件头部的 `title` 事件一起丢了。之后 `sessions` 退回显示第一条提示，agent 还会再花钱要一个新标题。
+- 会话：`set_title()` 在写入失败时仍然保留新标题（`return` 之后还有一段永远执行不到的 `self.messages.pop(); raise`），于是这个标题既没落盘也不会再重试。
+- 会话：`append_event()` 在 `os.fstat` / `lseek` / `read` 探测行尾时抛错会漏掉文件描述符。
+- Agent：`_repair_history()` 补完中断的工具调用后会改动消息列表，但 `last_prompt_tokens` / `_prompt_session_count` 还指向旧下标，`should_compact()` 因此会估错尾部，提前压缩或者干脆不压缩。
+- Agent：压缩切点允许落在下标 1，把一条消息换成「摘要 + 确认」两条，历史反而变长；现在只在至少不增长时才接受。
+- Agent：`_user_message()` 在消息写入会话之前就清空 `pending_attachments`，append 失败时 `file_id` 两头都没有了，重试的一轮会悄悄丢掉文档；现在消息落盘之后才清空队列。
+- Agent：`switch_runtime()` 把 `provider.notify` 指向 `_activity`，而 `__init__` 指向 `_provider_notice`（同时通知桌宠）；切换模型之后重试提示不再送到 Clawd。
+
+### 变更
+
+- 版本号升级到 1.8.1。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- `webui/thinking.json` 的文档格式不变（仍是 `version: 1`），只是写入现在串行化；`folders.json` 同理。
+- 已知限制（未在本版修改）：`--web-host 0.0.0.0` 时无法区分 DNS rebinding（`Host` 与 `Origin` 同为攻击者域名），只能靠端口暴露范围控制；`minimalcode sessions` 仍只读会话文件头部，`/model` 之后显示的 provider/model 是创建时那一个。
+
+### 文档
+
+- `README.md` 更新当前版本、网页界面一节（思考块默认展开、可折叠）与 1.8.0 → 1.8.1 升级说明；`docs/compatibility.md`、`docs/architecture.md`、`docs/configuration.md` 更新适用版本，`architecture.md` 补上 `runtime.py` 的 `_mutate` 闸门与两个文档锁。
+
+### 测试
+
+- 新增回归测试：压缩重写保留标题、标题写入失败时不覆盖旧标题（`test_session.py`）；压缩不让历史变长、切换 provider 保留重试钩子、附件不因写入失败丢失（`test_agent.py`）；别的回环端口被拒、刷新后思考默认展开且可切换、跨工作区会话不可打开、切换失败保留原 provider、一轮进行中不能改设置（`test_webui.py`）。
+
+## 1.8.0 - 2026-11-20
 ## 1.8.0 - 2026-11-20
 
 网页界面：`minimalcode --web` 起一个本地聊天页面，页面上可以换 API 厂家、API 格式、模型，并选择本地文件夹作为 agent 的工作目录。

@@ -76,6 +76,33 @@ class Busy(RuntimeError):
     """A second turn was requested while one is still streaming."""
 
 
+_BUSY = "a turn is still running; wait for it to finish"
+
+
+def _mutating(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Refuse a runtime change while a turn is streaming.
+
+    ``WebRuntime.chat`` takes the same gate before it acquires the turn lock, so
+    the check below cannot be overtaken by a turn that starts right after it:
+    either the turn already owns the lock and the change is refused, or the
+    change owns the gate until it finishes and the turn waits.
+    """
+
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not self._mutate.acquire(blocking=False):
+            raise Busy(_BUSY)
+        try:
+            if self._lock.locked():
+                raise Busy(_BUSY)
+            return method(self, *args, **kwargs)
+        finally:
+            self._mutate.release()
+
+    wrapper.__name__ = getattr(method, "__name__", "wrapper")
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
 def browse_directories(raw: str | None) -> dict[str, Any]:
     """List child directories so the browser can offer a folder picker.
 
@@ -168,10 +195,14 @@ class WebAgent(Agent):
     def _write_delta(self, text: str) -> None:
         # The answer starts, so this round's reasoning block is complete.
         self._settle_reasoning()
+        # Same rule as the activity lines: a color sequence the provider echoed
+        # out of a terminal belongs to the terminal, not to the page.
+        text = strip_ansi(text) if text else ""
         if text:
             self._emit("delta", {"text": text})
 
     def _write_thinking(self, text: str) -> None:
+        text = strip_ansi(text) if text else ""
         if text:
             self._reasoning.append(text)
             self._emit("thinking", {"text": text})
@@ -225,7 +256,11 @@ class WebRuntime:
         self._thinking = ""
         self._shell = detect_shell(settings.get("shell.path"))
         self._clients: list[Any] = []
+        # ``_lock`` is held for the whole life of a turn. ``_mutate`` is the
+        # gate that keeps a settings/session change from landing between the
+        # "is a turn running?" check and the reset that follows it.
         self._lock = threading.Lock()
+        self._mutate = threading.Lock()
         self._sink: Emitter | None = None
 
     # -- settings ---------------------------------------------------------
@@ -332,36 +367,48 @@ class WebRuntime:
             "folders": self.folders(),
         }
 
+    @_mutating
     def open_session(self, identifier: object) -> dict[str, Any]:
-        """Reopen a recorded conversation instead of starting a new one."""
-        self._require_idle()
+        """Reopen a recorded conversation instead of starting a new one.
+
+        Only a conversation this workspace lists can be adopted: the sidebar
+        shows nothing else, and a transcript recorded in another folder would
+        run its next tool call against the wrong working directory.
+        """
         if not isinstance(identifier, str) or not identifier:
             raise ConfigError("session id is required")
-        row = next(
-            (row for row in self.store.list() if row["session_id"] == identifier),
+        workspace = os.path.normcase(str(self.workspace))
+        recorded = next(
+            (
+                row
+                for row in self.store.list()
+                if row["session_id"] == identifier
+                and row.get("workspace")
+                and os.path.normcase(str(row["workspace"])) == workspace
+            ),
             None,
         )
-        if row is None:
+        if recorded is None:
             raise ConfigError(f"unknown session: {identifier}")
         session = self.store.load(
-            Path(str(row["path"])), default_workspace=self.workspace
+            Path(str(recorded["path"])), default_workspace=self.workspace
         )
         self._reset()
         self._session = session
         self._resume = session
-        recorded = session.provider
-        if recorded and recorded in self._providers():
-            self.provider_name = recorded
+        provider = session.provider
+        if provider and provider in self._providers():
+            self.provider_name = provider
             self.model = session.model
         return self.describe()
 
+    @_mutating
     def delete_session(self, identifier: object) -> dict[str, Any]:
         """Delete one recorded conversation from this workspace.
 
         The file is unlinked, so the conversation is gone for the CLI too; the
         page cannot delete anything it does not list.
         """
-        self._require_idle()
         if not isinstance(identifier, str) or not identifier:
             raise ConfigError("session id is required")
         if not any(row["id"] == identifier for row in self.sessions()):
@@ -384,28 +431,28 @@ class WebRuntime:
             self._reset()
         return self.library_state()
 
+    @_mutating
     def create_folder(self, name: object) -> dict[str, Any]:
         """Add a folder to the sidebar and report the id it was given."""
-        self._require_idle()
         folder = self.library.create(self.workspace, name)
         payload = self.library_state()
         payload["folder"] = folder
         return payload
 
+    @_mutating
     def rename_folder(self, identifier: object, name: object) -> dict[str, Any]:
-        self._require_idle()
         self.library.rename(self.workspace, identifier, name)
         return self.library_state()
 
+    @_mutating
     def delete_folder(self, identifier: object) -> dict[str, Any]:
         """Remove a folder; the conversations filed in it stay, unfiled."""
-        self._require_idle()
         self.library.delete(self.workspace, identifier)
         return self.library_state()
 
+    @_mutating
     def assign_folder(self, identifier: object, folder: object) -> dict[str, Any]:
         """File a conversation into a folder, or back to uncategorized."""
-        self._require_idle()
         if not isinstance(identifier, str) or not identifier:
             raise ConfigError("session id is required")
         if folder is not None and not isinstance(folder, str):
@@ -415,15 +462,16 @@ class WebRuntime:
         self.library.assign(self.workspace, identifier, folder or "")
         return self.library_state()
 
+    @_mutating
     def set_thinking(self, enabled: object) -> dict[str, Any]:
         """Turn the composer's 深度思考 switch on or off."""
-        self._require_idle()
         if not isinstance(enabled, bool):
             raise ConfigError("thinking must be a boolean")
         self._thinking = "" if enabled else "none"
         self._reload_agent()
         return self.describe()
 
+    @_mutating
     def apply_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist the provider/format/model/API key chosen in the page.
 
@@ -438,7 +486,6 @@ class WebRuntime:
         model and nothing else would fail validation on the next start, and a
         pinned default provider would name something that file cannot define.
         """
-        self._require_idle()
         if not isinstance(payload, dict):
             raise ConfigError("settings payload must be an object")
         name = payload.get("provider")
@@ -480,11 +527,19 @@ class WebRuntime:
                 write_settings_document(document, self.settings.home)
                 self.settings.raw = document
             self.settings.data = _merge(self.settings.data, updates)
+        previous = (self.provider_name, self.model)
         if name:
             self.provider_name = name
         if model:
             self.model = model
-        self._reload_agent()
+        try:
+            self._reload_agent()
+        except Exception:
+            # The new selection could not be built (missing key, unset ${VAR},
+            # unreachable preset). The page shows the error, and the runtime
+            # keeps reporting the provider the live agent is really using.
+            self.provider_name, self.model = previous
+            raise
         return self.describe()
 
     def _persistable(self, name: str) -> bool:
@@ -500,9 +555,9 @@ class WebRuntime:
             return True
         return name in DEFAULT_SETTINGS.get("providers", {})
 
+    @_mutating
     def set_workspace(self, raw: object) -> dict[str, Any]:
         """Point the agent at another local folder and start a new session."""
-        self._require_idle()
         if not isinstance(raw, str) or not raw.strip():
             raise ConfigError("workspace path is required")
         try:
@@ -516,15 +571,11 @@ class WebRuntime:
             self.workspace = resolved
         return self.describe()
 
+    @_mutating
     def new_session(self) -> dict[str, Any]:
         """Forget the conversation and start an empty one in this workspace."""
-        self._require_idle()
         self._reset()
         return self.describe()
-
-    def _require_idle(self) -> None:
-        if self._lock.locked():
-            raise Busy("a turn is still running; wait for it to finish")
 
     # -- conversation -----------------------------------------------------
 
@@ -563,12 +614,20 @@ class WebRuntime:
 
         The turn owns ``self._lock`` for its whole life, so settings and
         workspace changes are refused instead of pulling the runtime out from
-        under a running tool.
+        under a running tool. The ``_mutate`` gate is taken first and released
+        immediately: a change already in flight finishes before the turn starts,
+        and a change that starts after it sees the locked turn.
         """
         text = (message or "").strip()
         if not text:
             raise ValueError("message is empty")
-        if not self._lock.acquire(blocking=False):
+        if not self._mutate.acquire(blocking=False):
+            raise Busy("a turn is still running")
+        try:
+            started = self._lock.acquire(blocking=False)
+        finally:
+            self._mutate.release()
+        if not started:
             raise Busy("a turn is still running")
         self._sink = emit
         try:
@@ -718,12 +777,16 @@ class WebRuntime:
         transcript stays addressable, the provider sees it under its own
         protocol, and a session that already exists records the switch in its
         own meta event.
+
+        Nothing is replaced until the new provider and tools exist: a selection
+        that cannot be built leaves the running turn's provider, clients, and
+        MCP servers untouched and still tracked for ``close``.
         """
         agent = self._agent
         if agent is None:
             return
         old_provider = agent.provider
-        old_clients, self._clients = self._clients, []
+        old_clients = self._clients
         old_mcp = getattr(agent.tools, "mcp", None)
         provider, name, model, clients, tools = self._build()
         agent.switch_runtime(provider, tools)
