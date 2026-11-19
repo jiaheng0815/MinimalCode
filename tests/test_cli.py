@@ -1442,7 +1442,12 @@ class WebModeTests(unittest.TestCase):
         self.assertEqual(kwargs["port"], 8090)
         self.assertFalse(kwargs["read_only"])
         self.assertTrue((self.home / "settings.json").exists())
-        self.assertEqual(settings.source, self.home / "settings.json")
+        # ``home_dir`` resolves the home, and the CI temp directory is spelled
+        # differently before and after that: macOS resolves ``/var`` to
+        # ``/private/var`` and Windows resolves the 8.3 ``RUNNER~1`` to the long
+        # ``runneradmin``. Compare against the same canonical spelling instead of
+        # the path the test happened to build.
+        self.assertEqual(settings.source, self.home.resolve() / "settings.json")
 
     def test_web_mode_rejects_a_prompt_or_a_session(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
