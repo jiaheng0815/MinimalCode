@@ -31,7 +31,7 @@ CLI
 | `provider/` | OpenAI Chat/Responses and Anthropic Messages payloads, HTTP retries, and SSE parsing |
 | `web.py` | Configurable provider web search and fetch client |
 | `media.py` | Configurable provider OCR, speech, and document-parsing client |
-| `vision.py` | Configurable provider vision client for inline image understanding |
+| `deepseek.py` | The DeepSeek-API-only capability set and the one predicate that gates it |
 | `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `mcp/` | MCP client: JSON-RPC framing, stdio/HTTP/SSE transports, tool discovery, and the server manager |
@@ -107,7 +107,8 @@ with `-32601`; the client has no second model call to offer.
 | `deepseek_web.py` | DeepSeek web payload, JSON-patch SSE stream, proof of work, text tool protocol |
 | `transport.py` | Request construction, connection retries, HTTP status retries |
 | `common.py` | Usage/content/argument normalization shared by every protocol |
-| `types.py` | `ToolCall` and `ProviderReply` |
+| `server_tools.py` | DeepSeek server-tool blocks: parse, normalize for display, replay read links |
+| `types.py` | `ToolCall`, `ProviderReply` |
 | `factory.py` | `create_provider` and provider/model/effort resolution |
 
 ### `webui/`

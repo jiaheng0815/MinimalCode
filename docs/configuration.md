@@ -382,6 +382,7 @@ back on the next turn. Finished answers do not retain them.
 | `session_title` | no | `{"enabled": true}` asks the provider for a short conversation title |
 | `safety_check` | no | `{"level": "low"}` (default) or `{"level": "high"}` for server-side content safety |
 | `latest_reminder` | no | `true` when the endpoint accepts the `latest_reminder` role |
+| `server_tools` | no | `{"enabled": true, "web_search": true, "read_url": true}` declares DeepSeek's server-side web tools |
 
 Provider entries are validated when settings load: `protocol`, `base_url`,
 numeric limits, booleans, and object fields are checked before the first request.
@@ -390,15 +391,26 @@ again when that provider becomes active.
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
 
-`session_title`, `safety_check`, and `latest_reminder` are DeepSeek extensions,
-so they are opt-in per preset: a strict OpenAI-compatible server that receives
-`title` or `safety_check` rejects the request. `title` and `safety_check` are
-merged after `extra_body`, so a configured extra field cannot reshape them.
-Only the first request of a session asks for a title — the provider may hold the
-response open for up to five seconds while it generates one — and the result is
-stored as its own `title` event in the JSONL session. With
-`safety_check: {"level": "high"}` a refusal ends the turn and is reported as an
-early stop instead of being shown as a normal answer.
+`session_title`, `safety_check`, `latest_reminder`, and `server_tools` are
+DeepSeek extensions, so they are opt-in per preset: a strict OpenAI-compatible
+server that receives `title` or `safety_check` rejects the request. `title` and
+`safety_check` are merged after `extra_body`, so a configured extra field cannot
+reshape them. Only the first request of a session asks for a title — the
+provider may hold the response open for up to five seconds while it generates
+one — and the result is stored as its own `title` event in the JSONL session.
+With `safety_check: {"level": "high"}` a refusal ends the turn and is reported as
+an early stop instead of being shown as a normal answer.
+
+`server_tools` declares the tools DeepSeek executes on its own servers:
+`deepseek_web_search` (web search, and deep search while thinking) and
+`deepseek_read_url` (read the links in the last user message). Only `read_link`
+blocks are replayed in later turns, because the page body comes back encrypted in
+`signature`; search results and opened pages are dropped by the service itself.
+The declarations ride after the function tools and never appear for a plain
+completion, so summaries and compaction never search. All of this — plus
+document parsing, OCR, speech, and the safety review — requires `base_url` to be
+`api.deepseek.com`; any other endpoint, including the `deepseek_web` chat-app
+protocol, refuses the switch with a reason.
 `prompt_cache: true` on an `anthropic_messages` provider marks one cache
 breakpoint on the last tool definition, which covers the system prompt and the
 tool list together; without tools the system block is marked instead. One

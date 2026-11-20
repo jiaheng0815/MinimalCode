@@ -641,6 +641,21 @@ class HttpTests(WebUiCase):
         finally:
             connection.close()
 
+    def test_one_connection_serves_two_requests(self) -> None:
+        """A browser reuses the socket; the second reply must still be written."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=20)
+        try:
+            connection.request("GET", "/api/state")
+            first = connection.getresponse()
+            self.assertEqual(first.status, 200)
+            first.read()
+            connection.request("GET", "/api/state")
+            second = connection.getresponse()
+            self.assertEqual(second.status, 200)
+            self.assertIn("deepseek", json.loads(second.read()))
+        finally:
+            connection.close()
+
     def test_page_and_state_are_served(self) -> None:
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)

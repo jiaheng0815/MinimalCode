@@ -209,6 +209,14 @@ class AnthropicProtocolMixin:
                 return preserved
 
         blocks = cls._anthropic_content_blocks(message.get("content"))
+        # Read links go back as their call/result pair, before the answer text:
+        # the result has to follow the call it answers, and its signature is what
+        # restores the page into a later turn's context.
+        from .server_tools import anthropic_replay
+
+        replayed = anthropic_replay(message.get("server_tools"))
+        if replayed:
+            blocks = [*replayed, *blocks]
         if not isinstance(raw_calls, list):
             return blocks
         for index, call in enumerate(raw_calls):
@@ -407,10 +415,12 @@ class AnthropicProtocolMixin:
             payload["system"] = self._anthropic_system(
                 system_parts, cache=cache and not converted_tools
             )
-        if converted_tools:
-            if cache:
-                converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
-            payload["tools"] = converted_tools
+        declarations = self._server_tool_declarations() if tools is not None else []
+        if converted_tools and cache:
+            converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
+        wire_tools = [*(converted_tools or []), *declarations]
+        if wire_tools:
+            payload["tools"] = wire_tools
         if self.send_reasoning_effort:
             thinking = self._anthropic_thinking()
             if thinking is not None:
@@ -551,9 +561,24 @@ class AnthropicProtocolMixin:
                         "thinking",
                         "redacted_thinking",
                         "tool_use",
+                        "server_tool_use",
+                        "web_search_tool_result",
+                        "web_fetch_tool_result",
                     }:
-                        # Server tools are executed provider-side and cannot be
-                        # replayed as client content in the next request.
+                        continue
+                    if block_type in {
+                        "server_tool_use",
+                        "web_search_tool_result",
+                        "web_fetch_tool_result",
+                    }:
+                        # Server tools run provider-side; their blocks arrive
+                        # whole in `content_block_start` and are never delta'd.
+                        from .server_tools import anthropic_blocks
+
+                        self._server_blocks_raw.append(block)
+                        live = anthropic_blocks([block])
+                        if live:
+                            self._emit_server_tool(live)
                         continue
                     state = state_for(index, block_type)
                     state["type"] = block_type
@@ -613,6 +638,14 @@ class AnthropicProtocolMixin:
                         partial = delta.get("partial_json")
                         if isinstance(partial, str):
                             state_for(index, "tool_use")["partial_json"] += partial
+                    elif delta_type == "citations_delta":
+                        # One citation per event, delivered on the text block it
+                        # belongs to; display-only, dropped on replay.
+                        from .server_tools import anthropic_citation_delta
+
+                        citation = anthropic_citation_delta(delta.get("citation"))
+                        if citation is not None:
+                            self._server_citations.append(citation)
                     continue
                 if event_type == "content_block_stop":
                     continue
@@ -718,6 +751,8 @@ class AnthropicProtocolMixin:
             finish_reason = self._anthropic_finish(stop_reason, bool(tool_calls))
         if not content_parts and not tool_calls and not saw_message_stop:
             raise ProviderError("provider returned an empty stream")
+        from .server_tools import anthropic_blocks
+
         return ProviderReply(
             content="".join(content_parts),
             tool_calls=tool_calls,
@@ -727,6 +762,8 @@ class AnthropicProtocolMixin:
             # a finished answer does not need them in the session history.
             provider_content=provider_content if tool_calls else None,
             title=self._reply_title,
+            server_tools=anthropic_blocks(self._server_blocks_raw),
+            citations=self._server_citations,
         )
 
     def _parse_anthropic_payload(
@@ -802,6 +839,11 @@ class AnthropicProtocolMixin:
                         "input": tool_input,
                     }
                 )
+        from .server_tools import anthropic_blocks, anthropic_citations
+
+        server_blocks = anthropic_blocks(blocks)
+        if server_blocks:
+            self._emit_server_tool(server_blocks)
         return ProviderReply(
             content="".join(content_parts),
             tool_calls=tool_calls,
@@ -816,6 +858,8 @@ class AnthropicProtocolMixin:
                 if isinstance(data.get("title"), str) and data["title"].strip()
                 else None
             ),
+            server_tools=server_blocks,
+            citations=anthropic_citations(blocks),
         )
 
     def _anthropic_regular_request(

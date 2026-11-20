@@ -39,15 +39,28 @@ class ChatProtocolMixin:
     @staticmethod
     def _chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Drop the fields that belong to another protocol's history format."""
-        return [
-            {
+        from .server_tools import chat_replay
+
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict) or not isinstance(
+                message.get("role"), str
+            ):
+                continue
+            clean = {
                 key: value
                 for key, value in message.items()
-                if key not in {"provider_content", "attachments"}
+                if key not in {"provider_content", "attachments", "citations"}
+                and key != "server_tools"
             }
-            for message in messages
-            if isinstance(message, dict) and isinstance(message.get("role"), str)
-        ]
+            if clean.get("role") == "assistant":
+                # Only read links are replayed: their signature is what puts the
+                # page back into the next turn's context.
+                replayed = chat_replay(message.get("server_tools"))
+                if replayed:
+                    clean["server_tool_calls"] = replayed
+            converted.append(clean)
+        return converted
 
     def _chat_payload(
         self,
@@ -60,8 +73,9 @@ class ChatProtocolMixin:
             "messages": self._chat_messages(messages),
             "stream": self.stream_enabled,
         }
-        if tools:
-            payload["tools"] = tools
+        declarations = self._server_tool_declarations() if tools is not None else []
+        if tools or declarations:
+            payload["tools"] = [*(tools or []), *declarations]
             payload["tool_choice"] = "auto"
         if self.stream_enabled and self.include_usage:
             payload["stream_options"] = {"include_usage": True}
@@ -180,6 +194,29 @@ class ChatProtocolMixin:
                 raw_title = delta.get("title")
                 if isinstance(raw_title, str) and raw_title.strip():
                     self._reply_title = " ".join(raw_title.split())
+
+                # Server-side web tools. The live event is announced while the
+                # step runs; the complete list (with signatures) rides on the
+                # last chunk's delta, so it is what the transcript keeps.
+                from .server_tools import (
+                    chat_annotations,
+                    chat_blocks,
+                    chat_event_block,
+                )
+
+                raw_server_event = choice.get("server_tool_event")
+                if isinstance(raw_server_event, dict):
+                    live = chat_event_block(raw_server_event)
+                    if live is not None:
+                        self._emit_server_tool([live])
+                raw_server_steps = delta.get("server_tool_calls")
+                if isinstance(raw_server_steps, list):
+                    self._server_steps = chat_blocks(
+                        {"server_tool_calls": raw_server_steps}
+                    )
+                raw_annotations = delta.get("annotations")
+                if isinstance(raw_annotations, list):
+                    self._server_citations = chat_annotations(raw_annotations)
 
                 if on_thinking is not None:
                     # DeepSeek/Qwen stream `reasoning_content`; OpenRouter uses
@@ -325,6 +362,8 @@ class ChatProtocolMixin:
             finish_reason=finish_reason,
             usage=usage,
             title=self._reply_title,
+            server_tools=self._server_steps,
+            citations=self._server_citations,
         )
 
     def _parse_chat_payload(
@@ -380,6 +419,13 @@ class ChatProtocolMixin:
                 )
         finish_reason = choice.get("finish_reason")
         raw_title = message.get("title")
+        from .server_tools import chat_annotations, chat_blocks
+
+        server_blocks = chat_blocks(message)
+        if server_blocks:
+            # A non-streaming response has no live events to miss: the whole
+            # list is available at once.
+            self._emit_server_tool(server_blocks)
         return ProviderReply(
             content=content,
             tool_calls=calls,
@@ -394,6 +440,8 @@ class ChatProtocolMixin:
                 if isinstance(raw_title, str) and raw_title.strip()
                 else None
             ),
+            server_tools=server_blocks,
+            citations=chat_annotations(message.get("annotations")),
         )
 
     def _chat_regular_request(

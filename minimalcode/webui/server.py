@@ -22,8 +22,11 @@ from ..errors import MinimalCodeError
 from .runtime import Busy, WebRuntime, browse_directories
 
 # One message is text; a megabyte is far more than a prompt needs and keeps a
-# local misconfiguration from turning into an unbounded allocation.
+# local misconfiguration from turning into an unbounded allocation. Uploads have
+# their own, larger ceilings because a PDF or a recording is not a prompt.
 MAX_BODY_BYTES = 1 << 20
+MAX_DOCUMENT_BYTES = 100 << 20
+MAX_AUDIO_BYTES = 8 << 20
 _STATIC_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
@@ -122,6 +125,10 @@ class WebHandler(BaseHTTPRequestHandler):
     # -- routing ----------------------------------------------------------
 
     def _dispatch(self, method: str) -> None:
+        # The handler instance is reused for every request on a keep-alive
+        # connection, so this flag has to start clean: a stale `True` made the
+        # second response on one socket close silently instead of being written.
+        self._headers_sent = False
         path = urlsplit(self.path).path
         try:
             if not self._request_allowed():
@@ -185,9 +192,25 @@ class WebHandler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             self._chat()
             return
+        if path in {"/api/attach", "/api/ocr", "/api/transcribe"}:
+            # Raw bytes, not JSON: a PDF is far past the JSON body limit.
+            self._upload(path)
+            return
         body = self._read_json()
+        if path == "/api/speech":
+            self._speech(body)
+            return
         if path == "/api/settings":
             self._json(HTTPStatus.OK, self.runtime.apply_settings(body))
+            return
+        if path == "/api/detach":
+            self._json(HTTPStatus.OK, self.runtime.detach_document(body.get("file_id")))
+            return
+        if path == "/api/web-search":
+            self._json(HTTPStatus.OK, self.runtime.set_web_search(body.get("enabled")))
+            return
+        if path == "/api/safety":
+            self._json(HTTPStatus.OK, self.runtime.set_safety(body.get("enabled")))
             return
         if path == "/api/session":
             self._json(HTTPStatus.OK, self.runtime.open_session(body.get("id")))
@@ -222,6 +245,37 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, self.runtime.new_session())
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": f"no such path: {path}"})
+
+    # -- uploads ----------------------------------------------------------
+
+    def _upload(self, path: str) -> None:
+        """Read one raw upload and hand it to the runtime that owns the API."""
+        query = parse_qs(urlsplit(self.path).query)
+        name = (query.get("name") or [""])[0].strip()
+        purpose = (query.get("purpose") or [""])[0].strip() or None
+        # The name becomes the multipart filename, so a path from the browser
+        # must not reach it: only the last component is kept.
+        name = name.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name:
+            raise ValueError("filename is required")
+        limit = MAX_AUDIO_BYTES if path == "/api/transcribe" else MAX_DOCUMENT_BYTES
+        data = self._read_upload(limit)
+        if path == "/api/attach":
+            payload = self.runtime.attach_document(name, data, purpose)
+        elif path == "/api/ocr":
+            payload = self.runtime.recognize_text(name, data, purpose)
+        else:
+            payload = self.runtime.transcribe(name, data)
+        self._json(HTTPStatus.OK, payload)
+
+    def _speech(self, body: dict[str, Any]) -> None:
+        """Synthesize one answer and return the audio itself."""
+        result = self.runtime.speak(body.get("text"))
+        audio = result.get("audio")
+        if not isinstance(audio, (bytes, bytearray)) or not audio:
+            raise ValueError("speech synthesis returned no audio")
+        content_type = "audio/wav" if result.get("format") == "wav" else "audio/L16"
+        self._bytes(bytes(audio), content_type)
 
     # -- requests ---------------------------------------------------------
 
@@ -277,6 +331,25 @@ class WebHandler(BaseHTTPRequestHandler):
         # page with an XSS hole) post to /api/chat and run shell commands here.
         target = _authority(host)
         return target is not None and _authority(origin) == target
+
+    def _read_upload(self, limit: int) -> bytes:
+        """Read one raw request body, refusing anything past ``limit``."""
+        raw_length = self.headers.get("Content-Length") or "0"
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("invalid Content-Length") from exc
+        if length <= 0:
+            raise ValueError("request body is required")
+        if length > limit:
+            # The unread body would be parsed as the next request on this
+            # keep-alive connection, so the refusal closes it.
+            self.close_connection = True
+            raise ValueError(f"upload is too large: {length} bytes exceeds {limit}")
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise ValueError("upload was truncated")
+        return data
 
     def _read_json(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length") or "0"

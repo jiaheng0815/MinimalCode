@@ -23,10 +23,13 @@ class ProviderReply:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
-    # Anthropic thinking blocks must be replayed with their signatures while a
-    # tool call is open. Other protocols ignore this field, and the Chat payload
-    # builder strips it before sending.
     provider_content: list[dict[str, Any]] | None = None
+    # Server-side web tool blocks (search, read links) this turn produced. Only
+    # `read_link` ones are replayed: their `signature` is what restores the page
+    # into a later turn.
+    server_tools: list[dict[str, Any]] = field(default_factory=list)
+    # Sources the answer cites, in the order the provider sent them.
+    citations: list[dict[str, Any]] = field(default_factory=list)
     # Short conversation title the provider generated alongside the answer. Only
     # the first request of a session asks for one, so this is usually None.
     title: str | None = None
@@ -42,6 +45,10 @@ class ProviderReply:
         }
         if self.provider_content:
             message["provider_content"] = self.provider_content
+        if self.server_tools:
+            message["server_tools"] = self.server_tools
+        if self.citations:
+            message["citations"] = self.citations
         if self.tool_calls:
             message["tool_calls"] = [
                 {

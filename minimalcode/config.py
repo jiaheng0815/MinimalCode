@@ -415,6 +415,19 @@ def _validate_safety_check(safety: dict[str, Any], path: Path, key: str) -> None
         )
 
 
+def _validate_server_tools(block: dict[str, Any], path: Path, key: str) -> None:
+    """Validate the DeepSeek server-side web tool switches.
+
+    These tools are declared on the request and executed by the provider, so a
+    typo has to be an error: a silently-off switch is indistinguishable from
+    "the model chose not to search".
+    """
+    for field in ("enabled", "web_search", "read_url"):
+        value = block.get(field)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"{path}: {key}.{field} must be a boolean")
+
+
 def _validate(data: dict[str, Any], path: Path) -> None:
     provider = data.get("provider")
     model = data.get("model")
@@ -676,25 +689,26 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         value = provider.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"{path}: provider {name!r} {key} must be a string")
-    for key in ("web_tools", "vision", "media", "session_title", "safety_check"):
+    for key in (
+        "web_tools",
+        "vision",
+        "media",
+        "server_tools",
+        "session_title",
+        "safety_check",
+    ):
         if key in provider and not isinstance(provider[key], dict):
             raise ConfigError(f"{path}: provider {name!r} {key} must be an object")
-    # The three DeepSeek extensions below are opt-in per provider: they are
-    # rejected by strict OpenAI-compatible servers, so a preset only turns them
-    # on for an endpoint that documents them.
+    # The DeepSeek extensions below are opt-in per provider: they are rejected
+    # by strict OpenAI-compatible servers, so a preset only turns them on for an
+    # endpoint that documents them.
+    if isinstance(provider.get("server_tools"), dict):
+        _validate_server_tools(
+            provider["server_tools"], path, f"providers.{name}.server_tools"
+        )
     if isinstance(provider.get("session_title"), dict):
         _validate_session_title(
             provider["session_title"], path, f"providers.{name}.session_title"
-        )
-    if isinstance(provider.get("safety_check"), dict):
-        _validate_safety_check(
-            provider["safety_check"], path, f"providers.{name}.safety_check"
-        )
-    if "latest_reminder" in provider and not isinstance(
-        provider["latest_reminder"], bool
-    ):
-        raise ConfigError(
-            f"{path}: provider {name!r} latest_reminder must be a boolean"
         )
 
 

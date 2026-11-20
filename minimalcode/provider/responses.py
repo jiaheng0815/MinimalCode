@@ -36,6 +36,8 @@ class ResponsesProtocolMixin:
 
     def _responses_input(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert stored Chat-style messages into Responses input items."""
+        from .server_tools import responses_replay
+
         items: list[dict[str, Any]] = []
         for message in messages:
             if not isinstance(message, dict):
@@ -55,6 +57,10 @@ class ResponsesProtocolMixin:
                     }
                 )
                 continue
+            if role == "assistant":
+                # A read link goes back as the call item it arrived as: its
+                # signature is what restores the page into this turn's context.
+                items.extend(responses_replay(message.get("server_tools")))
             if role == "assistant" and isinstance(message.get("tool_calls"), list):
                 if content:
                     items.append({"role": "assistant", "content": content})
@@ -114,8 +120,9 @@ class ResponsesProtocolMixin:
             "stream": self.stream_enabled,
         }
         response_tools = self._responses_tools(tools)
-        if response_tools:
-            payload["tools"] = response_tools
+        declarations = self._server_tool_declarations() if tools is not None else []
+        if response_tools or declarations:
+            payload["tools"] = [*(response_tools or []), *declarations]
             payload["tool_choice"] = "auto"
         if self.send_reasoning_effort:
             effort = self.thinking.strip().lower()
@@ -320,6 +327,17 @@ class ResponsesProtocolMixin:
                             if "output_index" in event:
                                 output_keys[str(event["output_index"])] = key
                             update_call(item, key)
+                        elif (
+                            isinstance(item, dict)
+                            and item.get("type") == "web_search_call"
+                        ):
+                            # A server-side search or page open; the completed
+                            # item (with sources or a signature) arrives later.
+                            from .server_tools import responses_block
+
+                            live = responses_block(item)
+                            if live is not None:
+                                self._emit_server_tool([live])
                         continue
                     if event_type == "response.function_call_arguments.delta":
                         raw_key = str(
@@ -363,6 +381,14 @@ class ResponsesProtocolMixin:
                             output_keys[str(event["output_index"])] = key
                         if item.get("type") == "function_call":
                             update_call(item, key)
+                        elif item.get("type") == "web_search_call":
+                            # The completed item carries the sources, the opened
+                            # page, or the read link's signature.
+                            from .server_tools import responses_block
+
+                            live = responses_block(item)
+                            if live is not None:
+                                self._emit_server_tool([live])
                         elif item.get("type") == "message":
                             add_fallback_text(content_text(item.get("content")))
                         elif item.get("type") == "reasoning" and not reasoning_parts:
@@ -374,6 +400,15 @@ class ResponsesProtocolMixin:
                             if text and on_thinking is not None:
                                 reasoning_parts.append(text)
                                 on_thinking(text)
+                        continue
+                    if event_type == "response.output_text.annotation.added":
+                        from .server_tools import anthropic_citation_delta
+
+                        # Both protocols carry the same citation shape; the
+                        # normalize helper only reads url/title.
+                        citation = anthropic_citation_delta(event.get("annotation"))
+                        if citation is not None:
+                            self._server_citations.append(citation)
                         continue
                     if event_type in {"response.completed", "response.incomplete"}:
                         completed = event.get("response")
@@ -444,12 +479,29 @@ class ResponsesProtocolMixin:
             # the stream was cut short; reporting a clean stop here would let a
             # truncated answer or half-received tool call through, as with Chat.
             finish_reason = "incomplete"
+        from .server_tools import responses_blocks, responses_citations
+
+        server_blocks = responses_blocks(final_response.get("output"))
+        if server_blocks and not self._server_steps:
+            self._server_steps = server_blocks
+        if not self._server_citations:
+            # Fall back to the completed message's annotations when the server
+            # streamed no annotation events.
+            self._server_citations = responses_citations(
+                [
+                    item
+                    for item in (final_response.get("output") or [])
+                    if isinstance(item, dict) and item.get("type") == "message"
+                ]
+            )
         return ProviderReply(
             content="".join(content_parts),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
             title=self._response_title(final_response),
+            server_tools=server_blocks or self._server_steps,
+            citations=self._server_citations,
         )
 
     def _parse_responses_payload(
@@ -486,12 +538,25 @@ class ResponsesProtocolMixin:
                 )
                 if reasoning:
                     on_thinking(reasoning)
+        from .server_tools import responses_blocks, responses_citations
+
+        server_blocks = responses_blocks(output)
+        if server_blocks:
+            self._emit_server_tool(server_blocks)
         return ProviderReply(
             content=content,
             tool_calls=calls,
             finish_reason=self._response_finish(data, bool(calls)),
             usage=normalize_usage(data.get("usage")),
             title=self._response_title(data),
+            server_tools=server_blocks,
+            citations=responses_citations(
+                [
+                    item
+                    for item in (output if isinstance(output, list) else [])
+                    if isinstance(item, dict) and item.get("type") == "message"
+                ]
+            ),
         )
 
     @staticmethod

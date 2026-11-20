@@ -212,6 +212,11 @@ class WebAgent(Agent):
         if text:
             self._emit("activity", {"text": text})
 
+    def _server_tool(self, block: dict[str, Any]) -> None:
+        """Send one server-side search or read-link block to the page."""
+        if isinstance(block, dict) and block.get("id"):
+            self._emit("tool_block", block)
+
     def _provider_notice(self, message: str) -> None:
         text = strip_ansi(str(message)).strip()
         if text:
@@ -251,9 +256,19 @@ class WebRuntime:
         # A session picked in the sidebar; adopted instead of a new one when the
         # agent is next built.
         self._resume: Session | None = None
-        # Empty means "use the configured effort"; "none" is the composer's
-        # 深度思考 switch turned off.
         self._thinking = ""
+        # The composer's 联网 switch: DeepSeek's server-side web tools are
+        # declared only while it is on, so a turn never searches by surprise.
+        self._web_search = False
+        # "" follows the preset; "high" is the composer's 内容安全 switch.
+        self._safety = ""
+        # Documents queued for the next user message, mirrored from the agent so
+        # the page can render the chips before (and after) the turn runs.
+        self._attachments: list[dict[str, Any]] = []
+        # The live provider and its media client, kept for the capability panel
+        # and for uploads that happen before the first message.
+        self._provider: Any = None
+        self._media: ProviderMediaClient | None = None
         self._shell = detect_shell(settings.get("shell.path"))
         self._clients: list[Any] = []
         # ``_lock`` is held for the whole life of a turn. ``_mutate`` is the
@@ -289,6 +304,25 @@ class WebRuntime:
         if isinstance(preset, str) and preset.strip():
             return preset
         return self._default_model()
+
+    def capabilities(self) -> dict[str, Any]:
+        """Return the DeepSeek-only features this provider may use right now.
+
+        A live provider already answered this at construction; before the first
+        turn the same question is asked of the configured preset, so the composer
+        can hide a switch it cannot honour instead of failing later.
+        """
+        from ..deepseek import features as deepseek_features
+
+        provider = self._provider
+        capability = getattr(provider, "deepseek", None)
+        if isinstance(capability, dict):
+            return dict(capability)
+        try:
+            _, config = self.settings.provider_config(self.provider_name or None)
+        except (ConfigError, ValueError):
+            return dict(deepseek_features({}))
+        return dict(deepseek_features(config))
 
     def describe(self) -> dict[str, Any]:
         """Return everything the settings panel and header need."""
@@ -329,12 +363,32 @@ class WebRuntime:
             "settings_path": str(self.settings.source),
             "busy": self._lock.locked(),
             "thinking": self._thinking != "none",
+            # Everything below is DeepSeek-API-only. `deepseek.available` is
+            # false for any other endpoint, including the deepseek_web protocol.
+            "deepseek": self.capabilities(),
+            "web_search": self._web_search,
+            "safety": (self._safety or self._preset_safety()) == "high",
+            "attachments": list(self._attachments),
             "session": (
                 {"id": session.session_id, "title": session.title}
                 if session is not None
                 else None
             ),
         }
+
+    def _preset_safety(self) -> str:
+        """Return the safety level the provider preset asks for."""
+        provider = self._provider
+        if provider is not None:
+            return str(getattr(provider, "safety_level", "low"))
+        try:
+            _, config = self.settings.provider_config(self.provider_name or None)
+        except (ConfigError, ValueError):
+            return "low"
+        block = config.get("safety_check")
+        if isinstance(block, dict):
+            return str(block.get("level") or "low")
+        return "low"
 
     def sessions(self) -> list[dict[str, Any]]:
         """Past conversations recorded for this workspace, newest first."""
@@ -471,6 +525,143 @@ class WebRuntime:
         self._reload_agent()
         return self.describe()
 
+    def _apply_switches(self, provider: Any) -> None:
+        """Push the composer's DeepSeek switches onto a live provider."""
+        from ..deepseek import server_tools as preset_server_tools
+
+        if not hasattr(provider, "set_server_tools"):
+            # A stand-in provider (tests, a plugin) has no server tools, so the
+            # switches stay inert instead of failing the turn.
+            return
+        provider.set_server_tools(
+            preset_server_tools(provider.config) if self._web_search else ()
+        )
+        if self._safety:
+            provider.set_safety_level(self._safety)
+
+        provider.set_server_tools(
+            preset_server_tools(provider.config) if self._web_search else ()
+        )
+        if self._safety:
+            provider.set_safety_level(self._safety)
+
+    def _require_media(self, capability: str) -> ProviderMediaClient:
+        """Return the media client, building the agent when it does not exist."""
+        self._ensure_agent()
+        client = self._media
+        if client is None or not getattr(client, f"{capability}_enabled", False):
+            reason = self.capabilities().get("reason")
+            raise ConfigError(
+                reason or f"{capability} is not available for this provider"
+            )
+        return client
+
+    @_mutating
+    def set_web_search(self, enabled: object) -> dict[str, Any]:
+        """Turn the composer's 联网 switch on or off."""
+        if not isinstance(enabled, bool):
+            raise ConfigError("web_search must be a boolean")
+        capability = self.capabilities()
+        if enabled and not capability.get("web_search"):
+            raise ConfigError(
+                capability.get("reason") or "web search is not available here"
+            )
+        self._web_search = enabled
+        if self._provider is not None:
+            self._apply_switches(self._provider)
+        return self.describe()
+
+    @_mutating
+    def set_safety(self, enabled: object) -> dict[str, Any]:
+        """Turn the composer's 内容安全 switch on or off."""
+        if not isinstance(enabled, bool):
+            raise ConfigError("safety must be a boolean")
+        capability = self.capabilities()
+        if enabled and not capability.get("available"):
+            raise ConfigError(
+                capability.get("reason") or "content safety is not available here"
+            )
+        self._safety = "high" if enabled else "low"
+        if self._provider is not None:
+            self._apply_switches(self._provider)
+        return self.describe()
+
+    @_mutating
+    def attach_document(
+        self,
+        filename: str,
+        data: bytes,
+        purpose: object = None,
+    ) -> dict[str, Any]:
+        """Upload and parse a document, queuing it for the next message."""
+        client = self._require_media("documents")
+        if purpose is not None and not isinstance(purpose, str):
+            raise ConfigError("purpose must be a string")
+        result = client.upload(filename, data, purpose)
+        agent = self._agent
+        if agent is not None:
+            agent.pending_attachments.append(
+                {
+                    "file_id": result["file_id"],
+                    "filename": result["filename"],
+                    "purpose": result["purpose"],
+                }
+            )
+            self._attachments = list(agent.pending_attachments)
+        return {"attachments": list(self._attachments), "state": self.describe()}
+
+    @_mutating
+    def detach_document(self, file_id: object) -> dict[str, Any]:
+        """Drop one queued document before the next message is sent."""
+        if not isinstance(file_id, str) or not file_id:
+            raise ConfigError("file id is required")
+        agent = self._agent
+        if agent is not None:
+            agent.pending_attachments = [
+                item
+                for item in agent.pending_attachments
+                if item.get("file_id") != file_id
+            ]
+            self._attachments = list(agent.pending_attachments)
+        return {"attachments": list(self._attachments), "state": self.describe()}
+
+    @_mutating
+    def recognize_text(
+        self, filename: str, data: bytes, purpose: object = None
+    ) -> dict[str, Any]:
+        """OCR one uploaded file; the text is inserted into the composer."""
+        client = self._require_media("ocr")
+        if purpose is not None and not isinstance(purpose, str):
+            raise ConfigError("purpose must be a string")
+        result = client.ocr(filename, data, purpose)
+        return {
+            "text": str(result.get("text") or ""),
+            "pages": int(result.get("page_count") or 0),
+            "truncated": bool(result.get("truncated")),
+        }
+
+    @_mutating
+    def transcribe(self, filename: str, data: bytes) -> dict[str, Any]:
+        """Transcribe one recorded clip (16-bit PCM WAV or Ogg Opus)."""
+        client = self._require_media("asr")
+        result = client.transcribe(filename, data)
+        return {
+            "text": str(result.get("text") or ""),
+            "duration_ms": result.get("duration_ms"),
+        }
+
+    @_mutating
+    def speak(self, text: object) -> dict[str, Any]:
+        """Synthesize one answer as audio for the page's player."""
+        client = self._require_media("tts")
+        if not isinstance(text, str) or not text.strip():
+            raise ConfigError("text is required")
+        result = client.speech(text)
+        audio = result.get("audio")
+        if not isinstance(audio, (bytes, bytearray)) or not audio:
+            raise ConfigError("speech synthesis returned no audio")
+        return {"audio": bytes(audio), "format": result.get("format") or "wav"}
+
     @_mutating
     def apply_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Persist the provider/format/model/API key chosen in the page.
@@ -594,6 +785,15 @@ class WebRuntime:
                 if role is None or not isinstance(content, str) or not content:
                     continue
                 messages.append({"role": role, "content": content})
+                if role == "assistant":
+                    # Search/read-link cards and their citations are display
+                    # only, but a reload must rebuild them from the transcript.
+                    blocks = message.get("server_tools")
+                    if isinstance(blocks, list) and blocks:
+                        messages[-1]["server_tools"] = blocks
+                    citations = message.get("citations")
+                    if isinstance(citations, list) and citations:
+                        messages[-1]["citations"] = citations
             try:
                 recorded = self.reasoning.recall(session.session_id, messages)
             except (ConfigError, OSError, ValueError):
@@ -650,6 +850,10 @@ class WebRuntime:
                 emit("done", self._done_payload(agent, result))
         finally:
             self._sink = None
+            # The turn consumed (or kept) whatever was queued; the page renders
+            # the chips from this mirror, so it has to follow the agent.
+            if self._agent is not None:
+                self._attachments = list(self._agent.pending_attachments)
             self._lock.release()
 
     def _remember_reasoning(
@@ -726,6 +930,11 @@ class WebRuntime:
             read_only=self.read_only,
         )
         clients = [web_client, vision_client, media_client]
+        # A composer switch turned on before the first turn has to reach the
+        # provider that will carry it.
+        self._apply_switches(provider)
+        self._provider = provider
+        self._media = media_client if media_client.enabled else None
         return provider, name, model, clients, tools
 
     def _ensure_agent(self) -> WebAgent:
@@ -805,6 +1014,11 @@ class WebRuntime:
         self._session = None
         self._resume = None
         clients, self._clients = self._clients, []
+        # The queued uploads belong to the agent that was just dropped: their
+        # `file_id`s are still valid, but nothing would attach them now.
+        self._attachments = []
+        self._provider = None
+        self._media = None
         if agent is None:
             return
         provider = agent.provider

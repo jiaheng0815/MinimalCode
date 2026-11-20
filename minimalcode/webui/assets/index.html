@@ -66,6 +66,7 @@
     </div>
 
     <div class="chat-input home" id="composer">
+      <div class="attachment-row" id="attachment-row" hidden></div>
       <div class="textarea-wrapper">
         <textarea
           id="prompt"
@@ -83,6 +84,18 @@
             </span>
             <span class="toggle-label">深度思考</span>
           </button>
+          <button type="button" class="toggle" id="web-search-toggle" title="让 DeepSeek 在回答前联网搜索、打开网页并阅读链接" hidden>
+            <span class="toggle-icon">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c3.4 3.6 3.4 7.6 0 11.2M8 2.4c-3.4 3.6-3.4 7.6 0 11.2"/></svg>
+            </span>
+            <span class="toggle-label">联网搜索</span>
+          </button>
+          <button type="button" class="toggle" id="safety-toggle" title="开启服务端内容安全审核，命中风险时拒答" hidden>
+            <span class="toggle-icon">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9 3.2 4v3.9c0 2.9 1.9 5 4.8 6.2 2.9-1.2 4.8-3.3 4.8-6.2V4Z"/><path d="m5.9 8 1.5 1.5 2.7-2.8"/></svg>
+            </span>
+            <span class="toggle-label">内容安全</span>
+          </button>
           <button type="button" class="toggle" id="workspace-toggle" title="选择本地文件夹">
             <span class="toggle-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.4c0-.6.5-1.1 1.1-1.1h3l1.2 1.4h5c.6 0 1.1.5 1.1 1.1v5.8c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1Z"/></svg>
@@ -91,11 +104,22 @@
           </button>
         </div>
         <div class="right">
+          <button type="button" class="composer-button" id="ocr-button" title="识别图片或 PDF 里的文字，填入输入框" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.4 5.2V3.4c0-.6.5-1 1-1h1.8M10.8 2.4h1.8c.6 0 1 .5 1 1v1.8M13.6 10.8v1.8c0 .6-.5 1-1 1h-1.8M5.2 13.6H3.4c-.6 0-1-.5-1-1v-1.8"/><path d="M6 6.2h4M6 9.8h4"/></svg>
+          </button>
+          <button type="button" class="composer-button" id="attach-button" title="上传文档（PDF、Word、PPT、图片）" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.6 5.1 6.3 9.4a1.4 1.4 0 0 0 2 2l4.3-4.3a2.6 2.6 0 0 0-3.7-3.7L4.6 7.7a3.8 3.8 0 0 0 5.4 5.4l3.2-3.2"/></svg>
+          </button>
+          <button type="button" class="composer-button" id="mic-button" title="语音输入：录音后自动转写" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="2.2" width="4" height="7" rx="2"/><path d="M3.8 7.6a4.2 4.2 0 0 0 8.4 0M8 11.8v2"/></svg>
+          </button>
           <button type="button" class="send-button disabled" id="send" title="发送" aria-label="发送">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.6M4 7.4 8 3.4l4 4"/></svg>
           </button>
         </div>
       </div>
+      <input type="file" id="attach-input" hidden />
+    </div>
     </div>
 
     <div class="modal-overlay" id="settings-overlay" hidden>

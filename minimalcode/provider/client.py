@@ -140,10 +140,24 @@ class OpenAICompatibleProvider(
             # Server-side input/output risk control; a refusal ends the turn.
             extensions["safety_check"] = {"level": "high"}
         self.extensions = extensions
+        # DeepSeek's server-side web tools, document parsing, and the safety
+        # review exist only on the documented API endpoint, so one predicate
+        # decides and nothing else re-derives the answer from a provider name.
+        from ..deepseek import features as deepseek_features
+        from ..deepseek import server_tools as deepseek_server_tools
+
+        self.deepseek = deepseek_features(config)
+        self.server_tools = deepseek_server_tools(config)
+        self._on_server_tool: Callable[[dict[str, Any]], None] | None = None
+        self._server_steps: list[dict[str, Any]] = []
+        self._server_citations: list[dict[str, Any]] = []
+        # Raw Messages blocks before they are merged into calls plus results.
+        self._server_blocks_raw: list[dict[str, Any]] = []
+        self._server_citations: list[dict[str, Any]] = []
+        self.server_tool_events = True
         # Optional sink for retry notices; the agent points this at its activity
         # stream so ten silent retries do not look like a hang.
         self.notify: Callable[[str], None] | None = None
-
         api_key = provider_api_key(config)
         key_env = config.get("api_key_env")
         if not api_key and key_env and config.get("require_api_key", True):
@@ -180,6 +194,9 @@ class OpenAICompatibleProvider(
                 headers.pop("Authorization", None)
             if "anthropic-version" not in custom_names:
                 headers["anthropic-version"] = "2023-06-01"
+            if self.deepseek["documents"] and "anthropic-beta" not in custom_names:
+                # Messages only accepts a `file_id` document block on this beta.
+                headers["anthropic-beta"] = "files-api-2025-04-14"
         self.headers = headers
         self._client = build_client(
             base_url=self.base_url,
@@ -207,6 +224,56 @@ class OpenAICompatibleProvider(
         self.extensions.pop("title", None)
         if enabled and self.title_enabled:
             self.extensions["title"] = {"enabled": True}
+
+    def set_safety_level(self, level: str) -> None:
+        """Turn the server-side content review on (``high``) or off (``low``).
+
+        ``low`` is the API default, so the extension is dropped instead of being
+        sent: an unknown key on a strict gateway is a rejected request, and the
+        live switch has to work without rebuilding the provider.
+        """
+        if level not in {"low", "high"}:
+            raise ProviderError(f"invalid safety level {level!r}")
+        self.safety_level = level
+        self.extensions.pop("safety_check", None)
+        if level == "high" and self.deepseek["available"]:
+            self.extensions["safety_check"] = {"level": "high"}
+
+    def set_server_tools(self, names: tuple[str, ...] | list[str] | None) -> None:
+        """Enable the server-side web tools for the next turns.
+
+        Refused when the endpoint is not the DeepSeek API: the block would be
+        rejected by any other server, so failing here keeps the reason next to
+        the switch that caused it.
+        """
+        from ..deepseek import SERVER_TOOL_NAMES
+
+        if names is None:
+            names = ()
+        chosen = tuple(dict.fromkeys(str(name) for name in names))
+        unknown = [name for name in chosen if name not in SERVER_TOOL_NAMES]
+        if unknown:
+            raise ProviderError(f"unknown server tool {unknown[0]!r}")
+        if chosen and not self.deepseek["available"]:
+            raise ProviderError(self.deepseek["reason"] or "server tools unavailable")
+        self.server_tools = chosen
+
+    def _server_tool_declarations(self) -> list[dict[str, Any]]:
+        """Return this protocol's request entries for the enabled server tools."""
+        if not self.server_tools:
+            return []
+        if self.protocol == "anthropic_messages":
+            return [{"type": name, "name": name} for name in self.server_tools]
+        return [{"type": name} for name in self.server_tools]
+
+    def _emit_server_tool(self, blocks: Any) -> None:
+        """Report server-tool blocks to the live display, if one is attached."""
+        sink = self._on_server_tool
+        if sink is None or not isinstance(blocks, list):
+            return
+        for item in blocks:
+            if isinstance(item, dict) and item.get("id"):
+                sink(item)
 
     def _endpoint(self) -> str:
         """Return the full protocol endpoint, accepting a full URL as-is.
@@ -394,11 +461,29 @@ class OpenAICompatibleProvider(
         tools: list[dict[str, Any]] | None = None,
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        on_server_tool: Callable[[dict[str, Any]], None] | None = None,
     ) -> ProviderReply:
         """Send one conversation turn using the configured wire protocol."""
         messages = self._document_messages(messages)
         messages = self._wire_messages(messages)
         tools = self._wire_tools(tools)
+        self._on_server_tool = on_server_tool if tools is not None else None
+        self._server_steps = []
+        self._server_citations = []
+        try:
+            return self._stream_chat(messages, tools, on_text, on_thinking)
+        finally:
+            self._on_server_tool = None
+
+    def _stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ProviderReply:
+        """Dispatch one turn to the protocol that owns the wire format."""
+        self._server_blocks_raw = []
         if self.protocol == "anthropic_messages":
             payload = self._anthropic_payload(messages, tools)
             if self.stream_enabled:

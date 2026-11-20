@@ -1,5 +1,30 @@
 # 更新日志
 
+## 1.9.0 - 2026-12-03
+
+网页端接上 DeepSeek 官方 API 的整套 Chatbot 能力：联网搜索、深度思考搜索、阅读链接、文件解析、内容安全、语音输入与朗读、OCR，并且只在 `api.deepseek.com` 上可用——DeepSeek 网页版协议同样不行。
+
+### 新增
+
+- 联网工具（服务端工具）：provider 预设里新增 `server_tools`（`enabled`、`web_search`、`read_url`），声明后由服务端执行，客户端不跑工具。三个协议都按各自格式声明：Chat 与 Responses 用 `{"type": "deepseek_web_search"}`，Messages 额外带 `name`。关闭思考是联网搜索，开启思考即深度思考搜索（`search` / `open_page` / `find_in_page`），`deepseek_read_url` 负责阅读用户消息里的链接。
+- 响应块解析：新增 `minimalcode/provider/server_tools.py`，把三个协议的 `server_tool_use`、`web_search_tool_result`、`web_fetch_tool_result`、`server_tool_calls`、`web_search_call`、`url_citation` 归一成同一种块（`kind`、`action`、`sources`、`page`、`error`、`signature`），`ProviderReply` 新增 `server_tools` 与 `citations`。流式时按 `server_tool_event`、`content_block_start`、`response.output_item.*` 逐步上报，页面按调用 id 合并成一张卡片。
+- 多轮还原：只有 `read_link` 会被回传——网页正文加密在 `signature` 里，丢掉它下一轮就想不起这个网页。Chat 用 `server_tool_calls`，Messages 用 `server_tool_use` + `web_fetch_tool_result`，Responses 用 `web_search_call` item。
+- 网页：输入框新增「联网搜索」「内容安全」开关，`POST /api/web-search`、`POST /api/safety` 立即作用到当前 provider；联网关闭时不声明服务端工具，`complete()`（摘要、压缩）永不联网。
+- 网页：文件解析。`POST /api/attach`（原始字节 + `?name=`）走 Files API，返回的 `file_id` 排进下一条消息，输入框上方显示可移除的附件条；`POST /api/detach` 取消。
+- 网页：`POST /api/ocr` 识别 PDF / Office / 图片里的文字并填进输入框，`POST /api/transcribe` 转写录音（前端用 `ScriptProcessor` 采 16 kHz 单声道并自己拼 16 位 PCM WAV，不引入任何前端依赖），`POST /api/speech` 把回答合成为语音播放。
+- Messages 协议引用 `file_id` 时会带上 `anthropic-beta: files-api-2025-04-14`——此前 `deepseek-anthropic` 预设引用了文档却没带这个头，请求会被拒。
+- `deepseek-anthropic` 预设补齐 `web_tools`、`media`、`server_tools`，与 `deepseek` 预设一致。
+
+### 修复
+
+- 网页：`_read_json` 只允许 1 MiB，无法上传文档或录音；上传路由改用独立的 `_read_upload()` 与各自的额度（文档 100 MiB、音频 8 MiB），并在超限时关闭连接，避免未读的请求体被当成下一个请求。
+- 网页：`api.deepseek.com` 之外（含 `deepseek_web` 协议）不显示、也不接受这些开关，提示里直接给出原因；`set_server_tools()` 在非 DeepSeek 接入点上直接报错，而不是发一个注定 400 的请求。
+- 会话：`server_tools` 与 `citations` 作为展示字段存进 transcript，`GET /api/history` 会带回它们，刷新后搜索卡片与来源列表不会消失；重放时它们不会进入请求体（Chat 由 `_chat_messages` 过滤）。
+
+### 变更
+
+- 版本号升级到 1.9.0。新增配置键 `providers.<name>.server_tools`（含 `enabled` / `web_search` / `read_url`，写错类型会报错并指出配置文件），新增网页路由 `/api/attach`、`/api/detach`、`/api/ocr`、`/api/transcribe`、`/api/speech`、`/api/web-search`、`/api/safety`，新增模块 `minimalcode/deepseek.py` 与 `minimalcode/provider/server_tools.py`。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+
 ## 1.8.1 - 2026-11-19
 
 网页刷新的思考过程不会再消失，而且可以自由折叠/展开；同一轮审查里找到的会话、压缩与网页运行时缺陷一并修掉。

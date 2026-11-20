@@ -95,6 +95,11 @@
         "min_rerank_score": 0,
         "headers": {}
       },
+      "server_tools": {
+        "enabled": true,
+        "web_search": true,
+        "read_url": true
+      },
       "vision": {
         "enabled": true,
         "base_url": "https://api.deepseek.com/v1",
@@ -142,6 +147,41 @@
       "max_tokens": 8192,
       "headers": {},
       "extra_body": {},
+      "web_tools": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com/v1/tools",
+        "search_path": "search",
+        "fetch_path": "fetch",
+        "timeout_seconds": 60,
+        "default_count": 10,
+        "max_count": 50,
+        "max_content_chars": 120000,
+        "default_need_content": false,
+        "min_rerank_score": 0,
+        "headers": {}
+      },
+      "media": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com",
+        "ocr_path": "v1/tools/ocr",
+        "asr_path": "v1/tools/asr",
+        "tts_path": "v1/tools/tts",
+        "files_path": "files",
+        "timeout_seconds": 180,
+        "max_upload_bytes": 104857600,
+        "max_audio_bytes": 8388608,
+        "max_pages": 1000,
+        "max_chars": 120000,
+        "voice_id": "stella",
+        "format": "wav",
+        "purpose": "text_recognition",
+        "headers": {}
+      },
+      "server_tools": {
+        "enabled": true,
+        "web_search": true,
+        "read_url": true
+      },
       "session_title": {
         "enabled": true
       },

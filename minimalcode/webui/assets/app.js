@@ -431,8 +431,12 @@ function createAssistantMessage() {
   const copyButton = el("button", "footer-button");
   copyButton.type = "button";
   copyButton.textContent = "复制";
+  const speakButton = el("button", "footer-button");
+  speakButton.type = "button";
+  speakButton.textContent = "朗读";
+  speakButton.title = "把这条回答合成为语音";
   const usage = el("div", "footer-usage");
-  footer.append(copyButton, usage);
+  footer.append(copyButton, speakButton, usage);
 
   article.append(rounds, waiting, notice, footer);
   dom.messages.append(article);
@@ -444,14 +448,17 @@ function createAssistantMessage() {
     waiting,
     notice,
     copyButton,
+    speakButton,
     usage,
     current: null,
     text: "",
     frame: 0,
     pending: new Map(),
   };
+  speakButton.hidden = !(app.state && app.state.deepseek && app.state.deepseek.tts);
   startRound(turn);
   copyButton.addEventListener("click", () => copyText(turn.text || ""));
+  speakButton.addEventListener("click", () => speakAnswer(speakButton, turn.text || ""));
   return turn;
 }
 
@@ -520,6 +527,13 @@ function applyEvent(event, payload, turn) {
     round.reply.hidden = false;
     round.thinking += text;
     schedulePaint(turn, round.thinkMarkdown, () => round.thinking);
+  } else if (event === "tool_block") {
+    if (!payload || !payload.id) return;
+    const round = turn.current || startRound(turn);
+    round.tools.hidden = false;
+    turn.waiting.remove();
+    renderToolBlock(round.tools, payload);
+    scrollToBottom();
   } else if (event === "activity" || event === "notice") {
     const round = turn.current || startRound(turn);
     round.tools.hidden = false;
@@ -576,6 +590,288 @@ function parseFrame(frame) {
     return { event, payload: JSON.parse(data.join("\n")) };
   } catch {
     return null;
+  }
+}
+
+/* ------------------------------------------------- DeepSeek 专属能力 */
+
+const TOOL_KIND_LABELS = {
+  search: "联网搜索",
+  deep_search: "深度思考搜索",
+  read_link: "阅读链接",
+  image_search: "图片搜索",
+  deep_image_search: "图片搜索",
+};
+
+function showToggle(button, visible, reason) {
+  // 服务端决定能不能用：非 DeepSeek API（含网页版协议）连按钮都不该出现。
+  if (!button) return;
+  button.hidden = !visible;
+  if (!visible) button.title = reason || "当前接入方式不支持这个功能";
+}
+
+function renderAttachments() {
+  const row = dom.attachmentRow;
+  if (!row) return;
+  const items = (app.state && app.state.attachments) || [];
+  row.replaceChildren();
+  row.hidden = !items.length;
+  for (const item of items) {
+    const chip = el("span", "attachment-chip");
+    const name = el("span", "attachment-chip-name");
+    name.textContent = item.filename || item.file_id;
+    name.title = name.textContent;
+    const remove = el("button", "attachment-chip-remove");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = "移除这个文件";
+    remove.addEventListener("click", () => detachFile(item.file_id));
+    chip.append(name, remove);
+    row.append(chip);
+  }
+}
+
+async function detachFile(fileId) {
+  if (app.streaming) return;
+  try {
+    const payload = await api("/api/detach", { file_id: fileId });
+    if (payload.state) renderState(payload.state);
+  } catch (error) {
+    toast(`移除失败：${error.message}`);
+  }
+}
+
+function toolBlockTitle(block) {
+  const action = block.action || {};
+  const label = TOOL_KIND_LABELS[block.kind] || "联网";
+  const detail = (action.queries || []).join(" ") || action.url || action.pattern || "";
+  return detail ? `${label}：${detail}` : label;
+}
+
+function renderToolBlock(container, block) {
+  // 同一个调用会先来一次 call_started、再来一次 call_completed，按 id 合并成
+  // 一张卡片，而不是两张。
+  let card = container.querySelector(`[data-block-id="${CSS.escape(block.id)}"]`);
+  if (!card) {
+    card = el("div", "tool-card");
+    card.dataset.blockId = block.id;
+    container.append(card);
+  }
+  card.replaceChildren();
+  const head = el("div", "tool-card-head");
+  const dot = el("span", "tool-dot");
+  if (block.status === "in_progress") dot.classList.add("inactive");
+  const title = el("span", "tool-card-title");
+  title.textContent = toolBlockTitle(block);
+  title.title = title.textContent;
+  head.append(dot, title);
+  card.append(head);
+  if (Array.isArray(block.sources) && block.sources.length) {
+    const list = el("ul", "tool-card-sources");
+    for (const source of block.sources.slice(0, 6)) {
+      const item = el("li");
+      const link = el("a");
+      link.href = source.url;
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      link.textContent = source.title || source.url;
+      link.title = source.site_name ? `${source.site_name} · ${source.url}` : source.url;
+      item.append(link);
+      list.append(item);
+    }
+    card.append(list);
+  }
+  if (block.error) {
+    const error = el("div", "tool-card-error");
+    error.textContent = `读取失败：${block.error}`;
+    card.append(error);
+  }
+  return card;
+}
+
+function renderCitations(container, citations) {
+  const items = (Array.isArray(citations) ? citations : []).filter(
+    (item) => item && item.url
+  );
+  if (!items.length) return;
+  const list = el("ul", "source-list");
+  const seen = new Set();
+  for (const citation of items) {
+    if (seen.has(citation.url)) continue;
+    seen.add(citation.url);
+    const item = el("li");
+    const link = el("a");
+    link.href = citation.url;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    link.textContent = citation.title || citation.url;
+    item.append(document.createTextNode("来源："), link);
+    list.append(item);
+  }
+  container.append(list);
+}
+
+async function uploadFile(file, mode) {
+  const query = `?name=${encodeURIComponent(file.name)}`;
+  try {
+    if (mode === "ocr") {
+      toast("正在识别文字…");
+      const response = await fetch(`/api/ocr${query}`, {
+        method: "POST",
+        body: file,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `${response.status}`);
+      const text = (payload.text || "").trim();
+      if (!text) {
+        toast("没有识别到文字");
+        return;
+      }
+      dom.prompt.value = dom.prompt.value ? `${dom.prompt.value}\n${text}` : text;
+      autoGrow();
+      dom.prompt.focus();
+      toast(`已识别 ${payload.pages || 0} 页文字`);
+      return;
+    }
+    toast(`正在上传「${file.name}」…`);
+    const response = await fetch(`/api/attach${query}`, {
+      method: "POST",
+      body: file,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `${response.status}`);
+    if (payload.state) renderState(payload.state);
+    toast("文件已上传，会随下一条消息一起发送");
+  } catch (error) {
+    toast(`上传失败：${error.message}`);
+  }
+}
+
+function encodeWav(chunks, sampleRate) {
+  // ASR 只接受 16 位 PCM WAV 或 Ogg Opus，浏览器录到的是 WebM，所以这里自己
+  // 拼一个 16 位单声道 WAV，不引入任何前端依赖。
+  let length = 0;
+  for (const chunk of chunks) length += chunk.length;
+  if (!length) return new Uint8Array(0);
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  const writeText = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + length * 2, true);
+  writeText(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, length * 2, true);
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (let index = 0; index < chunk.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, chunk[index]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Uint8Array(buffer);
+}
+
+let voiceRecorder = null;
+
+async function toggleRecording() {
+  if (voiceRecorder) {
+    voiceRecorder.stop();
+    return;
+  }
+  if (app.streaming) return;
+  if (!navigator.mediaDevices || !window.AudioContext) {
+    toast("这个浏览器不支持录音");
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    toast(`无法打开麦克风：${error.message}`);
+    return;
+  }
+  const context = new AudioContext({ sampleRate: 16000 });
+  const rate = context.sampleRate;
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  processor.onaudioprocess = (event) => {
+    chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  source.connect(processor);
+  processor.connect(context.destination);
+  dom.micButton.classList.add("recording");
+  toast("正在录音，再点一次结束");
+
+  const finish = async () => {
+    processor.disconnect();
+    source.disconnect();
+    for (const track of stream.getTracks()) track.stop();
+    await context.close();
+    dom.micButton.classList.remove("recording");
+    voiceRecorder = null;
+    const wav = encodeWav(chunks, rate);
+    if (!wav.byteLength) return;
+    toast("正在转写…");
+    try {
+      const response = await fetch("/api/transcribe?name=voice.wav", {
+        method: "POST",
+        body: wav,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `${response.status}`);
+      const text = (payload.text || "").trim();
+      if (!text) {
+        toast("没有识别到语音");
+        return;
+      }
+      dom.prompt.value = dom.prompt.value ? `${dom.prompt.value}${text}` : text;
+      autoGrow();
+      dom.prompt.focus();
+    } catch (error) {
+      toast(`转写失败：${error.message}`);
+    }
+  };
+  voiceRecorder = {
+    stop: () => {
+      if (voiceRecorder) finish();
+    },
+  };
+}
+
+async function speakAnswer(button, text) {
+  if (!text || !text.trim() || button.dataset.busy === "true") return;
+  button.dataset.busy = "true";
+  try {
+    const response = await fetch("/api/speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `${response.status}`);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const audio = new Audio(url);
+    audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+    await audio.play();
+  } catch (error) {
+    toast(`朗读失败：${error.message}`);
+  } finally {
+    button.dataset.busy = "false";
   }
 }
 
@@ -804,6 +1100,16 @@ function renderState(state) {
   document.title = state.session && state.session.title ? `${state.session.title} · MinimalCode` : "MinimalCode";
   dom.viewTitle.textContent = (state.session && state.session.title) || "新对话";
   dom.thinkingToggle.classList.toggle("selected", Boolean(state.thinking));
+  // DeepSeek 专属能力只在对的接入点出现；其余情况按钮直接隐藏，悬停提示原因。
+  const deepseek = state.deepseek || {};
+  showToggle(dom.webSearchToggle, Boolean(deepseek.web_search), deepseek.reason);
+  showToggle(dom.safetyToggle, Boolean(deepseek.available), deepseek.reason);
+  showToggle(dom.attachButton, Boolean(deepseek.documents), deepseek.reason);
+  showToggle(dom.ocrButton, Boolean(deepseek.ocr), deepseek.reason);
+  showToggle(dom.micButton, Boolean(deepseek.asr), deepseek.reason);
+  dom.webSearchToggle.classList.toggle("selected", Boolean(state.web_search));
+  dom.safetyToggle.classList.toggle("selected", Boolean(state.safety));
+  renderAttachments();
   updateWorkspaceLabel();
   updateSendState();
 }
@@ -828,6 +1134,12 @@ function renderConversation() {
     turn.text = message.content;
     turn.current.text = message.content;
     paintMarkdown(turn.current.content, message.content);
+    for (const block of Array.isArray(message.server_tools) ? message.server_tools : []) {
+      if (!block || !block.id) continue;
+      renderToolBlock(turn.current.tools, block);
+      turn.current.tools.hidden = false;
+    }
+    renderCitations(turn.current.element, message.citations);
   }
   if (app.messages.length) {
     showSessionView();
@@ -1257,6 +1569,13 @@ function cacheDom() {
   dom.composer = $("composer");
   dom.prompt = $("prompt");
   dom.thinkingToggle = $("thinking-toggle");
+  dom.webSearchToggle = $("web-search-toggle");
+  dom.safetyToggle = $("safety-toggle");
+  dom.attachButton = $("attach-button");
+  dom.ocrButton = $("ocr-button");
+  dom.micButton = $("mic-button");
+  dom.attachInput = $("attach-input");
+  dom.attachmentRow = $("attachment-row");
   dom.workspaceToggle = $("workspace-toggle");
   dom.workspaceLabel = $("workspace-label");
   dom.send = $("send");
@@ -1342,6 +1661,39 @@ function bindEvents() {
     }
   });
   dom.workspaceToggle.addEventListener("click", showFolderDialog);
+  dom.webSearchToggle.addEventListener("click", async () => {
+    if (app.streaming) return;
+    const next = !dom.webSearchToggle.classList.contains("selected");
+    try {
+      renderState(await api("/api/web-search", { enabled: next }));
+    } catch (error) {
+      toast(`切换失败：${error.message}`);
+    }
+  });
+  dom.safetyToggle.addEventListener("click", async () => {
+    if (app.streaming) return;
+    const next = !dom.safetyToggle.classList.contains("selected");
+    try {
+      renderState(await api("/api/safety", { enabled: next }));
+    } catch (error) {
+      toast(`切换失败：${error.message}`);
+    }
+  });
+  for (const button of [dom.attachButton, dom.ocrButton]) {
+    button.addEventListener("click", () => {
+      if (app.streaming) return;
+      app.uploadMode = button === dom.ocrButton ? "ocr" : "attach";
+      dom.attachInput.value = "";
+      dom.attachInput.click();
+    });
+  }
+  dom.attachInput.addEventListener("change", async () => {
+    const file = dom.attachInput.files && dom.attachInput.files[0];
+    if (!file) return;
+    await uploadFile(file, app.uploadMode || "attach");
+    dom.attachInput.value = "";
+  });
+  dom.micButton.addEventListener("click", toggleRecording);
 
   for (const button of dom.settingsNav.querySelectorAll(".nav-item")) {
     button.addEventListener("click", () => switchPanel(button.dataset.panel));

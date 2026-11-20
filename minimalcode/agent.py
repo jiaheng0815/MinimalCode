@@ -558,6 +558,18 @@ class Agent:
             )
             self.error_output.flush()
 
+    def _server_tool(self, block: dict[str, Any]) -> None:
+        """Report one server-side web tool block as an activity line.
+
+        The model searches and reads pages on the provider's servers, so the
+        only thing this turn can show is what was asked for and what came back.
+        """
+        from .provider.server_tools import activity
+
+        text = activity(block)
+        if text:
+            self._activity(f"  {text}")
+
     def _provider_notice(self, message: str) -> None:
         """Show a provider retry in the terminal and on the desktop pet.
 
@@ -824,12 +836,17 @@ class Agent:
             messages = self._messages()
             self._prompt_session_count = len(self.session.messages)
             try:
-                reply = self.provider.stream_chat(
-                    messages,
-                    tools=self.tool_schemas,
-                    on_text=self._write_delta,
-                    on_thinking=self._write_thinking,
-                )
+                # `on_server_tool` is only passed to a provider that reports
+                # server-side web tool blocks; a stand-in provider (tests, a
+                # third-party plugin) keeps its own signature.
+                stream_kwargs: dict[str, Any] = {
+                    "tools": self.tool_schemas,
+                    "on_text": self._write_delta,
+                    "on_thinking": self._write_thinking,
+                }
+                if getattr(self.provider, "server_tool_events", False):
+                    stream_kwargs["on_server_tool"] = self._server_tool
+                reply = self.provider.stream_chat(messages, **stream_kwargs)
             finally:
                 self._finish_delta()
             if reply.title:
