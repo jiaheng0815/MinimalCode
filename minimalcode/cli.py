@@ -119,7 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         "--sandbox",
         dest="sandbox_enabled",
         action=argparse.BooleanOptionalAction,
-        default=None,
+        default=False,
         help=(
             "Enable the sandbox execution layer (off by default). The workspace "
             "and sensitive-file boundary applies either way; any --sandbox-* "
