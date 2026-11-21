@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.11.1.
+Applies to MinimalCode 1.11.2.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -348,7 +348,7 @@ The 0.6 → 0.7 migration table is in [compatibility.md](compatibility.md).
 - MCP servers start concurrently (at most four at a time), and an empty `mcp.servers` object starts no thread or process at all. A failed server costs one timeout window at startup and nothing afterwards, because its tools are simply absent from the advertised list.
 - MCP results are converted to text before they reach the transcript: image and audio blocks report their MIME type and payload size instead of inlining base64, and the whole result is clipped by head and tail under `mcp.max_output_chars`.
 - Untrusted model, tool, and error text is stripped of terminal control sequences before display.
-- Interactive input is read line by line: bracketed paste keeps a pasted block in one message, buffered input (`msvcrt.kbhit` on Windows, `select` elsewhere) joins the lines of a terminal that does not support it, and a trailing `\` continues the message. Non-interactive prompts and piped stdin are untouched.
+- Interactive input uses one editable multiline buffer. Ordinary `CR` submits, `LF` and recognized modified-Enter sequences insert a newline, bracketed paste keeps one block, and a short queue probe joins terminal paste that omits the markers. `CRLF` is consumed as one newline. Non-interactive prompts and piped stdin keep the physical-line reader.
 - Session writes are append-only, with one exception: a compaction that would leave the file more than twice the size of the state it keeps rewrites it atomically (temp file, `fsync`, `os.replace`), and configuration is otherwise the only atomically rewritten file.
 - The renderer treats incomplete inline markers as active styles, emits text without waiting for a newline, and keeps redirected and JSON output as raw Markdown.
 - The web, vision, and media clients are built by `httpclient.build_client`

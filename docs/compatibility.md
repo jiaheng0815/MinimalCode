@@ -1,9 +1,9 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.11.1. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.11.2. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1, 1.11.0 and 1.11.1 added no further
+1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1, 1.11.0, 1.11.1 and 1.11.2 added no further
 breaking import changes (`minimalcode.httpclient`, `minimalcode.clipboard`,
 `minimalcode.mcp`, `minimalcode.media`, and `minimalcode.webui` are new
 modules, not renamed ones).
@@ -13,7 +13,7 @@ else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
 format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1,
-1.11.0 or 1.11.1. Every change is additive: new tools join `tools.allow` and the
+1.11.0, 1.11.1 or 1.11.2. Every change is additive: new tools join `tools.allow` and the
 read-only set, every new settings block is optional, and a `settings.json`
 written for 1.6.0 keeps working unchanged. The 1.8.0 web UI drives the same agent
 and the same JSONL files, so a conversation started in the browser is the file
@@ -48,6 +48,22 @@ again enable `web_tools` and disable `server_tools`; when both are enabled in an
 existing file, `web_tools` takes precedence. The independent Search/Fetch API
 bills successful requests, unlike the Chatbot server-tool path. See
 `## What 1.11.1 fixed`.
+
+1.11.2 fixes the multiline input regression introduced by 1.11.1. `LF` and
+modified Enter insert a newline, plain `Enter` submits, and pasted multiline
+text no longer stops at its first line. See `## What 1.11.2 fixed`.
+
+## What 1.11.2 fixed
+
+- The raw terminal reader distinguishes submission (`CR`) from an inserted
+  newline (`LF`). This restores Ctrl+Enter and the line breaks produced by
+  clipboard paste.
+- Common CSI-u and modifyOtherKeys sequences for Ctrl+Enter / Shift+Enter are
+  normalized to a newline. On Windows, held Ctrl / Shift modifiers are checked
+  when the console delivers the same carriage return as ordinary Enter.
+- Terminals that paste without bracketed markers are detected by a short input
+  queue probe. The message stays open while more pasted characters are ready,
+  and a `CRLF` pair is consumed as one newline.
 
 ## What 1.11.1 fixed
 

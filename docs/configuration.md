@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.11.1.
+Applies to MinimalCode 1.11.2.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 

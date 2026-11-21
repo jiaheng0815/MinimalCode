@@ -26,6 +26,18 @@ _MAX_PASTE = 1_000_000
 _CONTROL_PREFIXES = frozenset({"\x00", "\xe0"})
 
 
+def _windows_modifier_down(virtual_key: int) -> bool:
+    """Return True while a Windows modifier key is physically held."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(virtual_key) & 0x8000)
+    except (AttributeError, OSError):
+        return False
+
+
 @dataclass(slots=True)
 class InputBuffer:
     """Editable message text and its cursor as a character offset."""
@@ -210,6 +222,33 @@ class _Keys:
     def push(self, value: str) -> None:
         self._pending.extendleft(reversed(value))
 
+    def input_ready(self, timeout: float = 0.02) -> bool:
+        """Return True when the terminal has more characters queued."""
+        if self._pending:
+            return True
+        if os.name == "nt":
+            try:
+                import msvcrt
+                import time
+            except ImportError:
+                return False
+            deadline = time.monotonic() + timeout
+            while True:
+                if msvcrt.kbhit():
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.002)
+        try:
+            import select
+        except ImportError:
+            return False
+        try:
+            readable, _, _ = select.select([sys.stdin], [], [], timeout)
+        except (OSError, ValueError):
+            return False
+        return bool(readable)
+
     def _read_char(self) -> str:
         if self._pending:
             return self._pending.popleft()
@@ -241,21 +280,39 @@ class _Keys:
             return "interrupt", ""
         if char == "\x04":
             return "eof", ""
-        if char in {"\r", "\n"}:
+        if char == "\r":
+            if os.name == "nt" and (
+                _windows_modifier_down(0x11) or _windows_modifier_down(0x10)
+            ):
+                return "newline", ""
+            if self.input_ready():
+                following = self._read_char()
+                if following != "\n":
+                    self.push(following)
+                return "newline", ""
             return "enter", ""
+        if char == "\n":
+            return "newline", ""
         if char in {"\x08", "\x7f"}:
             return "backspace", ""
         if char != "\x1b":
             return "text", char
 
         sequence = ""
-        for _ in range(8):
+        for _ in range(16):
             nxt = self._read_char()
             sequence += nxt
             if nxt.isalpha() or nxt == "~":
                 break
         if sequence == _PASTE_START:
             return "paste", self._read_paste()
+        if sequence in {
+            "[13;2u",
+            "[13;5u",
+            "[27;2;13~",
+            "[27;5;13~",
+        }:
+            return "newline", ""
         arrows = {
             "[A": "up",
             "[B": "down",
@@ -369,6 +426,10 @@ def read_message(
                         buffer.backspace()
                     output.finish()
                     return buffer.text
+                if kind == "newline":
+                    buffer.insert("\n")
+                    redraw()
+                    continue
                 if kind in {"text", "paste"}:
                     buffer.insert(value)
                     redraw()
