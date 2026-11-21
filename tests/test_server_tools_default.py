@@ -1,10 +1,10 @@
-"""The default web path: model-side server tools, not the per-request API.
+"""Agent-vs-Chatbot web routing for DeepSeek providers.
 
-DeepSeek bills ``/v1/tools/search`` and ``/v1/tools/fetch`` per request, while
-``deepseek_web_search`` / ``deepseek_read_url`` are executed inside the turn and
-cost only model tokens. The defaults therefore prefer the server tools, and the
-standalone client is an explicit fallback. These tests pin both halves down: the
-local pair disappears from the schema list, and nothing can quietly POST it.
+DeepSeek documents ``deepseek_web_search`` / ``deepseek_read_url`` for Chatbot
+conversations. MinimalCode supplies client-side function tools, so its presets
+use the standalone Search/Fetch APIs. These tests pin the precedence down: an
+enabled ``web_tools`` block keeps the local pair visible, while an explicit
+server-only configuration still bypasses the standalone client.
 """
 
 from __future__ import annotations
@@ -143,29 +143,47 @@ class AllowListTests(unittest.TestCase):
 
 
 class DefaultConfigTests(unittest.TestCase):
-    def test_deepseek_defaults_prefer_the_server_tools(self) -> None:
-        # No preset ships the paid Search/Fetch block: the free path is the
-        # model-side tool set, and the per-request API has to be added by hand.
-        self.assertNotIn("web_tools", _DEEPSEEK)
+    def test_deepseek_defaults_use_the_agent_search_path(self) -> None:
+        # DeepSeek documents the server-side tools for chatbot conversations.
+        # MinimalCode always supplies function tools, so its presets use the
+        # standalone Search/Fetch API and keep the conversation-only path off.
+        self.assertTrue(_DEEPSEEK["web_tools"]["enabled"])
         server = _DEEPSEEK["server_tools"]
-        self.assertTrue(server["enabled"])
+        self.assertFalse(server["enabled"])
         self.assertTrue(server["web_search"])
         self.assertTrue(server["read_url"])
 
         capability = features(_DEEPSEEK)
-        self.assertTrue(capability["web_search"])
-        self.assertTrue(capability["read_url"])
-        # The paid standalone API is off, so nothing may claim it is on.
-        self.assertFalse(capability["search_api"])
-        self.assertFalse(capability["fetch_api"])
+        self.assertFalse(capability["web_search"])
+        self.assertFalse(capability["read_url"])
+        self.assertTrue(capability["search_api"])
+        self.assertTrue(capability["fetch_api"])
+
+    def test_standalone_web_tools_override_legacy_server_tools(self) -> None:
+        """An existing settings file with both paths must keep working.
+
+        Older releases wrote ``server_tools.enabled: true`` into the settings
+        file. Deep merging the new preset must not make that stale choice hide
+        the working client-side tools again.
+        """
+        config = _wire_config(web_tools=_web_block(enabled=True))
+        self.assertEqual(declarations(config), [])
+        self.assertEqual(build_server_tool_schemas(config), [])
+
+        capability = features(config)
+        self.assertFalse(capability["web_search"])
+        self.assertFalse(capability["read_url"])
+        self.assertTrue(capability["search_api"])
+        self.assertTrue(capability["fetch_api"])
 
     def test_declarations_are_tool_entries_not_function_schemas(self) -> None:
+        config = _wire_config(web_tools=_web_block(enabled=False))
         self.assertEqual(
-            declarations(_DEEPSEEK),
+            declarations(config),
             [{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}],
         )
         self.assertEqual(
-            build_server_tool_schemas(_DEEPSEEK),
+            build_server_tool_schemas(config),
             [{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}],
         )
 
@@ -192,12 +210,19 @@ class SchemaSelectionTests(unittest.TestCase):
         finally:
             client.close()
 
-    def test_the_default_config_hides_the_local_web_pair(self) -> None:
+    def test_server_tools_hide_the_local_web_pair(self) -> None:
         names = self._names(_wire_config())
         self.assertNotIn("web_search", names)
         self.assertNotIn("web_fetch", names)
         self.assertIn("read", names)
         self.assertIn("shell", names)
+
+    def test_the_agent_default_advertises_the_local_web_pair(self) -> None:
+        config = dict(_DEEPSEEK)
+        config["api_key"] = "secret"
+        names = self._names(config)
+        self.assertIn("web_search", names)
+        self.assertIn("web_fetch", names)
 
     def test_explicitly_enabling_web_tools_brings_the_pair_back(self) -> None:
         config = _wire_config(
@@ -304,18 +329,23 @@ class NoLocalRequestTests(unittest.TestCase):
 
 
 class MigrationNoticeTests(unittest.TestCase):
-    def test_an_old_configuration_is_reported_once(self) -> None:
+    def test_a_server_only_agent_configuration_is_reported(self) -> None:
         notice = migration_notice(
-            _wire_config(server_tools={"enabled": False}, web_tools={"enabled": True})
+            _wire_config(server_tools={"enabled": True}, web_tools={"enabled": False})
         )
         self.assertIsNotNone(notice)
         assert notice is not None
-        self.assertIn("web_tools.enabled=true", notice)
-        self.assertIn("server_tools.enabled=true", notice)
-        self.assertIn("5 CNY/1k", notice)
+        self.assertIn("chatbot", notice)
+        self.assertIn("web_tools", notice)
+        self.assertIn("server_tools.enabled=false", notice)
 
     def test_the_new_default_is_silent(self) -> None:
         self.assertIsNone(migration_notice(_DEEPSEEK))
+
+    def test_a_local_and_server_mix_is_silent(self) -> None:
+        self.assertIsNone(
+            migration_notice(_wire_config(web_tools=_web_block(enabled=True)))
+        )
 
     def test_a_foreign_endpoint_is_silent(self) -> None:
         # `web_tools` on a non-DeepSeek endpoint is that vendor's own client, so
@@ -332,7 +362,7 @@ class MigrationNoticeTests(unittest.TestCase):
 
 
 class ChatPayloadTests(unittest.TestCase):
-    def test_the_two_server_tools_ride_with_the_function_tools(self) -> None:
+    def test_the_agent_path_does_not_attach_server_tool_declarations(self) -> None:
         payloads: list[dict[str, Any]] = []
 
         def handler(request: httpx2.Request) -> httpx2.Response:
@@ -351,7 +381,7 @@ class ChatPayloadTests(unittest.TestCase):
 
         provider = OpenAICompatibleProvider(
             name="deepseek",
-            config=_wire_config(),
+            config=_wire_config(web_tools=_web_block(enabled=True)),
             model="deepseek-flash",
             thinking="high",
             transport=httpx2.MockTransport(handler),
@@ -367,8 +397,7 @@ class ChatPayloadTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [tool for tool in payloads[0]["tools"] if "function" not in tool],
-            [{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}],
+            [tool for tool in payloads[0]["tools"] if "function" not in tool], []
         )
 
 
@@ -384,18 +413,14 @@ class WarningTests(unittest.TestCase):
         _warn_web_routing(config, quiet=quiet, stream=stream)
         return stream.getvalue()
 
-    def test_an_old_configuration_warns_once(self) -> None:
+    def test_a_server_only_agent_configuration_warns_once(self) -> None:
         text = self._capture(
-            _wire_config(
-                server_tools={"enabled": False}, web_tools=_web_block(enabled=True)
-            )
+            _wire_config(server_tools={"enabled": True}, web_tools={"enabled": False})
         )
-        self.assertIn("web_tools.enabled=true", text)
-        self.assertIn("server_tools.enabled=true", text)
+        self.assertIn("chatbot", text)
+        self.assertIn("web_tools", text)
 
     def test_the_new_default_and_machine_output_stay_silent(self) -> None:
         self.assertEqual(self._capture(_DEEPSEEK), "")
-        old = _wire_config(
-            server_tools={"enabled": False}, web_tools=_web_block(enabled=True)
-        )
+        old = _wire_config(server_tools={"enabled": True}, web_tools={"enabled": False})
         self.assertEqual(self._capture(old, quiet=True), "")

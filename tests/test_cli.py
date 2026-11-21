@@ -483,6 +483,22 @@ class CliTests(unittest.TestCase):
         with patch("builtins.input", lambda prompt="": pasted):
             self.assertEqual(_read_message(), "run pytest -q now")
 
+    def test_interactive_terminal_uses_the_multiline_editor(self) -> None:
+        with (
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys.stdout, "isatty", return_value=True),
+            patch(
+                "minimalcode.highlight.color._enable_windows_ansi",
+                return_value=True,
+            ),
+            patch(
+                "minimalcode.terminal_input.read_message",
+                return_value="edited",
+            ) as editor,
+        ):
+            self.assertEqual(_read_message("> "), "edited")
+        editor.assert_called_once_with("> ")
+
     def test_feature_source_borrows_the_deepseek_block(self) -> None:
         from minimalcode.cli import _feature_source
 

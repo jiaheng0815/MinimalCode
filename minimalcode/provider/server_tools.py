@@ -11,11 +11,13 @@ context, so it must survive verbatim. Search results and the pages a deep search
 opened are dropped from later turns by the service itself, so storing them would
 only grow the transcript.
 
-This is the default web path. ``minimalcode.web.ProviderWebClient`` remains the
-opt-in fallback that calls ``/v1/tools/search`` and ``/v1/tools/fetch`` itself;
-the switch lives in ``deepseek.server_tools()`` versus ``web_tools.enabled``, and
-``tools.schemas.available_tool_schemas`` hides the local pair whenever these
-tools are active, so the two paths never compete inside one turn.
+DeepSeek documents these as Chatbot conversation tools. MinimalCode is an agent,
+so its default path is ``minimalcode.web.ProviderWebClient``, which calls
+``/v1/tools/search`` and ``/v1/tools/fetch`` as normal function tools. The
+switch lives in ``deepseek.server_tools()`` versus ``web_tools.enabled``:
+``tools.schemas.available_tool_schemas`` hides the local pair only when these
+server tools are explicitly active, so the two paths never compete inside one
+turn.
 """
 
 from __future__ import annotations

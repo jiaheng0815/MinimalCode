@@ -56,7 +56,9 @@ def _config(**overrides: Any) -> dict[str, Any]:
         "base_url": _API,
         "api_key": "secret",
         "server_tools": dict(_SERVER_TOOLS),
-        "web_tools": dict(_WEB_TOOLS),
+        # These tests exercise the explicit conversation-only server path.
+        # The agent default uses the standalone block and is covered separately.
+        "web_tools": {**_WEB_TOOLS, "enabled": False},
         "media": dict(_MEDIA),
         "safety_check": {"level": "high"},
         "session_title": {"enabled": True},
@@ -90,8 +92,8 @@ class CapabilityTests(unittest.TestCase):
         self.assertTrue(result["ocr"])
         self.assertTrue(result["asr"])
         self.assertTrue(result["tts"])
-        self.assertTrue(result["search_api"])
-        self.assertTrue(result["fetch_api"])
+        self.assertFalse(result["search_api"])
+        self.assertFalse(result["fetch_api"])
         self.assertTrue(result["safety"])
 
     def test_the_two_server_tools_switch_independently(self) -> None:
@@ -610,6 +612,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         # Search API is a real web path, so the composer switch must be offered
         # and must turn on instead of refusing with "not available here".
         self.runtime._ensure_agent()
+        self.provider.config["web_tools"] = dict(_WEB_TOOLS)
         self.provider.config["server_tools"] = {"enabled": False}
         self.provider.deepseek = features(self.provider.config)
         state = self.runtime.describe()

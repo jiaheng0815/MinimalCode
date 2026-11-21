@@ -981,6 +981,11 @@ class ConfigAndCliTests(SandboxTestBase):
         _apply_sandbox_overrides(settings, args)
         self.assertFalse(settings.data["sandbox"]["enabled"])
 
+        # Omitting the flag preserves a configuration that explicitly opted in.
+        settings.data["sandbox"]["enabled"] = True
+        _apply_sandbox_overrides(settings, args)
+        self.assertTrue(settings.data["sandbox"]["enabled"])
+
         args = _parser().parse_args(["--sandbox"])
         _apply_sandbox_overrides(settings, args)
         self.assertTrue(settings.data["sandbox"]["enabled"])

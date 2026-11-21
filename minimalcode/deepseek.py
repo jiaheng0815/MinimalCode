@@ -85,10 +85,17 @@ def _block(config: dict[str, Any], key: str) -> dict[str, Any]:
 def server_tools(config: dict[str, Any]) -> tuple[str, ...]:
     """Return the server-side tools this provider should declare.
 
-    A preset opts in once with ``server_tools.enabled``; the two tools are then
-    switched individually, and the whole group still needs the DeepSeek API.
+    The server tools are DeepSeek's conversation path. MinimalCode is an agent
+    and always sends client-side function tools, so an enabled standalone
+    Search/Fetch block takes precedence even when an older settings file still
+    has ``server_tools.enabled: true``. DeepSeek documents the standalone APIs
+    for agents; the server tools are intended for chatbot conversations.
+
+    With the standalone path off, a preset can opt in with
+    ``server_tools.enabled``; the two tools are then switched individually, and
+    the whole group still needs the DeepSeek API.
     """
-    if not is_deepseek_api(config):
+    if not is_deepseek_api(config) or web_tools_enabled(config):
         return ()
     block = _block(config, "server_tools")
     if block.get("enabled") is not True:
@@ -183,23 +190,22 @@ def web_tools_enabled(config: dict[str, Any]) -> bool:
 
 
 def migration_notice(config: dict[str, Any]) -> str | None:
-    """Explain a configuration that still pays for the standalone API.
+    """Explain a conversation-only web path in the agent.
 
-    An older settings file turned ``web_tools.enabled`` on before the server-side
-    tools existed. Rewriting it would surprise the user — the standalone API does
-    work — so the notice reports the per-call cost and the one key that switches
-    the default path.
+    DeepSeek documents ``deepseek_web_search`` and ``deepseek_read_url`` for
+    chatbot conversations. MinimalCode runs an agent tool loop, so a settings
+    file that turns off the standalone Search/Fetch API while enabling the
+    server tools is on the wrong path. Nothing is rewritten automatically.
     """
-    if not is_deepseek_api(config) or not web_tools_enabled(config):
+    if not is_deepseek_api(config) or web_tools_enabled(config):
         return None
     block = _block(config, "server_tools")
-    if block.get("enabled") is True:
+    if block.get("enabled") is not True:
         return None
     return (
-        "[minimalcode] web_tools.enabled=true still routes web search through the "
-        "per-call Search/Fetch API (5 CNY/1k requests). Set "
-        "server_tools.enabled=true to let the model call deepseek_web_search and "
-        "deepseek_read_url instead."
+        "[minimalcode] server_tools are DeepSeek's chatbot web path, but "
+        "MinimalCode needs the standalone agent web path. Add a complete "
+        "web_tools block with enabled=true and set server_tools.enabled=false."
     )
 
 

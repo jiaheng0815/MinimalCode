@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.11.0`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.11.1`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 目录
 
@@ -34,7 +34,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 
 - **协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 DeepSeek 网页版（`deepseek_web`），其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
 - **多供应商切换**：内置 38 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm` / `ninfer` 四个本地服务），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
-- **同时使用多家 API**：一个会话只用一个聊天接入点，但其它已配置的接入点仍可各司其职。只要配置里有一个 DeepSeek API 接入点（当前对话不在它上面也行），OCR、语音识别、语音朗读和独立的 Search/Fetch API 就由那个接入点提供；服务端联网工具、文档解析、内容安全和会话标题这类「写在请求里」的能力，仍然要求当前聊天接入点就是 `api.deepseek.com`。详见[同时使用多家 API](#同时使用多家-api)。
+- **同时使用多家 API**：一个会话只用一个聊天接入点，但其它已配置的接入点仍可各司其职。只要配置里有一个 DeepSeek API 接入点（当前对话不在它上面也行），OCR、语音识别、语音朗读和默认的独立 Search/Fetch 联网工具就由那个接入点提供；服务端联网工具、文档解析、内容安全和会话标题这类「写在请求里」的能力，仍然要求当前聊天接入点就是 `api.deepseek.com`。详见[同时使用多家 API](#同时使用多家-api)。
 - **自定义 API**：`minimalcode config add-provider` 或网页端的「自定义 API…」，写入任意 OpenAI 兼容、Anthropic 兼容或 DeepSeek 接入点。只新增 `providers.<name>`，内置预设保持不变。详见[自定义接入点](#自定义接入点)。
 
 ### 工具与执行
@@ -48,7 +48,8 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 
 ### 联网与多模态
 
-- **联网工具与网页端 Chatbot 能力**（仅 `api.deepseek.com`）：`server_tools` 打开 `deepseek_web_search`（关闭思考即联网搜索，开启思考即深度思考搜索）与 `deepseek_read_url`（阅读用户消息里的链接），搜索和抓取都在服务端完成，客户端只负责渲染卡片与回传 `read_link` 的 `signature`；网页端因此多了「联网搜索」「内容安全」开关、文档上传（Files API + `file_id`）、OCR 取字、语音输入（自拼 16 位 PCM WAV）与朗读回答。换成别的接入点（包括 DeepSeek 网页版协议）时这些开关直接隐藏并给出原因，不会发出注定 400 的请求。
+- **联网工具**：DeepSeek 预设默认启用独立的 Search/Fetch API，`web_search` / `web_fetch` 作为普通函数工具参与 Agent 工具循环；这条路径适用于带自定义工具调用的 Agent，按 DeepSeek 的成功请求价格计费。`server_tools` 仍可显式打开 `deepseek_web_search` / `deepseek_read_url`，但它面向 Chatbot 会话，只在关闭独立 `web_tools` 时生效。
+- **网页端 DeepSeek 能力**（请求侧仅 `api.deepseek.com`）：网页端有「联网搜索」「内容安全」开关、文档上传（Files API + `file_id`）、OCR 取字、语音输入（自拼 16 位 PCM WAV）与朗读回答。换成不支持的聊天接入点时，请求侧开关直接隐藏并给出原因，不会发出注定 400 的请求。
 - **搜索质量**：结果按 `rerank_score` 排序后去重，镜像页只保留分数最高的一份；`min_rerank_score` 可过滤低质结果；`web_search` 的 query 支持 `site:`、`-site:`、`-词`、`"精确短语"`、`lang:zh,en`、`after:`、`before:` 等搜索语法。
 - **文件与语音**（DeepSeek 工具 API）：`ocr` 逐页识别 PDF / Word / PowerPoint / 图片；`transcribe` 把音频转写成文字（语音输入）；`speech` 把文本合成为音频写入工作区（语音输出）；`/attach` 上传文档拿 `file_id`，随下一条消息交给模型按原始版式阅读（含文档里的图）；`/listen` 转写后直接作为消息发送，`/say` 朗读指定文本或上一条回答。图像、OCR、语音与网页四个客户端共用一套代理与重试策略。这些接口按页 / 按音频秒 / 按字符计费，所以**不做自动重试**，超限文件在离开本机前就被拒绝。
 - **图像理解**：`read_image` 交给供应商 `vision` 配置指向的任意 OpenAI 兼容端点，格式按文件内容判断（JPEG / PNG / GIF / WebP）；交互模式下空回车可以直接读取剪贴板里的图片。详见[图像理解](#图像理解)。
@@ -102,7 +103,7 @@ minimalcode
 
 交互模式启动后会显示供应商/模型、当前工作区、shell 和会话文件路径。
 
-输入支持多行：行尾写 `\` 回车继续下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠；也可以直接粘贴整段长文本，粘贴块里的换行不会被当作多次提交，整段内容作为一条消息发送。`-p` 或管道输入时不做改写。
+输入支持多行：行尾写 `\` 回车继续下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠；也可以直接粘贴整段长文本，粘贴块里的换行不会被当作多次提交，整段内容作为一条消息发送。交互式终端里长行自动换行后，退格删到下一行第一个字符时会回到上一行末尾继续删除；CJK 宽字符按实际终端宽度排版。`-p` 或管道输入仍按普通文本读取，不做交互式改写。
 
 如果剪贴板里是图片，先按终端的粘贴快捷键（Windows 为 `Ctrl+V`，macOS 为 `Cmd+V`，多数 Linux 终端为 `Ctrl+Shift+V`）再回车即可发送：终端本身无法把图片粘进输入行，所以 MinimalCode 把空回车当作读取剪贴板的信号。随后可以输入要一起发送的问题再回车；直接回车则让视觉模型完整描述图片。图片不需要事先保存成文件，由供应商 `vision` 配置的视觉模型转成文字描述后随消息一起发给主模型；未配置 `vision` 时该功能不可用。
 
@@ -128,7 +129,7 @@ minimalcode --web --web-port 9000 --cwd D:\work\repo --provider deepseek -m deep
 - 「删除对话」会真的把这条会话从 `sessions/` 里删掉（不可撤销），删掉的正好是当前打开的那条时页面回到新对话状态。
 - 设置（左侧栏底部）分「模型设置」和「通用设置」两页：**API 厂家**、**API 格式**、**模型**、**API Key**，以及主题和工作目录。保存后写回 `settings.json`（只写你改动的键，`${VAR}` 占位符与内置预设保持原样），下一次请求立即生效，不用重启；关掉页面再打开也还在。
 - 「API 厂家」列表末尾是「自定义 API…」：填一个名称（`[A-Za-z0-9][A-Za-z0-9._-]{0,31}`）和接入地址，选好格式与模型，保存后它就和内置预设一样出现在列表里并立即切换过去。远程接入点必须带 API Key，`127.0.0.1` / `localhost` 这类本地服务可以留空（会写成 `require_api_key: false`）。名称重复会被拒绝，内置预设不会被覆盖。
-- 「联网搜索」在两条路任一可用时出现：当前接入点就是 DeepSeek API（服务端工具 `deepseek_web_search` / `deepseek_read_url`，关闭思考是联网搜索，开启思考即深度思考搜索），或任一 DeepSeek 接入点打开了 `web_tools`（本进程调用独立的 Search/Fetch API）。搜索结果与打开的网页按调用合并成卡片、回答下的引用渲染成来源列表。「内容安全」只在当前聊天接入点是 `api.deepseek.com` 时出现，打开后发送 `safety_check.level: high`，命中风险时拒答。两者都不再可用时按钮直接隐藏，悬停提示原因，不会发出注定 400 的请求。
+- 「联网搜索」在两条路任一可用时出现：默认是任一 DeepSeek 接入点启用的 `web_tools`（本进程调用独立 Search/Fetch API，工具名是 `web_search` / `web_fetch`）；显式关闭 `web_tools` 后，当前聊天接入点若是 DeepSeek API，则可用服务端 `deepseek_web_search` / `deepseek_read_url`。「内容安全」只在当前聊天接入点是 `api.deepseek.com` 时出现，打开后发送 `safety_check.level: high`，命中风险时拒答。两者都不再可用时按钮直接隐藏，悬停提示原因，不会发出注定 400 的请求。
 - 输入框上方还有附件、OCR 与语音入口：附件走 Files API 上传，拿到的 `file_id` 随下一条消息交给模型按原始版式阅读（含文档里的图）；OCR 识别 PDF / Office / 图片里的文字后直接填进输入框；麦克风录一段话（前端自拼 16 kHz 单声道 WAV）转写成文字再发送；回答下方可以朗读。这些接口是独立的 HTTP 调用，所以当前对话换成别的厂家、而配置里仍有一个 DeepSeek API 接入点时，OCR / 语音 / 朗读照常可用（由那个接入点的 Key 与地址执行）；附件和内容安全因为要写在聊天请求里，仍然跟着当前接入点走。
 - `Enter` 发送、`Shift+Enter` 换行；回答按 SSE 流式追加。每次模型请求在页面上是一个独立段落，段内固定「思考 → 正文 → 工具」，所以工具循环的多轮不会把思考和正文各堆成一大块，正文也不会跑进思考区。思考块默认展开、刷新后仍然在，点标题（或聚焦后按 `Enter`/空格）折叠成「已思考（用时 N 秒）」，再点一次展开；折叠过一次之后新页面也跟着折叠，这个偏好只存在浏览器本地。
 - `--web-host` 默认只绑定 `127.0.0.1`，`Host`/`Origin` 不匹配的请求一律 403：页面能执行工具，所以不能被别的网页跨域驱动。确实要从别的机器访问时用 `--web-host 0.0.0.0`，并自己想清楚谁能打开这个端口。
@@ -236,15 +237,15 @@ JSON 输出字段：
 | `shell` | 在配置的 shell 中执行命令 | `command`、`timeout`、`cwd` |
 | `grep` | 正则搜索文本，返回 `path:line:text` | `pattern`、`path`、`glob`、`max_results` |
 | `find` | 按 glob 查找文件 | `pattern`、`path`、`max_results` |
-| `web_search` | 默认由 provider 的 server-side tool（`deepseek_web_search`）执行；显式开启 `web_tools` 时改为本进程调用独立 Search API | `query`、`count`、`need_content`、`ori_question`、`localization` |
-| `web_fetch` | 同上：默认由 `deepseek_read_url` / 深度思考搜索打开网页；显式开启 `web_tools` 时才由本进程抓取 | `url` |
+| `web_search` | DeepSeek 预设默认由 `web_tools` 提供，本进程调用独立 Search API；关闭 `web_tools` 后可退回服务端 `deepseek_web_search` | `query`、`count`、`need_content`、`ori_question`、`localization` |
+| `web_fetch` | 默认由 `web_tools` 提供，本进程调用 Fetch API；关闭 `web_tools` 后可退回服务端 `deepseek_read_url` | `url` |
 | `ocr` | 逐页识别 PDF / Word / PowerPoint / 图片中的文字 | `path`、`purpose` |
 | `transcribe` | 把 16 位 PCM WAV 或 Ogg Opus 音频转写成文字 | `path` |
 | `speech` | 把文本合成为音频并写入工作区 | `text`、`path`、`voice_id` |
 | `read_image` | 读取本地图片并交给配置的 OpenAI 兼容视觉端点，返回描述或对 `prompt` 的回答 | `path`、`prompt` |
 | `subagent` | 在子 shell 中启动一个新的 `minimalcode`，只返回它的最终答复 | `task`、`cwd`、`timeout`、`max_turns` |
 
-联网默认走 provider 的 server-side tools：`server_tools.enabled`（DeepSeek 预设默认开启）声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在服务端完成，只计模型 token，本地 `web_search` / `web_fetch` 不再出现在工具列表里。这是唯一免费的联网路径，预设里不含任何付费端点。独立 Search/Fetch API 仍可用，但需要你手动加一个完整的 `web_tools` 块并设 `enabled: true`（按成功请求计费，5 元/千次），此时才会重新声明这两个本地工具。
+联网默认走 Agent 路径：DeepSeek 预设带完整的 `web_tools` 块并设 `enabled: true`，因此 `web_search` / `web_fetch` 会出现在函数工具列表中。独立 Search/Fetch API 按成功请求计费，具体价格以 DeepSeek 定价页为准；启用它时即使旧配置还写着 `server_tools.enabled: true`，服务端工具也不会覆盖本地工具。要显式使用服务端 Chatbot 工具，请关闭 `web_tools`。
 
 `web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用；`ocr`、`transcribe`、`speech` 由 DeepSeek 接入点的 `media` 配置启用（当前供应商没有 `media` 时，会用配置里另一个可用的 DeepSeek 接入点），写哪个 `*_path` 就开哪项能力。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
 
@@ -356,8 +357,21 @@ MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一
       "send_reasoning_effort": true,
       "headers": {},
       "extra_body": {},
-      "server_tools": {
+      "web_tools": {
         "enabled": true,
+        "base_url": "https://api.deepseek.com/v1/tools",
+        "search_path": "search",
+        "fetch_path": "fetch",
+        "timeout_seconds": 60,
+        "default_count": 10,
+        "max_count": 50,
+        "max_content_chars": 120000,
+        "default_need_content": false,
+        "min_rerank_score": 0,
+        "headers": {}
+      },
+      "server_tools": {
+        "enabled": false,
         "web_search": true,
         "read_url": true
       }
@@ -366,8 +380,8 @@ MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一
 }
 ```
 
-- `server_tools` 是唯一的默认联网路径（仅 `api.deepseek.com`）：`enabled` 打开服务端工具，`web_search` / `read_url` 分别控制 `deepseek_web_search` 与 `deepseek_read_url`。搜索与抓取都在 DeepSeek 服务端完成，只计模型 token，没有按次费用。
-- 预设里**不含** `web_tools`：那是本进程直连的独立 Search/Fetch API（5 元/千次成功请求），只在你手动写入整块并设 `enabled: true` 时才会生效，届时把 `server_tools.enabled` 设成 `false` 才能两不相争。详见 [docs/configuration.md](docs/configuration.md#web-tools)。
+- `web_tools` 是默认联网路径，也是 Agent 的正确入口：本进程调用 DeepSeek 的独立 Search/Fetch API，`web_search` / `web_fetch` 作为普通函数工具参与工具循环。它按成功请求计费；预设默认启用，并在 provider 自己的 Key 或 `feature_source()` 找到的 DeepSeek Key 上执行。
+- `server_tools` 是显式选择的 Chatbot 路径（仅 `api.deepseek.com`）：`enabled` 打开服务端工具，`web_search` / `read_url` 分别控制 `deepseek_web_search` 与 `deepseek_read_url`。只要 `web_tools.enabled: true`，服务端工具就留空；要使用它，请把 `web_tools.enabled` 设为 `false` 再打开 `server_tools.enabled`。
 - `protocol` 取 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `deepseek_web`（网页版对话接口，见 [docs/configuration.md](docs/configuration.md#built-in-provider-presets)）。
 - 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
@@ -402,7 +416,7 @@ $env:OPENAI_API_KEY = "your-openai-key"
 minimalcode --provider openai -m <model-id>     # 或交互里 /model openai/<model-id>
 ```
 
-切过去之后 `ocr`、`transcribe`、`speech` 仍在工具列表里，附件与「内容安全」开关会隐藏并说明原因。想让非 DeepSeek 的聊天接入点也能联网搜索，只有一条路：给那个 DeepSeek 块手动加完整的 `web_tools` 块并设 `enabled: true`（按成功请求计费），此时由本进程直连 DeepSeek 的 Search API，与聊天走哪家无关。预设里没有这块，默认不会产生任何按次费用。
+切过去之后 `ocr`、`transcribe`、`speech` 与 `web_search` / `web_fetch` 仍在工具列表里，附件与「内容安全」开关会隐藏并说明原因。联网搜索由任一可用的 DeepSeek 预设通过 `web_tools` 执行，与聊天走哪家无关；它按成功请求计费。
 
 怎么确认生效：CLI 里 `/status` 的 `tools` 列出 `ocr` / `transcribe` / `speech` 就说明借到了；网页端 `GET /api/state` 的 `deepseek` 字段中，`available` 表示存在可用的 DeepSeek 接入点，`active` 表示当前聊天就在它上面，`provider` 指出实际执行的是哪个块。
 
@@ -598,7 +612,7 @@ minimalcode --anthropic-env
 - `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
 - 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，引号内的 `|` / `;` 也不会被拆成多条命令（`rg 'nc|netcat'` 同样放行）；而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...`、`busybox wget ...`、`sh -c "sudo curl ..."` 仍会被拒绝。它不是网络防火墙。
 - `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词，并在每次运行开始前重新读取（文件不存在则跳过）。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。`/summary` 写入 `AGENTS.md` 的路径同样经过这层校验。
-- `web_fetch` 的目标 URL 默认由 provider 服务端抓取，本进程不直连；显式开启 `web_tools` 时改为本进程请求 `web_tools.base_url`。该地址及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
+- `web_fetch` 默认由本进程请求 `web_tools.base_url`；关闭 `web_tools` 并启用 `server_tools` 后才改为 provider 服务端抓取。该地址及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
 - `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
 - 网页界面默认只绑定 `127.0.0.1`，并校验 `Host` / `Origin` 的主机名与端口。它能在工作区里执行工具，所以不要把 `--web-host` 改成 `0.0.0.0` 后暴露到不受信任的网络，也不要让反向代理改写这两个头。
 
@@ -706,12 +720,13 @@ minimalcode/
 │   ├── thinking.py  #   刷新后仍在的推理块（<home>/webui/thinking.json）
 │   └── assets/      #   index.html / app.css / app.js（随 wheel 安装，无构建步骤）
 ├── shell.py         # shell 探测与子进程执行
+├── terminal_input.py # 交互式多行输入、可视换行与跨行退格
 ├── httpclient.py    # HTTP 客户端构造、代理策略与连接重试
 ├── prompt.py        # 系统提示词与 AGENTS.md 发现
 ├── session.py       # JSONL 会话存储与检索
 ├── config.py        # 配置合并、校验、脱敏、原子写入、接入点命名规则
-├── deepseek.py      # DeepSeek 专属能力集、server_tools 开关、feature_source() 与唯一的准入判定
-├── web.py           # 可选的独立 Search/Fetch API 客户端（默认关闭）
+├── deepseek.py      # DeepSeek 能力集、Agent/Chatbot 联网路由、feature_source() 与准入判定
+├── web.py           # Agent 默认使用的独立 Search/Fetch API 客户端
 ├── media.py         # 供应商 OCR / 语音识别 / 语音合成 / 文件解析客户端
 ├── vision.py        # 供应商视觉客户端
 ├── reminder.py      # latest_reminder 的内容（日期、星期、平台、语言）
@@ -736,6 +751,16 @@ minimalcode/
 ## 升级指南
 
 每个版本都保持向后兼容：1.x 内没有删除公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。下面按从新到旧排列，只列升级时需要留意的行为变化；逐条明细见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 从 1.11.0 升级到 1.11.1
+
+1.11.1 修复 DeepSeek 联网工具在 Agent 工具循环中不可用的问题，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema。
+
+- DeepSeek 的 `deepseek_web_search` / `deepseek_read_url` 是 Chatbot 会话工具；MinimalCode 始终发送客户端函数工具，因此默认改为独立 Search/Fetch API。`deepseek` 与 `deepseek-anthropic` 预设重新带完整 `web_tools`，并把 `server_tools.enabled` 设为 `false`。
+- 已有配置不需要手改：只要 `web_tools.enabled: true`，即使旧文件还写着 `server_tools.enabled: true`，本版本也让 `web_search` / `web_fetch` 生效。若你曾显式关闭 `web_tools`，启动提示会说明如何切回 Agent 路径。
+- 独立 Search/Fetch 按成功请求计费，具体价格以 DeepSeek 定价页为准；网页端和服务端 Chatbot 工具不再被描述成免费的默认路径。
+- 终端长文本改用一个多行编辑缓冲区：自动换行或反斜杠续行后，退格到行首会移到上一行末尾，不再卡在下一行第一个字符前。
+- 未写 `--sandbox` / `--no-sandbox` 时不再覆盖 `settings.json` 里的 `sandbox.enabled`；显式参数仍然优先。
 
 ### 从 1.10.1 升级到 1.11.0
 

@@ -170,11 +170,14 @@ class SplitFeatureTests(unittest.TestCase):
         self.assertFalse(result["safety"])
         self.assertIn("DeepSeek", result["active_reason"])
 
-    def test_one_provider_keeps_the_original_answer(self) -> None:
+    def test_one_provider_uses_the_agent_web_path(self) -> None:
         result = features(_deepseek())
         self.assertTrue(result["active"])
         self.assertTrue(result["documents"])
-        self.assertTrue(result["web_search"])
+        self.assertFalse(result["web_search"])
+        self.assertFalse(result["read_url"])
+        self.assertTrue(result["search_api"])
+        self.assertTrue(result["fetch_api"])
         self.assertTrue(result["safety"])
         self.assertEqual(result["active_reason"], "")
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.11.0.
+Applies to MinimalCode 1.11.1.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -29,9 +29,9 @@ CLI
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt, `AGENTS.md` discovery, marked summary block merge |
 | `provider/` | OpenAI Chat/Responses and Anthropic Messages payloads, HTTP retries, and SSE parsing |
-| `web.py` | Optional fallback: the standalone Search/Fetch API client (off by default) |
+| `web.py` | Agent-default standalone Search/Fetch API client |
 | `media.py` | Configurable provider OCR, speech, and document-parsing client |
-| `deepseek.py` | The DeepSeek-API-only capability set, the server-tool switch, `feature_source()` (which configured block runs the HTTP-call features), and the predicate that gates it |
+| `deepseek.py` | The DeepSeek-API-only capability set, Agent-vs-Chatbot web routing, `feature_source()` (which configured block runs the HTTP-call features), and the predicate that gates it |
 | `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `mcp/` | MCP client: JSON-RPC framing, stdio/HTTP/SSE transports, tool discovery, and the server manager |
@@ -42,6 +42,7 @@ CLI
 | `agent.py` | Tool loop, concurrent subagent and read-only dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
 | `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap, `config add-provider` |
+| `terminal_input.py` | Interactive multiline buffer, hard-wrap layout, bracketed paste, and cross-row Backspace |
 | `webui/` | Loopback chat page: settings writes, workspace switching, streamed turns, sidebar folders and conversation deletion |
 
 ## Package layout
@@ -70,14 +71,14 @@ instance. It also owns the `MCPManager`, so the discovered MCP tools follow the
 same `tools.allow`, `--read-only`, and dispatch path as the built-in ones.
 
 The web path has two sources and one switch. `deepseek.server_tools(config)`
-returns the server-side tools the provider declares on the request
-(`deepseek_web_search`, `deepseek_read_url`); `web_tools.enabled` returns the
-standalone `web.py` client instead. `available_tool_schemas(...,
-server_tools=...)` hides the local `web_search` / `web_fetch` schemas while a
-server tool covers the same ground, and `ToolRuntime.dispatch` refuses a replayed
-local call, so one turn can never bill both paths.
-`deepseek.migration_notice()` reports an old `web_tools.enabled: true` settings
-file once at startup without rewriting it.
+returns the Chatbot server-side tools the provider declares on the request
+(`deepseek_web_search`, `deepseek_read_url`); `web_tools.enabled` selects the
+standalone `web.py` client used by the Agent. When both are configured, the
+standalone path wins so a legacy `server_tools.enabled: true` cannot hide the
+working function tools. `available_tool_schemas(..., server_tools=...)` then
+keeps `web_search` / `web_fetch` visible, and `ToolRuntime.dispatch` runs them.
+`deepseek.migration_notice()` reports a server-only Agent configuration once at
+startup without rewriting it.
 
 A session has one chat provider, but the DeepSeek feature set may come from
 another configured block. `deepseek.feature_source(settings, active)` returns the
@@ -242,15 +243,15 @@ write a snapshot taken before the other's change, and `thinking.json` would even
 resurrect a conversation that was just deleted.
 
 `_apply_switches()` is the one place the composer's DeepSeek switches reach a live
-provider: when the chat provider is the DeepSeek API it sets `server_tools` and
-the safety level, then copies `provider.server_tools` onto the tool runtime and
-calls `refresh_tools()`. Both halves matter — the schemas decide what the model is
-offered, the runtime decides what `dispatch` will refuse — so the page never shows
-an ability the request does not carry, or the other way round. Another vendor's
-endpoint would reject those declarations, so there the 联网 switch only drives the
+provider: when the chat provider is the DeepSeek API it refreshes
+`server_tools`, applies the safety level, and copies the effective server-tool
+list onto the tool runtime before calling `refresh_tools()`. An enabled
+standalone `web_tools` block resolves to an empty server-tool list, leaving the
+normal `web_search` / `web_fetch` functions active. Another vendor's endpoint
+would reject server declarations, so there the 联网 switch only drives the
 standalone client. `describe()` derives `web_search_mode` from that same state
-(`server` when the service-side tool covers it, `local` when the standalone Search
-API would be called, `off` otherwise) instead of caching it.
+(`local` for the default Agent path, `server` only after the standalone block is
+disabled, `off` otherwise) instead of caching it.
 
 The capability block therefore answers two questions. `deepseek.active` (the chat
 provider is the DeepSeek API) gates server tools, documents, safety, and titles;

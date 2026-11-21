@@ -446,12 +446,18 @@ class WebToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             settings = load_settings(Path(temp) / ".MinimalCode")
         _, provider = settings.provider_config("deepseek")
-        # The default path is the model-side tool set. The paid per-request
-        # Search/Fetch API is not in the preset at all: a settings file that
-        # wants it adds the whole block, and nothing else pays per call.
-        self.assertNotIn("web_tools", provider)
+        # MinimalCode sends client-side function tools, so it uses DeepSeek's
+        # standalone Search/Fetch APIs rather than the conversation-only server
+        # tools. The complete block has to be present for the client to start.
+        self.assertTrue(provider["web_tools"]["enabled"])
+        self.assertEqual(
+            provider["web_tools"]["base_url"],
+            "https://api.deepseek.com/v1/tools",
+        )
+        self.assertEqual(provider["web_tools"]["search_path"], "search")
+        self.assertEqual(provider["web_tools"]["fetch_path"], "fetch")
         server = provider["server_tools"]
-        self.assertTrue(server["enabled"])
+        self.assertFalse(server["enabled"])
         self.assertTrue(server["web_search"])
         self.assertTrue(server["read_url"])
 

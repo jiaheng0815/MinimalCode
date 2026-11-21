@@ -119,7 +119,7 @@ def _parser() -> argparse.ArgumentParser:
         "--sandbox",
         dest="sandbox_enabled",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help=(
             "Enable the sandbox execution layer (off by default). The workspace "
             "and sensitive-file boundary applies either way; any --sandbox-* "
@@ -720,11 +720,12 @@ def _warn_web_routing(
     quiet: bool = False,
     stream: Any = None,
 ) -> None:
-    """Print one startup line when settings still pay for the standalone API.
+    """Print one startup line when an agent is on the chatbot web path.
 
-    The default path is DeepSeek's server-side tools; an older settings file that
-    turned ``web_tools.enabled`` on keeps working, but its per-request cost is
-    worth saying out loud once. Machine-readable output stays clean.
+    MinimalCode runs a client tool loop, so the standalone Search/Fetch API is
+    the working web path. A settings file that enables only DeepSeek's
+    conversation server tools gets one actionable notice. Machine-readable
+    output stays clean.
     """
     if quiet:
         return
@@ -1371,6 +1372,18 @@ def _read_message(prompt: str = "> ") -> str:
     A trailing backslash continues the message on the next line; ``\\\\`` at the
     end of the last line means a literal backslash instead.
     """
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+    if interactive and os.name == "nt":
+        from .highlight.color import _enable_windows_ansi
+
+        interactive = _enable_windows_ansi(sys.stdout)
+    if interactive:
+        from .terminal_input import read_message
+
+        return read_message(prompt)
     line = _read_input_line(prompt)
     if _PASTE_START in line:
         return _read_paste(line)

@@ -82,8 +82,21 @@
       "send_reasoning_effort": true,
       "headers": {},
       "extra_body": {},
-      "server_tools": {
+      "web_tools": {
         "enabled": true,
+        "base_url": "https://api.deepseek.com/v1/tools",
+        "search_path": "search",
+        "fetch_path": "fetch",
+        "timeout_seconds": 60,
+        "default_count": 10,
+        "max_count": 50,
+        "max_content_chars": 120000,
+        "default_need_content": false,
+        "min_rerank_score": 0,
+        "headers": {}
+      },
+      "server_tools": {
+        "enabled": false,
         "web_search": true,
         "read_url": true
       },
@@ -134,6 +147,19 @@
       "max_tokens": 8192,
       "headers": {},
       "extra_body": {},
+      "web_tools": {
+        "enabled": true,
+        "base_url": "https://api.deepseek.com/v1/tools",
+        "search_path": "search",
+        "fetch_path": "fetch",
+        "timeout_seconds": 60,
+        "default_count": 10,
+        "max_count": 50,
+        "max_content_chars": 120000,
+        "default_need_content": false,
+        "min_rerank_score": 0,
+        "headers": {}
+      },
       "media": {
         "enabled": true,
         "base_url": "https://api.deepseek.com",
@@ -152,7 +178,7 @@
         "headers": {}
       },
       "server_tools": {
-        "enabled": true,
+        "enabled": false,
         "web_search": true,
         "read_url": true
       },

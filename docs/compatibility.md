@@ -1,18 +1,19 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.11.0. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.11.1. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1 and 1.11.0 added no further breaking import
-changes (`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
-`minimalcode.media`, and `minimalcode.webui` are new modules, not renamed ones).
+1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1, 1.11.0 and 1.11.1 added no further
+breaking import changes (`minimalcode.httpclient`, `minimalcode.clipboard`,
+`minimalcode.mcp`, `minimalcode.media`, and `minimalcode.webui` are new
+modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1
-or 1.11.0. Every change is additive: new tools join `tools.allow` and the
+format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1,
+1.11.0 or 1.11.1. Every change is additive: new tools join `tools.allow` and the
 read-only set, every new settings block is optional, and a `settings.json`
 written for 1.6.0 keeps working unchanged. The 1.8.0 web UI drives the same agent
 and the same JSONL files, so a conversation started in the browser is the file
@@ -41,6 +42,35 @@ behaviour; see `## What 1.10.1 changed`.
 provider that pins an effort now starts at that level unless `--thinking` or
 `/effort` says otherwise; providers without the key are unaffected. See
 `## What 1.11.0 added`.
+
+1.11.1 fixes the web path behind unchanged keys. DeepSeek's bundled presets
+again enable `web_tools` and disable `server_tools`; when both are enabled in an
+existing file, `web_tools` takes precedence. The independent Search/Fetch API
+bills successful requests, unlike the Chatbot server-tool path. See
+`## What 1.11.1 fixed`.
+
+## What 1.11.1 fixed
+
+- DeepSeek documents `deepseek_web_search` and `deepseek_read_url` for Chatbot
+  conversations. MinimalCode runs an Agent with client-side function tools, so
+  the server-only default hid another working path and left networking unusable.
+  The `deepseek` and `deepseek-anthropic` presets now ship a complete enabled
+  `web_tools` block and `server_tools.enabled: false`.
+- `deepseek.server_tools()` returns no declarations when `web_tools.enabled` is
+  true. A settings file written by 1.9.0 through 1.11.0 can therefore keep its
+  `server_tools.enabled: true` value while `web_search` / `web_fetch` work again;
+  nothing is rewritten.
+- A server-only Agent configuration receives one startup notice directing it to
+  the standalone block. `--quiet`, `--json`, and the fixed default stay silent.
+- The standalone DeepSeek Search/Fetch API is billed per successful request.
+  The former "free default web path" description was incorrect for this Agent
+  configuration and has been removed from the current docs.
+- The interactive prompt now edits one multiline buffer. Backspace at the first
+  cell of a hard-wrapped row joins it to the preceding row, and logical
+  continuation lines behave the same way. Piped input keeps the old physical
+  line reader.
+- Omitting `--sandbox` / `--no-sandbox` preserves `sandbox.enabled` from the
+  settings file. Explicit CLI flags continue to win.
 
 ## What 1.11.0 added
 

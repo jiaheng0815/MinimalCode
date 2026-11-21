@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.11.0.
+Applies to MinimalCode 1.11.1.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -388,17 +388,15 @@ an early stop instead of being shown as a normal answer.
 
 `server_tools` declares the tools DeepSeek executes on its own servers:
 `deepseek_web_search` (web search, and deep search while thinking) and
-`deepseek_read_url` (read the links in the last user message). It is the only
-default web path, and the only one that costs no per-request fee: the bundled
-DeepSeek presets ship `server_tools.enabled: true` and contain no `web_tools`
-block at all, so nothing here POSTs the per-request Search API. Only `read_link`
-blocks are replayed in later turns, because the page body comes back encrypted
-in `signature`; search results and opened pages are dropped by the service
-itself. The declarations ride after the function tools and never appear for a
-plain completion, so summaries and compaction never search. While a server tool
-covers the same ground, the local `web_search` / `web_fetch` schemas are not
-advertised and a replayed call to them is refused instead of silently billing
-the standalone API. Server tools,
+`deepseek_read_url` (read the links in the last user message). DeepSeek documents
+these as Chatbot conversation tools; MinimalCode is an agent and sends
+client-side function tools, so the bundled presets leave
+`server_tools.enabled` at `false` and use the standalone Search/Fetch API
+instead. An explicit server-only configuration remains supported, but it is not
+the default Agent path. Only `read_link` blocks are replayed in later turns,
+because the page body comes back encrypted in `signature`; search results and
+opened pages are dropped by the service itself. The declarations never appear
+for a plain completion, so summaries and compaction never search. Server tools,
 document parsing, the safety review, and session titles are declared on the chat
 request, so they require the **chat** provider's `base_url` to be
 `api.deepseek.com`; any other endpoint, including the `deepseek_web` chat-app
@@ -430,19 +428,19 @@ only 401). `deepseek.features()` reports `available` (a source exists), `active`
 the same way, so switching to another vendor keeps the media tools instead of
 dropping them.
 
-`web_tools` is the opt-in paid fallback for that same capability, and no preset
-ships it. Writing the whole block with `enabled: true` makes this process call
-`POST /v1/tools/search` and `POST /v1/tools/fetch` itself, which bills 5 CNY per
-1,000 successful requests. It stays the only web path for vendors that have no
-server-side tools (OpenRouter, Groq, a local model, and so on): with
-`server_tools` absent or disabled, the local `web_search` / `web_fetch` tools are
-advertised exactly as before. That block does not have to belong to the chat
-provider: `feature_source()` picks a configured DeepSeek block, so an OpenRouter
-session can use DeepSeek's Search API with DeepSeek's key. An older settings file
-that still has `web_tools.enabled: true` keeps working and prints one startup
-line pointing at `server_tools.enabled`; nothing is rewritten. A leftover block
-with `enabled: false` issues no request and costs nothing — delete it if you do
-not want it in the file.
+`web_tools` is the Agent web path and the default for both bundled DeepSeek
+presets. The complete enabled block makes this process call
+`POST /v1/tools/search` and `POST /v1/tools/fetch` itself. The API bills each
+successful request; check DeepSeek's current pricing page before enabling it
+for a high-volume workflow. When `web_tools.enabled` is true it takes precedence
+over `server_tools`, including an older settings file that still says
+`server_tools.enabled: true`; nothing is rewritten. With the standalone block
+off, the local `web_search` / `web_fetch` tools are hidden and a server-only
+DeepSeek Agent configuration prints one actionable startup notice. The block
+does not have to belong to the chat provider: `feature_source()` picks a
+configured DeepSeek block, so an OpenRouter session can use DeepSeek's Search
+API with DeepSeek's key. A block with `enabled: false` issues no request and
+costs nothing.
 `prompt_cache: true` on an `anthropic_messages` provider marks one cache
 breakpoint on the last tool definition, which covers the system prompt and the
 tool list together; without tools the system block is marked instead. One
@@ -639,20 +637,15 @@ when those tools are needed.
 
 ## Web tools
 
-Two paths reach the same capability, and the default is the model-side one.
+Two paths reach the same capability, and the default is the client-side Agent
+path.
 
-`server_tools` (see the provider table above) declares DeepSeek's
-`deepseek_web_search` / `deepseek_read_url` on the request; the service searches
-and reads pages inside the turn, only model tokens are billed, and the local
-`web_search` / `web_fetch` schemas are not advertised. The bundled DeepSeek
-presets ship it enabled, which is why the free path is also the default one.
-
-`web_tools` is the standalone Search/Fetch client described in this section. No
-preset ships it, so a fresh `settings.json` contains no paid endpoint at all and
-nothing can call one by accident. Writing the whole block with `enabled: true` is
-a deliberate choice for two cases: a vendor without server-side tools, and a
-DeepSeek user who explicitly wants the local pair back. It bills 5 CNY per 1,000
-successful requests:
+`web_tools` is the standalone Search/Fetch client described in this section. The
+bundled DeepSeek presets enable the complete block, so `web_search` /
+`web_fetch` participate in the same function-tool loop as file and shell tools.
+DeepSeek documents the standalone APIs for agents and other custom workflows.
+The API bills successful requests; consult DeepSeek's current pricing page. The
+default block is:
 
 ```json
 "web_tools": {
@@ -671,10 +664,14 @@ successful requests:
 }
 ```
 
-`server_tools` wins when both are enabled: the local pair stays unadvertised and
-a replayed `web_search` call is refused with a message pointing at these keys.
-Set `server_tools.enabled: false` together with `web_tools.enabled: true` to use
-the standalone API exclusively.
+`web_tools` wins when both are enabled. `deepseek.server_tools()` returns no
+server declarations, the local pair stays advertised, and the dispatcher accepts
+`web_search` / `web_fetch`. This precedence is deliberate: older MinimalCode
+settings can retain `server_tools.enabled: true`, but they must not hide the
+working Agent path. To use the Chatbot server tools, set
+`web_tools.enabled: false` and enable `server_tools`; a server-only Agent
+configuration emits one startup notice because DeepSeek recommends the
+standalone APIs for agent workflows.
 
 `api_key` or `api_key_env` inside `web_tools` override the provider credential.
 When omitted, the provider API key is reused.

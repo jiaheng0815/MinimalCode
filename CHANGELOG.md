@@ -1,5 +1,23 @@
 # 更新日志
 
+## 1.11.1 - 2026-11-21
+
+修复 DeepSeek 联网工具在 Agent 工具循环中不可用、长文本退格不能跨行的问题，并恢复命令行显式配置的沙箱开关。
+
+### 修复
+
+- DeepSeek 的 `deepseek_web_search` / `deepseek_read_url` 是 Chatbot 会话工具，而 MinimalCode 始终发送客户端函数工具。1.9.0 至 1.11.0 让服务端工具优先，并在两者同时配置时隐藏 `web_search` / `web_fetch`，导致 Agent 的联网工具无法正常调用。现在只要完整的 `web_tools` 块已启用，就使用 Agent 专用的独立 Search/Fetch 路径；即使旧 `settings.json` 同时写着 `server_tools.enabled: true` 也不会再退回错误路径。
+- `deepseek` 与 `deepseek-anthropic` 预设恢复完整的 `web_tools` 块并默认启用，同时把 `server_tools.enabled` 默认改为 `false`。独立 Search/Fetch 按成功请求计费，不再宣称这条路径免费。
+- 启动提示改为只对「关闭 `web_tools`、仍启用 `server_tools`」的 Agent 配置给出一条可操作说明；默认配置与正常本地路径保持静默。
+- 交互式终端改用内置的多行输入缓冲区渲染长行。退格删到自动换行处或逻辑换行处时，会回到上一行末尾继续删除；CJK 宽字符、括号粘贴和最多一个终端高度的可视窗口都在同一套布局中处理。非 TTY 输入和测试仍走原有的逐行读取路径。
+- `--sandbox` 的默认值恢复为 `None`：命令行没有指定开关时保留 `settings.json` 里的 `sandbox.enabled: true`；显式 `--sandbox` / `--no-sandbox` 仍然覆盖配置。
+
+### 变更
+
+- 版本号升级到 1.11.1。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 新增回归测试：默认配置必须暴露 `web_search` / `web_fetch`；服务端工具与已启用的独立 API 同时存在时，服务端声明必须为空；终端长行退格必须跨过可视换行与逻辑换行；缺省 CLI 开关不得覆盖配置中的沙箱值。
+- 文档：`README.md`、`docs/configuration.md`、`docs/architecture.md` 与 `docs/compatibility.md` 同步 Agent 与服务端 Chatbot 工具的边界，并记录新的终端编辑行为。
+
 ## 1.11.0 - 2026-12-06
 
 新增本地服务预设 `ninfer`（免密钥、`localhost:8080`、262k 上下文、默认 `xhigh` 推理强度），并让任意供应商都能固定自己的默认推理强度。
