@@ -506,6 +506,21 @@ def _media_schemas(media_client: Any) -> list[dict[str, Any]]:
     return schemas
 
 
+def build_server_tool_schemas(provider_config: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the server-side tool declarations this provider switches on.
+
+    They are deliberately *not* function schemas. ``deepseek_web_search`` and
+    ``deepseek_read_url`` are executed by the service: the model chooses to use
+    them, but nothing ever comes back as a client tool call, so advertising them
+    as functions would make the model emit a call the dispatcher cannot answer —
+    and the request would be rejected besides. Each protocol puts them in its own
+    ``tools`` array (see ``provider.client._server_tool_declarations``).
+    """
+    from ..deepseek import declarations
+
+    return declarations(provider_config)
+
+
 def available_tool_schemas(
     web_client: ProviderWebClient | None = None,
     vision_client: ProviderVisionClient | None = None,
@@ -514,6 +529,7 @@ def available_tool_schemas(
     allowed: frozenset[str] | None = None,
     mcp_schemas: list[dict[str, Any]] | None = None,
     media_client: Any = None,
+    server_tools: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Return the schemas enabled by the active clients and depth limit.
 
@@ -524,13 +540,18 @@ def available_tool_schemas(
     ``mcp_schemas`` are the declarations discovered from MCP servers; they are
     filtered by the same allowlist as the built-in tools. ``media_client`` is
     duck-typed because it is only asked which of its capabilities are enabled.
+
+    ``server_tools`` is the provider's active server-side tool set. When it is
+    non-empty the local ``web_search`` / ``web_fetch`` schemas are skipped: the
+    model searches and reads pages through the service instead of asking this
+    process to POST the standalone Search/Fetch API, which bills per request.
     """
     schemas = list(TOOL_SCHEMAS)
     if subagent:
         schemas.append(SUBAGENT_SCHEMA)
     if vision_client is not None and vision_client.enabled:
         schemas.append(READ_IMAGE_SCHEMA)
-    if web_client is not None and web_client.enabled:
+    if web_client is not None and web_client.enabled and not server_tools:
         schemas.extend(_web_schemas(web_client))
     if media_client is not None and getattr(media_client, "enabled", False):
         schemas.extend(_media_schemas(media_client))

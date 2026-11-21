@@ -602,6 +602,103 @@ class RuntimeTests(WebUiCase):
         worker.join(10)
         self.assertFalse(worker.is_alive())
 
+    def test_a_custom_api_is_added_switched_to_and_persisted(self) -> None:
+        """A new endpoint is written as a delta, then used by the next turn."""
+        runtime = self.runtime()
+        state = runtime.apply_settings(
+            {
+                "custom": True,
+                "name": "my-gateway",
+                "base_url": "https://gateway.example.com/v1",
+                "protocol": "openai_chat",
+                "model": "house-model",
+                "api_key": "secret",
+            }
+        )
+        self.assertEqual(state["provider"], "my-gateway")
+        self.assertEqual(state["model"], "house-model")
+        row = next(item for item in state["providers"] if item["name"] == "my-gateway")
+        self.assertEqual(row["base_url"], "https://gateway.example.com/v1")
+        self.assertFalse(row["deepseek"])
+        block = self.settings_file()["providers"]["my-gateway"]
+        self.assertEqual(block["base_url"], "https://gateway.example.com/v1")
+        self.assertEqual(block["protocol"], "openai_chat")
+        self.assertEqual(block["api_key"], "secret")
+
+    def test_a_custom_api_needs_a_name_and_a_base_url(self) -> None:
+        runtime = self.runtime()
+        with self.assertRaises(ConfigError):
+            runtime.apply_settings({"custom": True, "base_url": "https://x.test/v1"})
+        with self.assertRaises(ConfigError):
+            runtime.apply_settings({"custom": True, "name": "x"})
+        with self.assertRaises(ConfigError):
+            runtime.apply_settings(
+                {"custom": True, "name": "bad name", "base_url": "https://x.test"}
+            )
+
+    def test_a_custom_api_cannot_redefine_a_preset(self) -> None:
+        runtime = self.runtime()
+        with self.assertRaises(ConfigError):
+            runtime.apply_settings(
+                {"custom": True, "name": "ollama", "base_url": "https://x.test/v1"}
+            )
+
+    def test_a_hosted_custom_api_needs_a_key(self) -> None:
+        runtime = self.runtime()
+        with self.assertRaisesRegex(ConfigError, "API key"):
+            runtime.apply_settings(
+                {"custom": True, "name": "remote", "base_url": "https://x.test/v1"}
+            )
+
+    def test_a_custom_local_endpoint_may_skip_the_key(self) -> None:
+        runtime = self.runtime()
+        state = runtime.apply_settings(
+            {
+                "custom": True,
+                "name": "local-gw",
+                "base_url": "http://127.0.0.1:9000/v1",
+                "protocol": "openai_chat",
+                "model": "house-model",
+            }
+        )
+        self.assertEqual(state["provider"], "local-gw")
+        block = self.settings_file()["providers"]["local-gw"]
+        self.assertFalse(block["require_api_key"])
+
+    def test_deepseek_features_stay_available_from_another_provider(self) -> None:
+        """A second DeepSeek block keeps OCR and speech on another vendor's chat."""
+        import os
+
+        runtime = self.runtime(provider="ollama")
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}):
+            deepseek = runtime.describe()["deepseek"]
+        self.assertTrue(deepseek["available"])
+        self.assertFalse(deepseek["active"])
+        self.assertEqual(deepseek["provider"], "deepseek")
+        self.assertTrue(deepseek["ocr"])
+        self.assertTrue(deepseek["asr"])
+        # A document's file_id and the safety review ride on the chat request.
+        self.assertFalse(deepseek["documents"])
+        self.assertFalse(deepseek["safety"])
+        with self.assertRaises(ConfigError):
+            runtime.set_safety(True)
+
+    def test_a_keyless_deepseek_block_hides_the_http_features(self) -> None:
+        import os
+
+        runtime = self.runtime(provider="ollama")
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
+            deepseek = runtime.describe()["deepseek"]
+        self.assertFalse(deepseek["available"])
+        self.assertFalse(deepseek["ocr"])
+
+    def test_safety_does_not_follow_a_provider_switch(self) -> None:
+        runtime = self.runtime()
+        self.assertTrue(runtime.set_safety(True)["safety"])
+        state = runtime.apply_settings({"provider": "ollama"})
+        self.assertFalse(state["safety"])
+        self.assertFalse(state["deepseek"]["active"])
+
 
 class HttpTests(WebUiCase):
     def setUp(self) -> None:
@@ -668,21 +765,28 @@ class HttpTests(WebUiCase):
             "开启新对话",
             "新建文件夹",
             "今天有什么可以帮到你？",
+            'id="custom-fields"',
+            'id="base-url-input"',
+            'id="provider-name-input"',
         ):
             self.assertIn(fragment, page)
         status, css = self.request("GET", "/app.css")
         self.assertEqual(status, 200)
         self.assertIn(b"--dsw-alias-bg-base", css)
         self.assertIn(b"data-ds-dark-theme", css)
+        self.assertIn(b".custom-fields[hidden]", css)
         status, script = self.request("GET", "/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"/api/chat", script)
+        self.assertIn(b"CUSTOM_PROVIDER", script)
         status, body = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
         state = json.loads(body)
         self.assertEqual(state["workspace"], str(self.workspace.resolve()))
         self.assertTrue(state["providers"])
         self.assertIn("thinking", state)
+        self.assertIn("active", state["deepseek"])
+        self.assertTrue(any(item["deepseek"] for item in state["providers"]))
 
     def test_stylesheet_braces_are_balanced(self) -> None:
         """One stray ``{`` makes the browser drop every rule after it.
@@ -754,6 +858,46 @@ class HttpTests(WebUiCase):
             nested, [], f"function declarations not at top level: {nested}"
         )
         self.assertEqual(depth, 0, "script has an unbalanced brace")
+
+    def test_render_state_declares_the_capabilities_it_reads(self) -> None:
+        """Missing ``const deepseek`` blanks the page without a syntax error.
+
+        ``renderState`` reads the server capabilities through ``deepseek.``;
+        when that one declaration is dropped the script still parses, so
+        ``node --check`` stays quiet, but the first render throws a
+        ReferenceError and every switch on the page stops working.
+        """
+        status, script = self.request("GET", "/app.js")
+        self.assertEqual(status, 200)
+        text = _strip_js_literals(script.decode())
+        body = text.split("function renderState(state) {", 1)[1]
+        body = body.split("\n}\n", 1)[0]
+        self.assertIn("deepseek.", body)
+        self.assertRegex(body, r"(?m)^\s*const\s+deepseek\s*=")
+
+    def test_composer_buttons_can_wrap_instead_of_overlapping(self) -> None:
+        """窄窗口下开关曾撑破自己的盒子，直接盖到发送键上。
+
+        ``.toggles`` 允许被压到 0 宽，里面的 ``.toggle`` 却既不换行也不收缩，
+        于是按钮溢出到右侧的图标按钮上。两个容器都得能换行、开关自身得能
+        收缩，这样宽度再紧也只是换行，不会互相遮挡。
+        """
+        status, css = self.request("GET", "/app.css")
+        self.assertEqual(status, 200)
+        text = re.sub(r"/\*.*?\*/", "", css.decode(), flags=re.DOTALL)
+
+        def block(selector: str) -> str:
+            match = re.search(re.escape(selector) + r"\s*\{(.*?)\}", text, re.DOTALL)
+            self.assertIsNotNone(match, f"missing a rule for {selector}")
+            return match.group(1)
+
+        self.assertIn("flex-wrap: wrap", block(".function-row"))
+        self.assertIn("flex-wrap: wrap", block(".toggles"))
+        self.assertIn("min-width: 0", block(".toggles"))
+        self.assertIn("flex-wrap: wrap", block(".right"))
+        toggle = block(".toggle")
+        self.assertIn("min-width: 0", toggle)
+        self.assertNotIn("flex-shrink: 0", toggle)
 
     def test_settings_endpoint_writes_the_file(self) -> None:
         status, body = self.request(

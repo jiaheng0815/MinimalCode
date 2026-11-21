@@ -1,6 +1,6 @@
 # Architecture
 
-Applies to MinimalCode 1.8.1.
+Applies to MinimalCode 1.10.0.
 
 MinimalCode keeps one process and one HTTP connection pool per run. There is no daemon, UI framework, embedded database, or background service.
 
@@ -29,9 +29,9 @@ CLI
 | `shell.py` | Shell detection, command prefixing, sandbox delegation, UTF-8 normalization |
 | `prompt.py` | Concise default prompt, `AGENTS.md` discovery, marked summary block merge |
 | `provider/` | OpenAI Chat/Responses and Anthropic Messages payloads, HTTP retries, and SSE parsing |
-| `web.py` | Configurable provider web search and fetch client |
+| `web.py` | Optional fallback: the standalone Search/Fetch API client (off by default) |
 | `media.py` | Configurable provider OCR, speech, and document-parsing client |
-| `deepseek.py` | The DeepSeek-API-only capability set and the one predicate that gates it |
+| `deepseek.py` | The DeepSeek-API-only capability set, the server-tool switch, `feature_source()` (which configured block runs the HTTP-call features), and the predicate that gates it |
 | `clipboard.py` | Cross-platform clipboard image reader (PowerShell, osascript, wl-paste, xclip) |
 | `tools/` | Tool schemas, workspace-bound file/search/process tools, and dispatch |
 | `mcp/` | MCP client: JSON-RPC framing, stdio/HTTP/SSE transports, tool discovery, and the server manager |
@@ -41,7 +41,7 @@ CLI
 | `clawd.py` | Clawd on Desk bridge: prefs/runtime file discovery, lifecycle events, background delivery |
 | `agent.py` | Tool loop, concurrent subagent and read-only dispatch, usage accounting, compaction, session summary, interrupted-turn repair, in-session provider switch |
 | `highlight/` | Incremental Markdown rendering, code coloring, and ANSI styling |
-| `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap |
+| `cli.py` | Interactive and non-interactive command handling, `/model` runtime provider swap, `config add-provider` |
 | `webui/` | Loopback chat page: settings writes, workspace switching, streamed turns, sidebar folders and conversation deletion |
 
 ## Package layout
@@ -60,7 +60,7 @@ submodule that defines and uses them.
 | `files.py` | `read`/`read_range`, `write`, `append_file`, atomic line-ending-preserving `edit`, post-write validation and rollback |
 | `search.py` | Bounded `rg`/Python search processes, smart-case, output parsing |
 | `search_tools.py` | `grep` and `find`, ignore globs, sandbox glob exclusions |
-| `remote.py` | Provider-backed `read_image`, `web_search`, `web_fetch` |
+| `remote.py` | Provider-backed `read_image`, plus the optional local `web_search` / `web_fetch` fallback |
 | `media_tools.py` | Provider-backed `ocr`, `transcribe`, `speech`, and the `/attach` document upload |
 | `validation.py` | Argument arity/type checks before a handler runs |
 
@@ -68,6 +68,43 @@ submodule that defines and uses them.
 mixins, so every tool shares one sandbox, workspace, and configuration
 instance. It also owns the `MCPManager`, so the discovered MCP tools follow the
 same `tools.allow`, `--read-only`, and dispatch path as the built-in ones.
+
+The web path has two sources and one switch. `deepseek.server_tools(config)`
+returns the server-side tools the provider declares on the request
+(`deepseek_web_search`, `deepseek_read_url`); `web_tools.enabled` returns the
+standalone `web.py` client instead. `available_tool_schemas(...,
+server_tools=...)` hides the local `web_search` / `web_fetch` schemas while a
+server tool covers the same ground, and `ToolRuntime.dispatch` refuses a replayed
+local call, so one turn can never bill both paths.
+`deepseek.migration_notice()` reports an old `web_tools.enabled: true` settings
+file once at startup without rewriting it.
+
+A session has one chat provider, but the DeepSeek feature set may come from
+another configured block. `deepseek.feature_source(settings, active)` returns the
+first usable `api.deepseek.com` provider (the active one, then the `deepseek` and
+`deepseek-anthropic` presets, then names alphabetically, skipping a block whose
+`${VAR}` is unset or that requires a key it does not have).
+`deepseek.features(config, source=..., source_name=...)`
+answers both questions separately: `active` gates the request-side features
+(server tools, documents, safety, titles), `available` gates the HTTP-call ones
+(OCR, speech, the standalone Search API). The CLI builds its `web` / `media`
+clients from that source, and `WebRuntime` does the same, so switching to another
+vendor keeps the media tools; vision stays on the chat provider because it
+describes the image the user is about to send.
+answers both questions separately: `active` gates the request-side features
+(server tools, documents, safety, titles), `available` gates the HTTP-call ones
+(OCR, speech, the standalone Search API). The CLI builds its `web` / `media`
+clients from that source, and `WebRuntime` does the same, so switching to another
+vendor keeps the media tools; vision stays on the chat provider because it
+describes the image the user is about to send.
+
+Reasoning is display-only except inside a tool loop. `ProviderReply.reasoning`
+accumulates the deltas the Chat parser already streams, and `as_message()` writes
+expects that field back on the follow-up request. `_chat_messages()` drops a
+stale field from a finished answer, both for a resumed session and for an
+older file that never had one. Anthropic Messages keeps its signature blocks on
+older file that never had one. Anthropic Messages keeps its signature blocks on
+the same tool-call message; a finished answer retains neither.
 
 ### `mcp/`
 
@@ -100,7 +137,7 @@ with `-32601`; the client has no second model call to offer.
 | Module | Responsibility |
 |---|---|
 | `client.py` | `OpenAICompatibleProvider`: configuration, HTTP client, dispatch |
-| `chat.py` | Chat Completions payload, SSE stream, non-stream parsing |
+| `chat.py` | Chat Completions payload, SSE stream, non-stream parsing, reasoning capture and replay |
 | `responses.py` | Responses payload, event stream, non-stream parsing |
 | `anthropic.py` | Anthropic Messages payload, SSE stream, non-stream parsing |
 | `anthropic_env.py` | Claude Code style `ANTHROPIC_*` environment provider for `--anthropic-env` |
@@ -108,15 +145,17 @@ with `-32601`; the client has no second model call to offer.
 | `transport.py` | Request construction, connection retries, HTTP status retries |
 | `common.py` | Usage/content/argument normalization shared by every protocol |
 | `server_tools.py` | DeepSeek server-tool blocks: parse, normalize for display, replay read links |
-| `types.py` | `ToolCall`, `ProviderReply` |
+| `types.py` | `ToolCall`, `ProviderReply` (content, calls, usage, preserved protocol blocks, reasoning, title) |
 | `factory.py` | `create_provider` and provider/model/effort resolution |
 
 ### `webui/`
 
 | Module | Responsibility |
 |---|---|
-| `runtime.py` | `WebRuntime`: vendor/format/model/API-key writes, workspace switch, session list and reopen, thinking switch, one streamed turn |
-| `server.py` | `ThreadingHTTPServer` routes, `Host`/`Origin` checks, SSE framing, directory listing for the folder picker |
+| `runtime.py` | `WebRuntime`: vendor/format/model/API-key/custom-endpoint writes, workspace switch, session list and reopen, thinking switch, DeepSeek switches, capability split between the chat and feature providers, one streamed turn |
+| `server.py` | `ThreadingHTTPServer` routes, `Host`/`Origin` checks, SSE framing, bounded JSON and upload bodies, directory listing for the folder picker |
+| `library.py` | `FolderLibrary`: folder index and conversation-to-folder filing (`<home>/webui/folders.json`) |
+| `thinking.py` | `ThinkingLog`: display-only reasoning blocks that survive a reload (`<home>/webui/thinking.json`) |
 | `assets/` | `index.html`, `app.css`, `app.js`; package data, no build step and no front-end dependency |
 
 The page is a reproduction of the [deepseek-ai/chat-demo](https://github.com/deepseek-ai/chat-demo)
@@ -202,6 +241,29 @@ per-instance lock: two tabs (or a delete racing a finishing turn) would otherwis
 write a snapshot taken before the other's change, and `thinking.json` would even
 resurrect a conversation that was just deleted.
 
+`_apply_switches()` is the one place the composer's DeepSeek switches reach a live
+provider: when the chat provider is the DeepSeek API it sets `server_tools` and
+the safety level, then copies `provider.server_tools` onto the tool runtime and
+calls `refresh_tools()`. Both halves matter — the schemas decide what the model is
+offered, the runtime decides what `dispatch` will refuse — so the page never shows
+an ability the request does not carry, or the other way round. Another vendor's
+endpoint would reject those declarations, so there the 联网 switch only drives the
+standalone client. `describe()` derives `web_search_mode` from that same state
+(`server` when the service-side tool covers it, `local` when the standalone Search
+API would be called, `off` otherwise) instead of caching it.
+
+The capability block therefore answers two questions. `deepseek.active` (the chat
+provider is the DeepSeek API) gates server tools, documents, safety, and titles;
+`deepseek.available` (any configured DeepSeek block) gates OCR, speech, and the
+standalone Search API, which are served by `deepseek.feature_source()`. `_build()`
+constructs the media client from that source and the web client from whichever
+block actually has `web_tools`, so a session on another vendor keeps the media
+tools. `_require_media()` checks the capability flag as well as the client: a
+document's `file_id` is attached to the chat request, so it is refused when the
+chat provider cannot carry it. The page's provider dropdown marks DeepSeek blocks,
+offers a "自定义 API…" entry, and `apply_settings(custom=True)` validates the name
+and base URL before writing `providers.<name>` as a delta.
+
 The HTTP surface is deliberately small; every route below is loopback-only.
 
 | Route | Method | Purpose |
@@ -212,19 +274,35 @@ The HTTP surface is deliberately small; every route below is loopback-only.
 | `/api/sessions` | GET | Conversations and the folder index for this workspace |
 | `/api/browse?path=` | GET | Subdirectory names only, for the folder picker |
 | `/api/chat` | POST | One streamed turn, framed as SSE events |
-| `/api/settings` | POST | Delta write of provider, format, model, and key |
+| `/api/settings` | POST | Delta write of provider, format, model, and key; `custom` + `name` + `base_url` define a new endpoint |
 | `/api/session` | POST | Reopen a recorded conversation |
 | `/api/session/delete` | POST | Delete one conversation |
 | `/api/session/folder` | POST | Move a conversation into a folder |
 | `/api/folder` | POST | Create a folder, or rename one when `id` is given |
 | `/api/folder/delete` | POST | Delete a folder; its conversations return to uncategorized |
 | `/api/thinking` | POST | Turn the reasoning request on or off |
+| `/api/web-search` | POST | Turn the DeepSeek web path on or off (server-side tools, or the standalone Search API) |
+| `/api/safety` | POST | Turn the server-side content review on or off |
+| `/api/attach?name=` | POST | Upload a document to the Files API and queue its `file_id` for the next message |
+| `/api/detach` | POST | Drop a queued attachment |
+| `/api/ocr` | POST | Recognise the text in a PDF, Office file, or image |
+| `/api/transcribe` | POST | Transcribe 16 kHz mono PCM WAV audio |
+| `/api/speech` | POST | Synthesize an answer into audio |
 | `/api/workspace` | POST | Switch the working directory |
 | `/api/new` | POST | Start a new conversation |
 
 `/api/chat` frames `start`, `round`, `delta`, `thinking`, `activity`, `notice`,
-`done`, and `error`. While a turn is streaming, the mutating routes answer 409
-(`Busy`) instead of swapping the runtime under the tool that is running.
+`tool_block`, `done`, and `error`; `tool_block` is one server-side search or
+read-link block, merged into a card by call id. `/api/state` reports
+`web_search` (the switch), `web_search_mode` (`server` / `local` / `off`) and
+`web_search_available` (either path is configured), so the page can show the
+switch exactly when turning it on would do something. While a turn is streaming,
+the mutating routes answer 409 (`Busy`) instead of swapping the runtime under the
+tool that is running.
+
+Uploads take their own limits rather than the 1 MiB JSON body cap: documents
+100 MiB, audio 8 MiB, and an over-limit body closes the connection so the unread
+bytes cannot be parsed as the next request.
 ### `highlight/`
 
 | Module | Responsibility |

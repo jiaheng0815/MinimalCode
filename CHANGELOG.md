@@ -1,5 +1,32 @@
 # 更新日志
 
+## 1.10.0 - 2026-12-04
+
+一个会话只用一个聊天接入点，但配置里其余的接入点不再闲着：OCR、语音识别、朗读与独立的 Search/Fetch API 可以由另一个 DeepSeek 接入点执行。同时新增自定义接入点，并让 Chat 协议把工具循环里的思考带进下一轮请求。
+
+### 新增
+
+- 多家 API 同时使用：新增 `deepseek.feature_source(settings, active)`，在配置里找出提供 DeepSeek 专属能力的接入点（当前供应商是 DeepSeek API 时就是它自己，否则按 `deepseek` → `deepseek-anthropic` → 其它供应商名的顺序，跳过 `${VAR}` 未展开或缺少必需 Key 的块）。OCR、语音识别、朗读与独立 Search/Fetch API 由这个接入点的地址与 Key 执行，所以当前对话换成 OpenAI、Ollama 或自定义网关时这些工具仍然在；服务端工具、文档、内容安全、会话标题写在聊天请求里，仍然要求当前接入点本身是 `api.deepseek.com`。`features()` 因此拆成 `available`（有 DeepSeek 接入点）与 `active`（当前对话在它上面），并新增 `provider` 与 `active_reason`。CLI（启动、`/model` 切换）与网页端共用同一套判定。
+- 自定义 API：新增 `minimalcode config add-provider <name> --base-url URL [--protocol P] [--model M] [--api-key-env VAR|--api-key KEY]`，以及网页端「模型设置 → API 厂家 → 自定义 API…」（名称 + 接入地址 + 格式 + 模型 + Key）。两者都只新增 `providers.<name>`，内置预设不被覆盖，名称按 `[A-Za-z0-9][A-Za-z0-9._-]{0,31}` 校验，重复即报错；远程接入点要求 Key，`127.0.0.1` / `localhost` 可留空并写入 `require_api_key: false`。网页端 `POST /api/settings` 新增 `custom`、`name`、`base_url` 三个字段。
+- 思考进入上下文：Chat 协议现在把本轮推理累积到 `ProviderReply.reasoning`，带 `tool_calls` 的助手消息以 `reasoning_content` 存进会话并在下一次请求回传（DeepSeek 的要求）；没有工具调用的回答仍然不保留，`_chat_messages` 也会把旧会话里残留的 `reasoning_content` 从已结束的回答上摘掉。Anthropic Messages 的 `signature` 回传逻辑不变。
+- 网页：厂家下拉框标出可提供 DeepSeek 能力的接入点，末尾新增「自定义 API…」；设置面板多出名称与接入地址两个输入框，保存前在服务端校验。
+
+### 修复
+
+- CLI：`/model`（含切换 provider）与 `/new` 重建 `ToolRuntime` 时补上 `server_tools`。此前只有启动路径传了这个参数，切换后 dispatch 层「server tool 已覆盖」的拒绝失效，恢复的旧会话或模型误调会让本地 `web_search` 真的去调按次计费的 Search API。
+- 网页端「联网搜索」开关只认 server tools：配置里 `server_tools.enabled: false` 而 `web_tools.enabled: true` 时按钮被隐藏，硬要打开还会报 `web search is not available here`——明明独立 Search API 可用。现在按 `_web_path()` / `web_search_available` 判定，`server` 或 `local` 任一可用即可显示并打开按钮。
+- `webui/runtime.py` 的 `_apply_switches()` 里 `set_server_tools` / `set_safety_level` 被整段重复调用，开关实际执行了两遍。
+- `_require_media()` 同时检查能力开关与客户端：文档的 `file_id` 要写进聊天请求，所以当前接入点不是 DeepSeek API 时上传会被拒绝并说明原因，不会把 `file_id` 发给一个不认识它的端点。
+- 网页：`_apply_switches()` 在 `_build()` 里会改动旧 agent 的工具列表，切换失败时那份已回滚的配置仍留在运行中的 agent 上；现在只对当前的 provider 刷新工具。切到非 DeepSeek 接入点时会清掉记住的「内容安全」开关，避免页面上显示一个请求里并不存在的审核。
+- `defaults.json` 里 `deepseek-anthropic` 的 `web_tools` 重复写了一次 `base_url`（JSON 后者覆盖前者，静态检查看不出来），已去掉重复键。
+
+### 变更
+
+- 网页端能力展示改为按 `active` / `available` 分开：内容安全与附件只在当前接入点是 DeepSeek API 时出现，OCR、语音、朗读只看有没有可用的 DeepSeek 接入点；「联网搜索」的服务端路径只看 `active`，独立 Search API 路径只看 `available`。
+- 网页：`_require_media()` 也接受另一个 DeepSeek 接入点的媒体客户端；`_build()` 从 `feature_source()` 取 media 客户端，vision 仍跟随聊天接入点。
+- 版本号升级到 1.10.0。新增 CLI 子命令 `config add-provider`，新增公开函数 `deepseek.feature_source()` 与 `config.valid_provider_name()`，`ProviderReply` 新增 `reasoning` 字段。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 文档：`README.md` 的当前版本从 1.8.1 补到 1.10.0（1.9.0 发布时漏了），并补网页界面的自定义 API、多家 API 同时使用、Chat 的推理回传、工具表里的媒体来源与 1.9.0 → 1.10.0 升级说明；`docs/configuration.md` 补 `Custom endpoints`、`Which provider supplies the DeepSeek feature set`、`require_api_key` 与推理回传；`docs/architecture.md` 补 `feature_source()`、能力分流、`_require_media()` 与 `types.py`/`chat.py` 的 reasoning；`docs/compatibility.md` 把适用范围更新到 1.10.0，并记录新公开名字、`reasoning_content` 与自定义接入点的行为变化。
+
 ## 1.9.0 - 2026-12-03
 
 网页端接上 DeepSeek 官方 API 的整套 Chatbot 能力：联网搜索、深度思考搜索、阅读链接、文件解析、内容安全、语音输入与朗读、OCR，并且只在 `api.deepseek.com` 上可用——DeepSeek 网页版协议同样不行。
@@ -64,7 +91,6 @@
 
 - 新增回归测试：压缩重写保留标题、标题写入失败时不覆盖旧标题（`test_session.py`）；压缩不让历史变长、切换 provider 保留重试钩子、附件不因写入失败丢失（`test_agent.py`）；别的回环端口被拒、刷新后思考默认展开且可切换、跨工作区会话不可打开、切换失败保留原 provider、一轮进行中不能改设置（`test_webui.py`）。
 
-## 1.8.0 - 2026-11-20
 ## 1.8.0 - 2026-11-20
 
 网页界面：`minimalcode --web` 起一个本地聊天页面，页面上可以换 API 厂家、API 格式、模型，并选择本地文件夹作为 agent 的工作目录。

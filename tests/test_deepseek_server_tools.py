@@ -584,12 +584,50 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.runtime._ensure_agent()
         state = self.runtime.set_web_search(True)
         self.assertTrue(state["web_search"])
+        self.assertEqual(state["web_search_mode"], "server")
         self.assertEqual(
             self.provider.server_tools,
             ("deepseek_web_search", "deepseek_read_url"),
         )
+        # The tool runtime follows the provider, so a replayed local call cannot
+        # slip through while the server-side tool already covers it.
+        agent_tools = self.runtime._agent.tools
+        self.assertEqual(
+            agent_tools.server_tools, ("deepseek_web_search", "deepseek_read_url")
+        )
+        from minimalcode.errors import ToolError
+
+        with self.assertRaisesRegex(ToolError, "server-side tool"):
+            agent_tools.dispatch("web_search", {"query": "q"})
+        state = self.runtime.set_web_search(False)
+        self.assertEqual(self.provider.server_tools, ())
+        self.assertEqual(state["web_search_mode"], "off")
         self.runtime.set_safety(True)
         self.assertEqual(self.provider.safety_level, "high")
+
+    def test_the_switch_also_turns_on_the_standalone_api(self) -> None:
+        # An older settings file kept `web_tools` on and `server_tools` off. The
+        # Search API is a real web path, so the composer switch must be offered
+        # and must turn on instead of refusing with "not available here".
+        self.runtime._ensure_agent()
+        self.provider.config["server_tools"] = {"enabled": False}
+        self.provider.deepseek = features(self.provider.config)
+        state = self.runtime.describe()
+        self.assertTrue(state["web_search_available"])
+        self.assertFalse(state["deepseek"]["web_search"])
+        state = self.runtime.set_web_search(True)
+        self.assertEqual(state["web_search_mode"], "local")
+
+    def test_the_switch_stays_shut_when_no_web_path_exists(self) -> None:
+        from minimalcode.config import ConfigError
+
+        self.runtime._ensure_agent()
+        self.provider.config["server_tools"] = {"enabled": False}
+        self.provider.config["web_tools"] = {"enabled": False}
+        self.provider.deepseek = features(self.provider.config)
+        self.assertFalse(self.runtime.describe()["web_search_available"])
+        with self.assertRaisesRegex(ConfigError, "not available"):
+            self.runtime.set_web_search(True)
 
     def test_uploads_queue_and_cancel_documents(self) -> None:
         state = self.runtime.attach_document("report.pdf", b"%PDF-1.4", None)

@@ -4,29 +4,74 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.8.1`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.10.0`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+
+## 目录
+
+- [特性](#特性)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [网页界面](#网页界面)
+- [CLI 参考](#cli-参考)
+- [交互命令](#交互命令)
+- [工具](#工具)
+- [配置](#配置)
+  - [同时使用多家 API](#同时使用多家-api)
+  - [自定义接入点](#自定义接入点)
+  - [内置供应商预设](#内置供应商预设)
+  - [从 Claude Code 环境变量启动](#从-claude-code-环境变量启动)
+- [终端高亮](#终端高亮)
+- [安全边界](#安全边界)
+- [桌宠集成（Clawd on Desk）](#桌宠集成clawd-on-desk)
+- [开发](#开发)
+- [项目结构](#项目结构)
+- [升级指南](#升级指南)
+- [后续工作](#后续工作)
 
 ## 特性
 
-- **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。Windows 上会跳过 `C:\Windows\System32\bash.exe`（WSL 启动器），它看起来像 bash，但会把命令送进 Linux 命名空间。
-- **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
-- **文件与语音**（DeepSeek 工具 API）：`ocr` 逐页识别 PDF / Word / PowerPoint / 图片；`transcribe` 把音频转写成文字（语音输入）；`speech` 把文本合成为音频写入工作区（语音输出）；`/attach` 上传文档拿 `file_id`，随下一条消息交给模型按原始版式阅读（含文档里的图）；`/listen` 转写后直接作为消息发送，`/say` 朗读指定文本或上一条回答。图像、OCR、语音与网页四个客户端共用一套代理与重试策略。这些接口按页 / 按音频秒 / 按字符计费，所以**不做自动重试**，超限文件在离开本机前就被拒绝。
-- **搜索质量**：结果按 `rerank_score` 排序后去重，镜像页只保留分数最高的一份；`min_rerank_score` 可过滤低质结果；`web_search` 的 query 支持 `site:`、`-site:`、`-词`、`"精确短语"`、`lang:zh,en`、`after:`、`before:` 等搜索语法。
-- **联网工具与网页端 Chatbot 能力**（仅 `api.deepseek.com`）：`server_tools` 打开 `deepseek_web_search`（关闭思考即联网搜索，开启思考即深度思考搜索）与 `deepseek_read_url`（阅读用户消息里的链接），搜索和抓取都在服务端完成，客户端只负责渲染卡片与回传 `read_link` 的 `signature`；网页端因此多了「联网搜索」「内容安全」开关、文档上传（Files API + `file_id`）、OCR 取字、语音输入（自拼 16 位 PCM WAV）与朗读回答。换成别的接入点（包括 DeepSeek 网页版协议）时这些开关直接隐藏并给出原因，不会发出注定 400 的请求。
-- **会话标题与元信息**：DeepSeek 预设开启 `session_title` 后，会话的第一次请求会让供应商顺带生成一个短标题，写入独立的 `title` 事件，`minimalcode sessions` 会显示它；`reminder` 配置让每个用户回合前带上一条 `latest_reminder`（日期、星期、所在地、平台、语言），星期按该语言自身写法输出。`safety_check.level: high` 打开服务端内容风控，拒答会被当作回合提前结束上报。
-- **MCP 工具**：`mcp.servers` 里的 Model Context Protocol 服务器会以 `mcp__<服务器>__<工具>` 出现在工具列表里，支持 `stdio`、streamable HTTP 和旧版 HTTP+SSE 三种传输。启动失败的服务器只记录错误、不影响其余工具；`/mcp` 查看状态，`/mcp refresh` 重新发现工具。未配置服务器时不启动任何进程或线程。
-- **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。同一轮里相邻的只读工具会并发执行（上限 `tools.max_parallel`，默认 4），结果仍按请求顺序写回；只读调用旁边出现 `write` / `shell` / `subagent` 时保持严格顺序。
-- **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架。
-- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。压缩后如果文件比保留的状态大一倍以上（且超过 64 KiB），会原子重写成「meta + 压缩状态」，避免把同一段历史存两遍；小会话保持纯追加。
-- **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`。
-- **编码可见**：`read` 用严格 UTF-8 先扫一遍请求范围，遇到非 UTF-8 字节时改用替换解码返回内容，并在 `warnings` 里说明 `edit` 会拒绝该文件；UTF-8 BOM 会被去掉，不再出现在第一行。
-- **会话总结**：`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
-- **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
+### 接入与协议
+
 - **协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 DeepSeek 网页版（`deepseek_web`），其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
 - **多供应商切换**：内置 37 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
-- **网页界面**：`minimalcode --web` 在本地起一个聊天页面（一个 HTML + 一个 CSS + 一个 JS，随 wheel 一起安装，没有构建步骤与前端依赖）。页面里可以直接换 API 厂家、API 格式（Chat Completions / Responses / Anthropic Messages / DeepSeek Web）、模型和 API Key，也可以选一个本地文件夹作为 agent 的工作目录；工具仍走同一套 `ToolRuntime`、沙箱、白名单与只读模式，页面只是同一个 agent 的另一个前端。
+- **同时使用多家 API**：一个会话只用一个聊天接入点，但其它已配置的接入点仍可各司其职。只要配置里有一个 DeepSeek API 接入点（当前对话不在它上面也行），OCR、语音识别、语音朗读和独立的 Search/Fetch API 就由那个接入点提供；服务端联网工具、文档解析、内容安全和会话标题这类「写在请求里」的能力，仍然要求当前聊天接入点就是 `api.deepseek.com`。详见[同时使用多家 API](#同时使用多家-api)。
+- **自定义 API**：`minimalcode config add-provider` 或网页端的「自定义 API…」，写入任意 OpenAI 兼容、Anthropic 兼容或 DeepSeek 接入点。只新增 `providers.<name>`，内置预设保持不变。详见[自定义接入点](#自定义接入点)。
+
+### 工具与执行
+
+- **Shell 优先使用 pwsh**：Windows 上按 `pwsh` → `powershell.exe` → Git Bash（`bash`）选择，其他平台按 `pwsh` → `bash` → `zsh` → `sh` 选择；每个候选都会先探测能否启动，启动时解析一次，可在配置中固定路径。Windows 上会跳过 `C:\Windows\System32\bash.exe`（WSL 启动器），它看起来像 bash，但会把命令送进 Linux 命名空间。
+- **工具白名单与只读模式**：`tools.allow` 列出允许的工具名，`--read-only` 只保留 `read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`；两者取交集。被禁用的工具既不发给模型，直接在 `dispatch` 里调用也会被拒绝，因此恢复的旧会话或忽略 schema 的供应商都绕不过去。
+- **搜索不依赖 shell**：`grep` / `find` 直接用 `rg` 子进程或内置 Python 遍历实现，不经过 pwsh，因此没有引号、通配符和对象管道语义的偏差。同一轮里相邻的只读工具会并发执行（上限 `tools.max_parallel`，默认 4），结果仍按请求顺序写回；只读调用旁边出现 `write` / `shell` / `subagent` 时保持严格顺序。
+- **搜索语义一致**：有 `rg` 与没有 `rg` 时跳过相同的忽略目录，使用相同的 smart-case 与 glob 语义（`*` 不跨目录、`**/` 可匹配零层、大小写敏感），都不解析 `.gitignore`，也都不受 `RIPGREP_CONFIG_PATH` 影响。
+- **编码可见**：`read` 用严格 UTF-8 先扫一遍请求范围，遇到非 UTF-8 字节时改用替换解码返回内容，并在 `warnings` 里说明 `edit` 会拒绝该文件；UTF-8 BOM 会被去掉，不再出现在第一行。
+- **写入即校验**：`write`、`edit`、`append_file` 写入 Python 文件后先跑 `py_compile`，装有时再跑 `ruff`；出现新诊断就原子回滚并返回文件、行号和源码预览。改动前已经存在的 lint 问题不会阻塞无关编辑。
+
+### 联网与多模态
+
+- **联网工具与网页端 Chatbot 能力**（仅 `api.deepseek.com`）：`server_tools` 打开 `deepseek_web_search`（关闭思考即联网搜索，开启思考即深度思考搜索）与 `deepseek_read_url`（阅读用户消息里的链接），搜索和抓取都在服务端完成，客户端只负责渲染卡片与回传 `read_link` 的 `signature`；网页端因此多了「联网搜索」「内容安全」开关、文档上传（Files API + `file_id`）、OCR 取字、语音输入（自拼 16 位 PCM WAV）与朗读回答。换成别的接入点（包括 DeepSeek 网页版协议）时这些开关直接隐藏并给出原因，不会发出注定 400 的请求。
+- **搜索质量**：结果按 `rerank_score` 排序后去重，镜像页只保留分数最高的一份；`min_rerank_score` 可过滤低质结果；`web_search` 的 query 支持 `site:`、`-site:`、`-词`、`"精确短语"`、`lang:zh,en`、`after:`、`before:` 等搜索语法。
+- **文件与语音**（DeepSeek 工具 API）：`ocr` 逐页识别 PDF / Word / PowerPoint / 图片；`transcribe` 把音频转写成文字（语音输入）；`speech` 把文本合成为音频写入工作区（语音输出）；`/attach` 上传文档拿 `file_id`，随下一条消息交给模型按原始版式阅读（含文档里的图）；`/listen` 转写后直接作为消息发送，`/say` 朗读指定文本或上一条回答。图像、OCR、语音与网页四个客户端共用一套代理与重试策略。这些接口按页 / 按音频秒 / 按字符计费，所以**不做自动重试**，超限文件在离开本机前就被拒绝。
+- **图像理解**：`read_image` 交给供应商 `vision` 配置指向的任意 OpenAI 兼容端点，格式按文件内容判断（JPEG / PNG / GIF / WebP）；交互模式下空回车可以直接读取剪贴板里的图片。详见[图像理解](#图像理解)。
+
+### 会话与上下文
+
+- **会话**：追加式 JSONL 自动保存，支持继续最近会话、按 ID 恢复、按工作区隔离。`--session` 只接受 `.jsonl` 文件；文件里记录的 workspace 只有在文件位于配置目录 `sessions/` 之下时才会被信任。压缩后如果文件比保留的状态大一倍以上（且超过 64 KiB），会原子重写成「meta + 压缩状态」，避免把同一段历史存两遍；小会话保持纯追加。
+- **上下文管理**：接近上限时自动压缩较早消息，也可手动 `/compact`；`/summary` 让模型把当前会话总结成仓库笔记写入工作区 `AGENTS.md`，已存在时只更新标记块，其余内容不动。
+- **推理进入上下文**：推理内容在终端按 `h6` 样式显示，不进入 `--json`。工具循环里它必须回传：Chat 把本轮的 `reasoning_content` 存到带 `tool_calls` 的助手消息上并在下一次请求原样发出（DeepSeek 的要求，缺了它思考模型会重复或推翻自己的计划），Anthropic Messages 回传带 `signature` 的 thinking 块。已经结束的回答不保留，避免把上一轮的推理塞进新请求。
+- **会话标题与元信息**：DeepSeek 预设开启 `session_title` 后，会话的第一次请求会让供应商顺带生成一个短标题，写入独立的 `title` 事件，`minimalcode sessions` 会显示它；`reminder` 配置让每个用户回合前带上一条 `latest_reminder`（日期、星期、所在地、平台、语言），星期按该语言自身写法输出。`safety_check.level: high` 打开服务端内容风控，拒答会被当作回合提前结束上报。
+- **规则文件**：读取全局和项目级 `AGENTS.md` / `CLAUDE.md`，每次运行开始前重新读取（文件不存在则跳过）；可用 `SYSTEM.md` 替换默认系统提示词。
+
+### 界面与可观测性
+
+- **网页界面**：`minimalcode --web` 在本地起一个聊天页面（一个 HTML + 一个 CSS + 一个 JS，随 wheel 一起安装，没有构建步骤与前端依赖）。页面里可以直接换 API 厂家、API 格式、模型和 API Key，也可以选一个本地文件夹作为 agent 的工作目录；工具仍走同一套 `ToolRuntime`、沙箱、白名单与只读模式，页面只是同一个 agent 的另一个前端。
+- **纯文本输出**：流式打印，在交互终端中增量渲染 Markdown 高亮，不使用 Rich、Textual 或其他 UI 框架；stdout 只放回答，工具活动走 stderr。
 - **脚本友好**：`--json` 输出机器可读结果，stdout 与工具活动分离。
 - **用量可见**：每次任务结束在 stderr 打印本轮 token 用量（prompt、completion、total，以及非零的 cached/reasoning）。供应商没有返回 usage 时按字符宽度估算并标注 `(estimated)`，不会把猜出来的数字当成计费结果。
+
+### 扩展
+
+- **MCP 工具**：`mcp.servers` 里的 Model Context Protocol 服务器会以 `mcp__<服务器>__<工具>` 出现在工具列表里，支持 `stdio`、streamable HTTP 和旧版 HTTP+SSE 三种传输。启动失败的服务器只记录错误、不影响其余工具；`/mcp` 查看状态，`/mcp refresh` 重新发现工具。未配置服务器时不启动任何进程或线程。
+- **子代理**：`subagent` 在子 shell 里启动一个新的 `minimalcode -p`，只把最终答复带回主会话；同一轮里相邻的多个调用并发执行，结果按请求顺序写回。
 
 ## 安装
 
@@ -46,6 +91,30 @@ minimalcode init
 
 要求 Python 3.11–3.13。安装 `ripgrep`（`rg`）是可选的，但会让 `grep` / `find` 更快，并获得更完整的 ripgrep 语义。`deepseek_web` 协议需要可选的 wasm 运行时：`python -m pip install "minimalcode[deepseek-web]"`。
 
+## 快速开始
+
+推荐 API：[<img src="https://www.deepseek.com/favicon.ico" width="16" height="16" alt="DeepSeek 图标"> DeepSeek 开放平台](https://platform.deepseek.com)
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-key"
+minimalcode
+```
+
+交互模式启动后会显示供应商/模型、当前工作区、shell 和会话文件路径。
+
+输入支持多行：行尾写 `\` 回车继续下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠；也可以直接粘贴整段长文本，粘贴块里的换行不会被当作多次提交，整段内容作为一条消息发送。`-p` 或管道输入时不做改写。
+
+如果剪贴板里是图片，先按终端的粘贴快捷键（Windows 为 `Ctrl+V`，macOS 为 `Cmd+V`，多数 Linux 终端为 `Ctrl+Shift+V`）再回车即可发送：终端本身无法把图片粘进输入行，所以 MinimalCode 把空回车当作读取剪贴板的信号。随后可以输入要一起发送的问题再回车；直接回车则让视觉模型完整描述图片。图片不需要事先保存成文件，由供应商 `vision` 配置的视觉模型转成文字描述后随消息一起发给主模型；未配置 `vision` 时该功能不可用。
+
+单次任务：
+
+```powershell
+minimalcode "找出这个项目测试失败的原因并修好"
+minimalcode -p "运行测试并总结" --json
+```
+
+`-p/--print` 表示非交互执行，必须同时给出提示词或通过标准输入管道传入；`--json` 隐含该模式。
+
 ## 网页界面
 
 ```powershell
@@ -58,13 +127,631 @@ minimalcode --web --web-port 9000 --cwd D:\work\repo --provider deepseek -m deep
 - 侧边栏是「文件夹 / 对话」两级：先在「新建文件夹」建一个分类，再把对话移进去（对话悬停出现「移入文件夹」与「删除对话」两个按钮，文件夹标题悬停可以重命名或删除；删除文件夹只是把里面的对话放回「未分类」）。点一条对话就接着聊，点文件夹标题折叠或展开，折叠状态记在浏览器本地。文件夹与归属存在配置目录的 `webui/folders.json`，会话 JSONL 文件本身不动，所以终端里的 `--continue` 看到的还是同一份记录。
 - 「删除对话」会真的把这条会话从 `sessions/` 里删掉（不可撤销），删掉的正好是当前打开的那条时页面回到新对话状态。
 - 设置（左侧栏底部）分「模型设置」和「通用设置」两页：**API 厂家**、**API 格式**、**模型**、**API Key**，以及主题和工作目录。保存后写回 `settings.json`（只写你改动的键，`${VAR}` 占位符与内置预设保持原样），下一次请求立即生效，不用重启；关掉页面再打开也还在。
-- 输入框左侧的「深度思考」是本次运行的推理开关（关掉等于 `thinking: none`，不写配置文件），右侧「工作目录」显示当前文件夹，点开选择任意本地目录，agent 的文件、搜索与 shell 工具随即以该目录为工作区。
+- 「API 厂家」列表末尾是「自定义 API…」：填一个名称（`[A-Za-z0-9][A-Za-z0-9._-]{0,31}`）和接入地址，选好格式与模型，保存后它就和内置预设一样出现在列表里并立即切换过去。远程接入点必须带 API Key，`127.0.0.1` / `localhost` 这类本地服务可以留空（会写成 `require_api_key: false`）。名称重复会被拒绝，内置预设不会被覆盖。
+- 「联网搜索」在两条路任一可用时出现：当前接入点就是 DeepSeek API（服务端工具 `deepseek_web_search` / `deepseek_read_url`，关闭思考是联网搜索，开启思考即深度思考搜索），或任一 DeepSeek 接入点打开了 `web_tools`（本进程调用独立的 Search/Fetch API）。搜索结果与打开的网页按调用合并成卡片、回答下的引用渲染成来源列表。「内容安全」只在当前聊天接入点是 `api.deepseek.com` 时出现，打开后发送 `safety_check.level: high`，命中风险时拒答。两者都不再可用时按钮直接隐藏，悬停提示原因，不会发出注定 400 的请求。
+- 输入框上方还有附件、OCR 与语音入口：附件走 Files API 上传，拿到的 `file_id` 随下一条消息交给模型按原始版式阅读（含文档里的图）；OCR 识别 PDF / Office / 图片里的文字后直接填进输入框；麦克风录一段话（前端自拼 16 kHz 单声道 WAV）转写成文字再发送；回答下方可以朗读。这些接口是独立的 HTTP 调用，所以当前对话换成别的厂家、而配置里仍有一个 DeepSeek API 接入点时，OCR / 语音 / 朗读照常可用（由那个接入点的 Key 与地址执行）；附件和内容安全因为要写在聊天请求里，仍然跟着当前接入点走。
 - `Enter` 发送、`Shift+Enter` 换行；回答按 SSE 流式追加。每次模型请求在页面上是一个独立段落，段内固定「思考 → 正文 → 工具」，所以工具循环的多轮不会把思考和正文各堆成一大块，正文也不会跑进思考区。思考块默认展开、刷新后仍然在，点标题（或聚焦后按 `Enter`/空格）折叠成「已思考（用时 N 秒）」，再点一次展开；折叠过一次之后新页面也跟着折叠，这个偏好只存在浏览器本地。
 - `--web-host` 默认只绑定 `127.0.0.1`，`Host`/`Origin` 不匹配的请求一律 403：页面能执行工具，所以不能被别的网页跨域驱动。确实要从别的机器访问时用 `--web-host 0.0.0.0`，并自己想清楚谁能打开这个端口。
 
 `--web` 不能和提示词、`--session`、`--continue` 一起用；`--read-only`、`--sandbox-*`、`--no-session`、`--provider`、`--model` 仍然生效（它们只决定页面启动时的初始状态）。
 
+## CLI 参考
+
+```text
+minimalcode [prompt ...] [options]
+```
+
+| 选项 | 说明 |
+|---|---|
+| `prompt ...` | 初始消息。给出后执行一轮任务并退出 |
+| `-p`, `--print` | 非交互模式；缺少提示词时报错 |
+| `--json` | 输出 JSON 并隐含 `--print`，同时隐藏工具活动 |
+| `-c`, `--continue` | 继续当前目录最近一次会话 |
+| `--session <id>` | 指定会话：完整 ID、前缀或 `.jsonl` 路径 |
+| `--no-session` | 本次运行不读写会话 |
+| `--provider <name>` | 覆盖配置中的供应商 |
+| `--anthropic-env` | 用 Claude Code 风格的 `ANTHROPIC_*` / `CLAUDE_CODE_*` 环境变量直接启动 Anthropic Messages 协议，不修改配置文件；不能与 `--provider` 同用 |
+| `-m`, `--model <id>` | 覆盖模型 |
+| `--attach <path>` | 首轮之前上传并解析该文档，`file_id` 随第一条用户消息附带；可重复。适合非交互（`-p`）运行 |
+| `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
+| `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
+| `--read-only` | 只保留 `read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`，以及 MCP 服务器标记为只读的工具；拒绝任何可能改动工作区的工具 |
+| `--cwd <dir>` | 指定工作区 |
+| `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
+| `--web` | 启动本地网页界面代替终端交互；不能与提示词、`--session`、`--continue` 同用 |
+| `--web-host <host>` | 网页界面绑定地址，默认 `127.0.0.1`（只绑回环） |
+| `--web-port <port>` | 网页界面端口，默认 `8090`；`0` 表示由系统分配 |
+| `--sandbox`, `--no-sandbox` | 开启/关闭沙箱执行层（默认关闭，等价于默认 `--no-sandbox`）。无论开关，文件工具的工作区与敏感文件边界都生效 |
+| `--sandbox-backend <name>` | `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker` |
+| `--sandbox-root <path>` | 额外允许的读写根，可重复 |
+| `--sandbox-network <policy>` | `deny`（默认）、`allowlist`、`allow` |
+| `--sandbox-allow-host <host>` | `allowlist` 允许的主机，可重复 |
+| `--sandbox-timeout <sec>` | 单条命令的硬超时 |
+| `--sandbox-max-output <chars>` | 单条命令返回的 stdout/stderr 上限 |
+| `--sandbox-allow-sensitive` | 允许访问 `.env`、私钥等敏感文件 |
+| `--quiet` | 隐藏工具活动和 token 用量摘要 |
+| `--no-highlight` | 关闭 Markdown 高亮 |
+| `--version` | 打印版本 |
+
+管理命令按第一个词识别，`--home` 可以写在命令前面（`minimalcode --home DIR sessions` 等价于 `minimalcode sessions --home DIR`）；其他选项写在前面时会被当成普通提示词。以命令词开头的提示词需要用 `--` 分隔：`minimalcode -- init config show` 发送的是提示词而不是执行子命令。
+
+管理命令：
+
+| 命令 | 说明 |
+|---|---|
+| `minimalcode init [--force]` | 创建配置目录与 `settings.json` |
+| `minimalcode config [show]` | 打印合并后的配置，敏感字段显示为 `<redacted>` |
+| `minimalcode config path` | 打印配置文件路径 |
+| `minimalcode config set-model <id>` | 写入默认模型 |
+| `minimalcode config set-provider <name>` | 写入默认供应商 |
+| `minimalcode config add-provider <name> --base-url URL [--protocol P] [--model M] [--api-key-env VAR\|--api-key KEY]` | 新增一个自定义接入点并设为默认供应商 |
+| `minimalcode sessions` | 列出已保存会话（时间、ID、模型、工作区） |
+| `minimalcode shell` | 显示探测到的 shell |
+| `minimalcode sandbox` | 打印当前沙箱策略与各后端可用性 |
+| `minimalcode mcp [--cwd DIR]` | 启动配置的 MCP 服务器并打印状态、协议版本与工具清单（JSON），不发起模型请求 |
+| `minimalcode clawd [status\|install\|remove\|test]` | 查看、注册或撤回 Clawd on Desk 桌宠集成（`install` / `remove` 要在 Clawd 退出时执行） |
+| `minimalcode import-pi` | 从 Pi 配置迁移供应商、模型和上下文窗口 |
+
+`import-pi` 默认**不**复制 API key，而是写入指向环境变量的 `api_key_env`；确实要把密钥复制进权限受限的配置时加 `--secrets`（密钥不会在终端打印）。`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
+
+退出码：`0` 任务完成，`1` 未在轮次上限内完成，`2` 配置或运行错误，`130` 被 Ctrl+C 中断。stdout 的读取端提前关闭（例如 `minimalcode ... | head`）按 `0` 退出，不会打印错误或 `Exception ignored`。
+
+JSON 输出字段：
+
+```json
+{"text":"...","completed":true,"turns":3,"usage":{},"session_usage":{},"usage_estimated":false,"session":"...jsonl"}
+```
+
+`usage` 是本次运行新增的用量，`session_usage` 是整个会话的累计值（`-c` 继续会话时两者不同）；`usage_estimated` 为 `true` 表示至少有一轮没有供应商返回的 usage，数字来自本地估算。
+
+## 交互命令
+
+| 命令 | 作用 |
+|---|---|
+| `/new`、`/clear` | 新建会话 |
+| `/compact` | 立即压缩历史 |
+| `/summary` | 让模型总结全部上下文并写入工作区 `AGENTS.md`；文件不存在则创建，已存在则只更新 `<!-- minimalcode:summary:start/end -->` 之间的块，其余内容原样保留 |
+| `/session` | 显示会话文件路径 |
+| `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
+| `/model [供应商/模型]` | 查看当前模型和可用供应商（只列出已检测到凭据的，含免密钥的本地预设）；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
+| `/status` | 显示模型、推理强度、shell、上下文、token 统计、工具列表与 MCP 服务器状态（JSON） |
+| `/mcp [refresh]` | 显示每个 MCP 服务器的状态；`refresh` 重新拉取工具列表（并重试启动失败的服务器），重建本会话的工具定义 |
+| `/attach <路径> [用途]` | 上传并解析文档（PDF / Word / PowerPoint / 图片 / 表格 / 电子书），`file_id` 随下一条消息发给模型；`rich_layout_recognition` 会把文档里的图按原位置一起交给模型 |
+| `/listen <音频路径>` | 把音频转写成文字，并把转写结果作为本轮消息发送（语音输入） |
+| `/say [文本]` | 把文本（省略时为上一条回答）合成为语音，写入工作区 `speech-<时间戳>.wav` |
+| `/help` | 显示命令 |
+| `/exit`、`/quit` | 退出 |
+
+未知的 `/` 命令只报错，不会结束会话。多行消息的行间换行会原样保留在会话记录里。
+
+## 工具
+
+| 工具 | 作用 | 主要参数 |
+|---|---|---|
+| `read` | 按行范围读取 UTF-8 文本，输出带行号并报告 `line_ending`；非 UTF-8 内容会带 `warnings` 提示 | `path`、`start_line`、`end_line` |
+| `read_range` | 读取显式行区间（带行号），用于行号编辑前确认目标 | `path`、`start_line`、`end_line` |
+| `write` | 创建或整体覆盖文件 | `path`、`content` |
+| `append_file` | 在 EOF 追加文本，文件不存在时创建，保留既有换行风格 | `path`、`content` |
+| `edit` | 按行号替换区间，`end_line = start_line - 1` 表示在该行前插入；`old_text` 是精确文本兜底，两者不能混用 | `path`、`start_line`、`end_line`、`new_text`、`old_text`、`replace_all` |
+| `shell` | 在配置的 shell 中执行命令 | `command`、`timeout`、`cwd` |
+| `grep` | 正则搜索文本，返回 `path:line:text` | `pattern`、`path`、`glob`、`max_results` |
+| `find` | 按 glob 查找文件 | `pattern`、`path`、`max_results` |
+| `web_search` | 默认由 provider 的 server-side tool（`deepseek_web_search`）执行；显式开启 `web_tools` 时改为本进程调用独立 Search API | `query`、`count`、`need_content`、`ori_question`、`localization` |
+| `web_fetch` | 同上：默认由 `deepseek_read_url` / 深度思考搜索打开网页；显式开启 `web_tools` 时才由本进程抓取 | `url` |
+| `ocr` | 逐页识别 PDF / Word / PowerPoint / 图片中的文字 | `path`、`purpose` |
+| `transcribe` | 把 16 位 PCM WAV 或 Ogg Opus 音频转写成文字 | `path` |
+| `speech` | 把文本合成为音频并写入工作区 | `text`、`path`、`voice_id` |
+| `read_image` | 读取本地图片并交给配置的 OpenAI 兼容视觉端点，返回描述或对 `prompt` 的回答 | `path`、`prompt` |
+| `subagent` | 在子 shell 中启动一个新的 `minimalcode`，只返回它的最终答复 | `task`、`cwd`、`timeout`、`max_turns` |
+
+联网默认走 provider 的 server-side tools：`server_tools.enabled`（DeepSeek 预设默认开启）声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在服务端完成，只计模型 token，本地 `web_search` / `web_fetch` 不再出现在工具列表里。独立 Search/Fetch API 仍保留为可选 fallback：`web_tools.enabled: true` 会重新声明这两个本地工具，但按成功请求计费（5 元/千次）。
+
+`web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用；`ocr`、`transcribe`、`speech` 由 DeepSeek 接入点的 `media` 配置启用（当前供应商没有 `media` 时，会用配置里另一个可用的 DeepSeek 接入点），写哪个 `*_path` 就开哪项能力。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
+
+`tools.allow` 给出允许的工具名列表（例如 `["read", "grep", "find"]`），`--read-only` 是它的一种预设。两者取交集，且被禁用的工具不会出现在请求的 `tools` 里；即使模型仍然发起调用（恢复的旧会话、忽略 schema 的供应商），`dispatch` 也会返回形如 `tool 'write' is disabled by --read-only` 的错误。只读模式下列表以外的工具一律不可用，包括 `subagent`（它会启动一个能写文件的子进程）。
+
+`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
+
+### MCP 服务器
+
+MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一套工具循环。服务器在 `settings.json` 的 `mcp.servers` 里声明，工具名是 `mcp__<服务器名>__<工具名>`：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "files": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "docs": {
+        "transport": "http",
+        "url": "https://mcp.example.com/mcp",
+        "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+      }
+    }
+  }
+}
+```
+
+- 传输：`stdio`（默认，子进程）、`http`（streamable HTTP，响应可以是 JSON 或 SSE）、`sse`（旧版 HTTP+SSE）。
+- 发现：`tools/list` 会读完全部分页；缺少 `inputSchema` 的工具按无参数处理；非法字符、超长名字会被规范化，并用短哈希区分冲突。
+- 结果：文本原样返回，图片/音频只报告类型与大小，`structuredContent` 在没有文本时转成 JSON，总长度按 `mcp.max_output_chars` 首尾截断。
+- 失败隔离：某个服务器启动失败或调用超时，只返回该服务器的错误，其余工具和后续回合照常。
+- 权限：`tools.allow` 支持 `mcp__<服务器>` / `mcp__<服务器>__*`；`--read-only` 只保留 `readOnlyHint: true` 或整台服务器 `read_only: true` 的工具。
+- 生命周期：`/new` 和 `/model` 复用同一批服务器进程；`/mcp refresh` 重新发现工具；退出时统一关闭。
+- 边界：`stdio` 服务器默认只拿到启动所需的环境变量；`cwd` 经过与文件工具相同的沙箱路径检查；服务器进程本身由你声明，不在沙箱后端内运行。
+
+完整字段与安全说明见 [docs/configuration.md](docs/configuration.md)。
+
+### 图像理解
+
+`read_image` 是通用工具，不绑定某个供应商，也不受供应商自身 `protocol` 限制：只要在供应商配置里加一个 `vision` 块，指向任意 OpenAI 兼容的 `/chat/completions` 端点，该供应商就能获得这个工具。`base_url`、`model` 和密钥默认沿用供应商的同名字段，也可以单独覆盖：
+
+```json
+"vision": {
+  "enabled": true,
+  "base_url": "https://api.example.com/v1",
+  "model": "vision-model",
+  "timeout_seconds": 120,
+  "max_image_bytes": 33554432,
+  "max_chars": 8000,
+  "detail": "auto",
+  "api_key_env": "EXAMPLE_API_KEY",
+  "headers": {}
+}
+```
+
+- 图片以 base64 data URL 内联发送，格式按文件内容判断，支持 JPEG、PNG、GIF 和 WebP，不依赖扩展名。
+- 交互模式下也可以直接从剪贴板粘贴图片：按终端的粘贴快捷键后再回车（Windows `Ctrl+V`、macOS `Cmd+V`、多数 Linux 终端 `Ctrl+Shift+V`），不需要先保存文件。MinimalCode 调用同一个 `vision` 配置读取剪贴板图片并生成描述；图片超过 `max_image_bytes`、剪贴板里没有图片或读取失败时会报错并继续会话。
+- `prompt` 可选；缺省时要求模型详细描述图片并逐字转写可见文字，结果超过 `max_chars` 时截断并标记 `<description truncated>`。
+- `read_image` 和其他文件工具一样受工作区限制，读取工作区外的图片需要 `tools.allow_outside_workspace`。
+- 内置默认配置只为 DeepSeek 打开了 `vision`（`deepseek-flash`），其他供应商默认关闭，需要时按上面的结构自行添加。视觉请求始终发给当前聊天接入点的 `vision` 端点，不会借用另一个 DeepSeek 接入点。
+
+### 实现要点
+
+- **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。`--no-sandbox` 只关闭执行层（后端包装、网络策略、资源限制），工作区与敏感文件边界照旧生效。
+- **沙箱执行层**：`sandbox.enabled` 默认关闭（等同默认 `--no-sandbox`），`--sandbox` 或任意 `--sandbox-*` 选项会开启它；开启后默认后端 `local`（跨平台策略与子进程限制基线），可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。开启时路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
+- **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --no-config --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义和相同的 glob 语义（`*` 不跨目录、`**/` 可匹配零层、大小写敏感），都不解析 `.gitignore`，也都不受 `RIPGREP_CONFIG_PATH` 影响；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。两条路径的输出都再经过一次敏感文件策略过滤，被沙箱截断产生的标记行不会作为匹配返回。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
+- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash` → `zsh` → `sh`（Windows 为 `powershell` → Git Bash）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。Windows 上 `System32\bash.exe` 与 `WindowsApps\bash.exe`（WSL 或应用商店启动器）不会作为原生 shell 候选，`pwsh-preview` / `powershell-preview` 按对应的 PowerShell 处理。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell；`cmd.exe` 会被直接拒绝，因为它不接受 `-c`，用 `-c` 启动只会打印横幅、退出 0 而什么都不执行。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
+- **误报网络命令**：`local` 基线的 `deny` 基于命令字符串识别，只读的 `python -m pip show/list`、`pip --version` 会被放行，`pip install/download` 等会触网子命令才会被拒绝。
+- **资源限制**：POSIX 下对子进程设置 `RLIMIT_CORE` 和按超时推算的 `RLIMIT_CPU`；Linux 的 `RLIMIT_AS`（`sandbox.max_memory_mb`）和 `RLIMIT_NPROC`（`sandbox.max_processes`）默认关闭，因为 `RLIMIT_AS` 限制的是预留地址空间而非实际占用，2 GB 的默认值会让 .NET（pwsh）、JVM、Go 子进程在真正运行前就报 `Out of memory`。
+- **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾用空值安全的 `exit` 保留子进程真实退出码（无法启动时返回 1）。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
+- **网络重试**：请求在拿到响应之前失败（`ConnectError`、`ConnectTimeout`，以及 `Server disconnected without sending a response.` 这类 `RemoteProtocolError`）会自动重试 10 次，退避从 0.5 秒翻倍到最多 8 秒；已经开始返回数据的流式中断不重试，避免重复输出或重复计费。HTTP 429/503 仍按 `Retry-After` 重试一次。
+- **输出裁剪**：工具结果按首尾保留截断，超长输出中间以 `... <truncated N chars> ...` 标记，既保留开头上下文也保留结尾错误信息。
+- **编码与并发**：`read` 先用 `errors="strict"` 扫描请求范围，只有真正遇到非 UTF-8 字节时才退回替换解码并写 `warnings`，因此正常文件不多读一遍、也不会把有损内容当成干净内容。同一轮的只读调用走同一个分组器：结果按调用顺序回填，`[read]` 等活动行仍在主线程打印；`write` / `edit` / `shell` / `subagent` 不参与并发，紧挨着它们的只读调用也留在主线程。
+
+## 配置
+
+默认目录：
+
+```text
+~/.MinimalCode/
+├── settings.json   # 自动创建，与包内 defaults.json 深度合并
+├── SYSTEM.md       # 可选，替换默认系统提示词
+├── AGENTS.md       # 可选，全局规则
+├── sessions/       # 按工作区分组的 JSONL 会话
+└── webui/          # 网页端专用：folders.json 记住文件夹归属，thinking.json 存刷新后仍在的推理块
+```
+
+配置目录可用 `MINIMALCODE_HOME` 或 `--home` 覆盖。
+
+默认供应商是 DeepSeek，使用 Responses 协议和环境变量中的密钥：
+
+```json
+{
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "thinking": "high",
+  "max_turns": 1000,
+  "providers": {
+    "deepseek": {
+      "protocol": "openai_responses",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "context_window": 1000000,
+      "timeout_seconds": 120,
+      "stream": true,
+      "include_usage": false,
+      "send_reasoning_effort": true,
+      "headers": {},
+      "extra_body": {},
+      "server_tools": {
+        "enabled": true,
+        "web_search": true,
+        "read_url": true
+      },
+      "web_tools": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+- `server_tools` 是默认的联网路径（仅 `api.deepseek.com`）：`enabled` 打开服务端工具，`web_search` / `read_url` 分别控制 `deepseek_web_search` 与 `deepseek_read_url`。`web_tools.enabled` 默认 `false`；把它打开会让本进程去调用独立的 Search/Fetch API（5 元/千次），并把 `server_tools.enabled` 设成 `false` 才能两不相争。详见 [docs/configuration.md](docs/configuration.md#web-tools)。
+- `protocol` 取 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `deepseek_web`（网页版对话接口，见 [docs/configuration.md](docs/configuration.md#built-in-provider-presets)）。
+- 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
+- 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
+- `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。
+- `max_tokens` 仅 Anthropic Messages 使用，默认 `8192`。官方 Anthropic API 要求该字段；`thinking` 的 `budget_tokens` 会按 `thinking` 等级映射，并保证小于 `max_tokens`。
+- `prompt_cache: true` 只对 Anthropic Messages 生效：给 system 提示与工具定义打一个 `cache_control` 缓存断点，长工具循环里这段静态前缀按缓存读取计费。默认关闭，因为部分兼容端点不接受该字段。
+- 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可；不想手写 JSON 时用[自定义接入点](#自定义接入点)。
+- 代理：供应商、`web_tools`、`vision` 默认沿用环境变量与系统代理设置。`base_url` 指向环回地址（`127.0.0.1`、`::1`、`localhost`）时自动忽略代理，否则本机运行的 Ollama、vLLM 或测试服务器会被 Clash 之类的代理劫走；需要强制时可在对应配置块里写 `"trust_env": true|false`。显式传入自建 transport 时默认不读环境代理，避免代理映射覆盖注入的连接。
+
+### 同时使用多家 API
+
+一个回合只用一个聊天接入点，不存在并发调用多家或自动故障转移。但 DeepSeek 那套能力按「是否必须写进聊天请求」分成两半，只有一半跟着聊天接入点走：
+
+| 能力 | 由谁执行 | 当前聊天接入点必须是 `api.deepseek.com` 吗 |
+|---|---|---|
+| `deepseek_web_search` / `deepseek_read_url`（服务端联网） | 聊天接入点 | 是 |
+| 文档附件（Files API 的 `file_id`） | 聊天接入点 | 是 |
+| 内容安全（`safety_check`）、会话标题（`title`） | 聊天接入点 | 是 |
+| `ocr`、`transcribe`、`speech` | 任一可用的 DeepSeek 接入点 | 否 |
+| 独立 Search/Fetch API（`web_tools`） | 任一可用的 DeepSeek 接入点 | 否 |
+| `read_image` | 当前聊天接入点的 `vision` | 否（跟随聊天接入点） |
+
+选择顺序：当前接入点（它本身就是 DeepSeek API 时）→ `deepseek` → `deepseek-anthropic` → 其它供应商名（按字母序）。`${VAR}` 未展开、或声明了 `require_api_key` 却拿不到 Key 的块会被跳过，而不是让启动失败或给出一个必然 401 的按钮。
+
+最常见的用法是拿 OpenAI / Ollama 当聊天、DeepSeek 只负责 OCR 与语音，这时不需要额外配置，只要那个 `deepseek` 块能拿到 `DEEPSEEK_API_KEY`：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-deepseek-key"
+$env:OPENAI_API_KEY = "your-openai-key"
+
+minimalcode --provider openai -m <model-id>     # 或交互里 /model openai/<model-id>
+```
+
+切过去之后 `ocr`、`transcribe`、`speech` 仍在工具列表里，附件与「内容安全」开关会隐藏并说明原因。想让非 DeepSeek 的聊天接入点也能联网搜索，就把那个 DeepSeek 块的 `web_tools.enabled` 设成 `true`（按成功请求计费），此时由本进程直连 DeepSeek 的 Search API，与聊天走哪家无关。
+
+怎么确认生效：CLI 里 `/status` 的 `tools` 列出 `ocr` / `transcribe` / `speech` 就说明借到了；网页端 `GET /api/state` 的 `deepseek` 字段中，`available` 表示存在可用的 DeepSeek 接入点，`active` 表示当前聊天就在它上面，`provider` 指出实际执行的是哪个块。
+
+两个边界：这套混用需要 1.10.0（1.9.0 及以前切换供应商会把媒体工具一起丢掉）；`subagent` 子代理继承父进程的同一个供应商与模型，不会自己换一家。
+
+### 自定义接入点
+
+命令行新增一个接入点并设为默认供应商：
+
+```powershell
+minimalcode config add-provider my-gateway `
+  --base-url https://gateway.example.com/v1 `
+  --protocol openai_chat `
+  --model house-model `
+  --api-key-env MY_GATEWAY_KEY
+```
+
+```json
+"providers": {
+  "my-gateway": {
+    "protocol": "openai_chat",
+    "base_url": "https://gateway.example.com/v1",
+    "model": "house-model",
+    "api_key_env": "MY_GATEWAY_KEY"
+  }
+}
+```
+
+- `--protocol` 默认 `openai_chat`，可选 `openai_responses`、`anthropic_messages`、`deepseek_web`；`--model` 同时写进顶层 `model`。
+- 名称按 `[A-Za-z0-9][A-Za-z0-9._-]{0,31}` 校验，重名直接报错——内置预设不会被覆盖，其余键也不会被改动。
+- `--api-key-env` 与 `--api-key` 二选一；网页端保存远程接入点时要求填 Key，`127.0.0.1` / `localhost` 这类本地服务可以留空，会写入 `require_api_key: false`。
+- 定义好之后用 `--provider my-gateway`、`/model my-gateway/<模型>` 或网页端的厂家下拉框切换。
+
+网页端在「设置 → 模型设置 → API 厂家」下拉到最底部选「自定义 API…」，填名称、接入地址、格式、模型与 Key，保存前由服务端校验（`POST /api/settings` 的 `custom` / `name` / `base_url` 字段）。保存成功后会立即切换过去，无需重启。
+
+### 内置供应商预设
+
+`defaults.json` 已经为常用供应商准备好端点、协议和密钥环境变量。它们不会猜模型 ID：交互中用 `/model 供应商/模型` 时显式给出模型，例如：
+
+```text
+/model deepseek/deepseek-flash
+/model openai/<model-id>
+/model anthropic/<model-id>
+/model moonshot/<model-id>
+```
+
+| 供应商 | API key 环境变量 | 端点 |
+|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1`（Responses） |
+| `deepseek-anthropic` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic`（Anthropic Messages） |
+| `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1`（Responses） |
+| `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1`（Anthropic Messages） |
+| `google` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| `groq` | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
+| `mistral` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
+| `xai` | `XAI_API_KEY` | `https://api.x.ai/v1` |
+| `moonshot` | `MOONSHOT_API_KEY` | `https://api.moonshot.cn/v1` |
+| `zhipu` | `ZHIPUAI_API_KEY` | `https://open.bigmodel.cn/api/paas/v4` |
+| `dashscope` | `DASHSCOPE_API_KEY` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `siliconflow` | `SILICONFLOW_API_KEY` | `https://api.siliconflow.cn/v1` |
+| `together` | `TOGETHER_API_KEY` | `https://api.together.ai/v1` |
+| `fireworks` | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `https://api.perplexity.ai` |
+| `cerebras` | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` |
+| `sambanova` | `SAMBANOVA_API_KEY` | `https://api.sambanova.ai/v1` |
+| `nebius` | `NEBIUS_API_KEY` | `https://api.studio.nebius.com/v1` |
+| `deepinfra` | `DEEPINFRA_TOKEN` | `https://api.deepinfra.com/v1/openai` |
+| `novita` | `NOVITA_API_KEY` | `https://api.novita.ai/openai/v1` |
+| `cohere` | `COHERE_API_KEY` | `https://api.cohere.ai/compatibility/v1` |
+| `github` | `GITHUB_TOKEN` | `https://models.github.ai/inference` |
+| `volcengine` | `ARK_API_KEY` | `https://ark.cn-beijing.volces.com/api/v3` |
+| `minimax` | `MINIMAX_API_KEY` | `https://api.minimax.io/v1` |
+| `hunyuan` | `HUNYUAN_API_KEY` | `https://api.hunyuan.cloud.tencent.com/v1` |
+| `qianfan` | `QIANFAN_API_KEY` | `https://qianfan.baidubce.com/v2` |
+| `modelscope` | `MODELSCOPE_API_KEY` | `https://api-inference.modelscope.cn/v1` |
+| `baichuan` | `BAICHUAN_API_KEY` | `https://api.baichuan-ai.com/v1` |
+| `yi` | `YI_API_KEY` | `https://api.lingyiwanwu.com/v1` |
+| `stepfun` | `STEP_API_KEY` | `https://api.stepfun.com/v1` |
+| `spark` | `SPARK_API_PASSWORD` | `https://spark-api-open.xf-yun.com/v1` |
+| `ppio` | `PPIO_API_KEY` | `https://api.ppio.com/openai/v1` |
+| `ollama` | 无需密钥 | `http://localhost:11434/v1` |
+| `lmstudio` | 无需密钥 | `http://localhost:1234/v1` |
+| `vllm` | 无需密钥 | `http://localhost:8000/v1` |
+
+预设只固定端点和密钥变量名，`context_window` 保持一个保守值（本地三家为 `32768`，其余按各家公开的主推窗口填写），换到更大或更小的模型时按需在 `settings.json` 里调整。区域或套餐端点不同时（例如 MiniMax 国内站 `https://api.minimax.cn/v1`、StepFun 国际站 `https://api.stepfun.ai/v1`、火山方舟 `step_plan` 端点），覆盖 `base_url` 即可；Cohere 的兼容端点不接受 `stream_options`，所以预设里 `include_usage` 为 `false`。
+
+`/model` 切换的是当前会话，不会修改 `settings.json`；要改默认值仍用 `minimalcode config set-provider` / `set-model`。切换后子代理也会继承新的供应商和模型。新供应商如果没有配置 `web_tools` / `vision`，对应的 `web_search`、`web_fetch`、`read_image` 工具会从工具列表中移除，切回带这些配置的供应商后恢复；OCR、`transcribe`、`speech` 不同，它们由任一可用的 DeepSeek 接入点提供，切换聊天供应商时不会消失。
+
+Anthropic Messages 模式可以直接接入 DeepSeek 的 Anthropic 兼容端点，内置预设 `deepseek-anthropic`：
+
+```json
+"deepseek-anthropic": {
+  "protocol": "anthropic_messages",
+  "base_url": "https://api.deepseek.com/anthropic",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "model": "deepseek-flash",
+  "context_window": 1000000,
+  "timeout_seconds": 120,
+  "stream": true,
+  "send_reasoning_effort": true,
+  "max_tokens": 8192,
+  "headers": {},
+  "extra_body": {}
+}
+```
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-key"
+minimalcode --provider deepseek-anthropic "运行测试并总结"
+```
+
+端点从 `base_url` 推导：`https://api.deepseek.com/anthropic` 会请求 `/anthropic/v1/messages`；`base_url` 已以 `/v1` 结尾时只补 `/messages`，已经是完整 `/messages` 地址时原样使用。鉴权发送 `x-api-key`，并附带 `anthropic-version: 2023-06-01`（自定义 `headers` 中的同名字段优先）。工具定义会转换为 Anthropic 的 `name` / `description` / `input_schema`，连续的工具结果会合并到同一条 user 消息，且 `tool_result` 块放在文本之前。思考模式下通过工具调用继续对话时，assistant 的 thinking 块（含 signature）会保存在会话中并原样回传，以保证 Anthropic 的多轮工具调用可以继续。需要复用系统提示与工具定义的缓存时，在该供应商里加上 `"prompt_cache": true`；内置预设默认不开，避免端点不支持 `cache_control` 时整轮请求失败。
+
+### 从 Claude Code 环境变量启动
+
+如果本机已经按 [DeepSeek 的 Claude Code 接入文档](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/claude_code)配好了环境变量，可以跳过配置文件直接用：
+
+```powershell
+$env:ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
+$env:ANTHROPIC_AUTH_TOKEN="<你的 DeepSeek API Key>"
+$env:ANTHROPIC_MODEL="deepseek-flash[1m]"
+$env:CLAUDE_CODE_EFFORT_LEVEL="max"
+$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW="786432"
+
+minimalcode --anthropic-env
+```
+
+`--anthropic-env` 只在本进程内合成一个名为 `anthropic-env` 的供应商，不读写 `settings.json`，因此普通启动（不带该参数）仍然使用文件配置；它也不能与 `--provider` 同时使用。
+
+| 环境变量 | 作用 |
+|---|---|
+| `ANTHROPIC_BASE_URL` | 端点根，默认 `https://api.deepseek.com/anthropic` |
+| `ANTHROPIC_AUTH_TOKEN` | Bearer 凭据，作为 `Authorization: Bearer` 发送；与 `ANTHROPIC_API_KEY` 同时存在时优先 |
+| `ANTHROPIC_API_KEY` | 作为 `x-api-key` 发送（两者至少需要一个） |
+| `ANTHROPIC_MODEL` | 模型名；缺省时回退到 `ANTHROPIC_DEFAULT_SONNET_MODEL`，再缺省则报错。`--model` 优先级最高 |
+| `CLAUDE_CODE_EFFORT_LEVEL` | 推理强度，取值同 `--thinking`；`--thinking` 优先 |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 自动压缩阈值（token），换算成 `context.compact_at`，只在本次运行生效 |
+| `ANTHROPIC_CONTEXT_WINDOW` | 覆盖上下文窗口（MinimalCode 扩展项） |
+| `ANTHROPIC_MAX_TOKENS` | 覆盖输出上限，默认 `8192`（MinimalCode 扩展项） |
+
+模型名里的 `[1m]` / `[200k]` 这类 Claude Code 后缀只用于选择上下文窗口，发送请求前会被去掉（`deepseek-flash[1m]` → `deepseek-flash`，窗口 1000000）；不带后缀时默认按 Anthropic 标准的 200000。`--anthropic-env` 不读取配置文件里的 `web_tools` / `vision`，因此这次运行没有 `web_search`、`web_fetch` 和 `read_image` 工具；需要这些工具时仍用 `--provider deepseek-anthropic`。
+
+沙箱执行层默认关闭（默认 `--no-sandbox`），需要时用 `--sandbox` 或把 `enabled` 设为 `true` 开启；开启后默认只允许工作区、默认禁网：
+
+```json
+"sandbox": {
+  "enabled": false,
+  "backend": "local",
+  "allowed_roots": [],
+  "network_policy": "deny",
+  "allowed_hosts": [],
+  "timeout_seconds": 120,
+  "max_output_chars": 60000,
+  "allow_sensitive_files": false,
+  "max_memory_mb": 0,
+  "max_processes": 0,
+  "docker_image": "alpine:3"
+}
+```
+
+`backend` 可选 `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker`；不可用的后端会拒绝执行而不是降级。命令行提供 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output` 和 `--sandbox-allow-sensitive`，`minimalcode sandbox` 可查看当前策略与后端可用性。
+
+完整字段、默认值、Web 工具和视觉配置见 [docs/configuration.md](docs/configuration.md)；内置默认值以包内 `minimalcode/defaults.json` 为准。
+
+## 终端高亮
+
+当输出目标是支持 ANSI 的交互式终端时，模型输出中的标题、强调、行内代码、引用、列表、表格和围栏代码块会被着色，并按流式 delta 逐词显示，不等待整行或完整回复。未闭合的 Markdown 标记会立即按对应样式渲染且不打印语法字符；`#` 到 `######` 标题标记本身也不打印，`## 标题` 只输出着色的标题文字；链接显示为 `文本 (URL)`。正文不重排，会话中保存的仍是模型返回的原始 Markdown。模型输出、工具输出和错误信息在写到终端前会移除 ANSI/OSC 等控制序列，只保留换行和制表符，避免转义序列操纵终端。
+
+主题通过配置切换：
+
+```json
+"output": {
+  "markdown_highlight": true,
+  "theme": "dark"
+}
+```
+
+`theme` 支持 `dark` 和 `light`。以下情况保持纯文本：`--json`、stdout 被重定向、设置 `NO_COLOR`、`--no-highlight`、或配置中关闭高亮。
+
+工具活动（`[shell]`、`[read]` 等标签）写入 stderr，助手正文写入 stdout；`--quiet` 和 `--json` 下不显示工具活动。长 shell 输出在终端只保留首尾各若干行（最多 12 行、4000 字符，省略部分标记 `… N lines omitted`），模型收到的完整输出不受影响。
+
+## 安全边界
+
+- MinimalCode 会执行模型生成的 shell 命令，所有命令统一经过沙箱入口。文件工具始终拒绝工作区外路径、符号链接逃逸和常见敏感文件。沙箱执行层默认关闭（默认 `--no-sandbox`），此时不施加网络策略、命令超时/输出上限和子进程资源限制；用 `--sandbox` 或 `sandbox.enabled: true` 开启后，疑似联网命令会被拒绝，后端不可用时 fail-closed 拒绝执行。
+- 默认关闭的执行层意味着 `shell` 直接以当前用户身份运行，没有禁网推断、命令超时和输出上限；需要这些约束时请加 `--sandbox`（或在配置中开启）。开启后的 `local` 基线是策略、超时、输出和子进程资源限制层，不是操作系统级文件系统或网络隔离。需要硬隔离时请选择 `bwrap`/`firejail`/`sandbox-exec`/`docker`（`docker` 仅在 POSIX 宿主上可用，并以当前 `uid:gid` 运行容器，避免工作区出现 root 属主文件），或把 MinimalCode 放进容器、虚拟机或受限账户中运行。
+- 执行层关闭时 `local` 的网络 `deny` 不生效；开启后 `deny` 基于命令字符串识别，无法阻止任意程序自行发起网络连接；`allowlist` 同样依赖命令中的主机可被识别。真正的禁网依赖支持网络命名空间的后端。
+- 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
+- `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
+- 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，引号内的 `|` / `;` 也不会被拆成多条命令（`rg 'nc|netcat'` 同样放行）；而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...`、`busybox wget ...`、`sh -c "sudo curl ..."` 仍会被拒绝。它不是网络防火墙。
+- `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词，并在每次运行开始前重新读取（文件不存在则跳过）。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。`/summary` 写入 `AGENTS.md` 的路径同样经过这层校验。
+- `web_fetch` 的目标 URL 默认由 provider 服务端抓取，本进程不直连；显式开启 `web_tools` 时改为本进程请求 `web_tools.base_url`。该地址及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
+- `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
+- 网页界面默认只绑定 `127.0.0.1`，并校验 `Host` / `Origin` 的主机名与端口。它能在工作区里执行工具，所以不要把 `--web-host` 改成 `0.0.0.0` 后暴露到不受信任的网络，也不要让反向代理改写这两个头。
+
+## 桌宠集成（Clawd on Desk）
+
+MinimalCode 可以把工作状态上报给 [Clawd on Desk](https://github.com/rullerzhou-afk/clawd-on-desk)：提问时它思考，工具执行时它打字，子代理时它杂耍，压缩上下文时它扫除，回合结束弹完成动画。
+
+先退出 Clawd on Desk，再注册，然后重新打开它：
+
+```bash
+# 1. 退出 Clawd on Desk（托盘菜单 Quit，不是关窗口）
+minimalcode clawd install   # 把 MinimalCode 注册成 Clawd 的「自定义 HTTP Agent」
+minimalcode clawd status    # 查看 Clawd 是否在运行、agent id 与偏好文件版本
+minimalcode clawd test      # 真发一条探测事件，看 Clawd 是否接受（200 / 204）
+minimalcode clawd remove    # 撤回注册（同样要先退出 Clawd）
+```
+
+`install` 在 Clawd 仍在运行时会拒绝写入：Clawd 把偏好设置放在内存里，移动桌宠或改设置时会把整份快照写回文件，运行期间的注册会被它覆盖成"看起来注册成功、其实没生效"。注册后 Clawd 只在启动时读取偏好文件，所以重新打开它就生效。
+
+`clawd status` 里的 `schema` 是 Clawd 偏好文件的 schema 版本（1.6.0 是 21）。它和 Clawd 自身版本不同步时可以据此判断手上的偏好文件是哪个构建写的。`clawd test` 会真的 POST 一条 `SessionStart`：200 表示 Clawd 接受了这个 agent，204 表示它在运行但这个 agent 未知或被关掉（常见原因是注册后没重启 Clawd），连不上表示 Clawd 没运行。
+
+之后 MinimalCode 每次运行都会读 `~/.clawd/runtime.json` 找到 Clawd 当前端口，把生命周期事件 POST 到 `127.0.0.1` 的 `/state`；端口变了会自动重读，Clawd 没运行、集成被关闭或没有注册时完全静默，不会拖慢或打断任何一次工具调用。
+
+上报内容只有生命周期元数据：agent id、会话 id、状态、事件名、工具名、工作目录和平台。提示词、工具参数、文件和密钥都不会发送。Clawd 只接受它认识的 agent id，未注册的 id 会被它并进 Claude Code 的子代理流，因此 MinimalCode 在注册之前什么也不发。
+
+偏好文件位置：Windows `%APPDATA%\clawd-on-desk\clawd-prefs.json`，macOS `~/Library/Application Support/clawd-on-desk/`，Linux `${XDG_CONFIG_HOME:-~/.config}/clawd-on-desk/`。文件不存在时 `install` 会创建一个只含 `customApplications` 的文档，Clawd 启动时用自己的 schema 补齐其余字段——所以源码 checkout 在第一次 `npm start` 之前就能注册。
+
+### 源码版与安装版
+
+两套安装共用同一份偏好文件（`app.getPath("userData")` + `clawd-prefs.json`）和同一个 `~/.clawd/runtime.json`，所以注册一次、两边都生效；`npm start` 启动的源码版和安装版同时只会有其中一个在跑，端口以 `runtime.json` 为准。
+
+源码版不需要打任何补丁。Clawd 侧的「自定义 HTTP Agent」实现在 `src/custom-applications.js`、`src/server-agent-id.js` 和 `src/server-route-state.js` 里，这些文件在 1.6.0 标签和当前源码 HEAD 之间没有改动，因此上报路径完全一致。注意 `package.json` 的 `version` 在发版前不会跟着提交走，源码 checkout 常常写着 1.6.0 但代码已经比标签新（用 `git describe --tags` 看真实位置）；判断依据请用 `minimalcode clawd status` 的 `schema`，别用版本号字符串。
+
+配置项 `integrations.clawd`：`enabled`（默认 `true`）、`agent_id`（留空表示使用注册得到的 id；把 Clawd 打了原生 MinimalCode 支持时可填 `minimalcode`）、`runtime_file`（默认 `~/.clawd/runtime.json`）、`timeout_seconds`（默认 `1.0`）。
+
+## 开发
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m unittest discover -s tests -v
+python -m compileall -q minimalcode tests main.py
+python -m ruff check minimalcode tests benchmarks main.py
+python -m ruff format --check minimalcode tests benchmarks main.py
+python benchmarks/deepseek_responses.py --runs 3
+```
+
+`benchmarks/coding_suite.py --validate-only` 用于在无网络、无密钥的情况下校验基准任务定义。结果报告只列出实际运行过的 agent：只跑了 MinimalCode 时不会输出与 Pi 的对比列。
+
+旧入口仍然可用：
+
+```powershell
+python main.py -p "inspect this repository"
+```
+
+## 项目结构
+
+```text
+minimalcode/
+├── cli.py           # 参数解析、管理命令、交互循环
+├── agent.py         # 工具循环、用量统计、上下文压缩
+├── subagent.py      # 子代理的子进程构造与深度限制
+├── provider/        # OpenAI Chat / Responses 与 Anthropic Messages 客户端
+│   ├── client.py    #   共享客户端与协议分派
+│   ├── chat.py      #   Chat Completions 载荷、流与解析、推理回传
+│   ├── responses.py #   Responses 载荷、事件流与解析
+│   ├── anthropic.py #   Anthropic Messages 载荷、流与解析
+│   ├── transport.py #   HTTP 请求建立与连接重试
+│   ├── common.py    #   usage / 内容 / 参数归一化
+│   ├── server_tools.py  # 服务端联网块的解析、展示归一与 read_link 回传
+│   ├── types.py     #   ToolCall、ProviderReply
+│   └── factory.py   #   create_provider
+├── tools/           # 工作区工具
+│   ├── runtime.py       #   共享状态与工具分派
+│   ├── schemas.py       #   工具定义
+│   ├── files.py         #   read / read_range / write / append_file / edit
+│   ├── search.py        #   子进程搜索与输出解析
+│   ├── search_tools.py  #   grep / find
+│   ├── process.py       #   shell / subagent
+│   ├── remote.py        #   vision / web 工具
+│   ├── media_tools.py   #   ocr / transcribe / speech
+│   └── validation.py    #   模型参数校验
+├── mcp/             # MCP 客户端
+│   ├── protocol.py  #   JSON-RPC、内容与 schema 转换
+│   ├── transport.py #   stdio / streamable HTTP / 旧版 HTTP+SSE
+│   ├── client.py    #   握手、工具发现与调用
+│   └── manager.py   #   服务器生命周期与工具索引
+├── sandbox/         # 沙箱策略、后端与有界执行
+│   ├── runner.py    #   统一入口
+│   ├── policy.py    #   路径与网络策略
+│   ├── sensitive.py #   敏感文件规则
+│   ├── network.py   #   联网命令识别与主机白名单
+│   ├── backends.py  #   bwrap / firejail / sandbox-exec / docker
+│   ├── execution.py #   子进程捕获、超时与资源限制
+│   └── audit.py     #   拒绝与运行记录
+├── highlight/       # 流式 Markdown 渲染
+│   ├── markdown.py  #   增量渲染状态机
+│   ├── code.py      #   围栏代码着色
+│   ├── sanitize.py  #   终端控制序列清理
+│   ├── color.py     #   ANSI 能力探测
+│   └── palette.py   #   深色/浅色调色板
+├── webui/           # 本地网页界面
+│   ├── runtime.py   #   WebRuntime：设置写入、自定义接入点、工作区切换、会话、单轮流式回合
+│   ├── server.py    #   ThreadingHTTPServer 路由、Host/Origin 校验、SSE 分帧
+│   ├── library.py   #   文件夹与对话的归属（<home>/webui/folders.json）
+│   ├── thinking.py  #   刷新后仍在的推理块（<home>/webui/thinking.json）
+│   └── assets/      #   index.html / app.css / app.js（随 wheel 安装，无构建步骤）
+├── shell.py         # shell 探测与子进程执行
+├── httpclient.py    # HTTP 客户端构造、代理策略与连接重试
+├── prompt.py        # 系统提示词与 AGENTS.md 发现
+├── session.py       # JSONL 会话存储与检索
+├── config.py        # 配置合并、校验、脱敏、原子写入、接入点命名规则
+├── deepseek.py      # DeepSeek 专属能力集、server_tools 开关、feature_source() 与唯一的准入判定
+├── web.py           # 可选的独立 Search/Fetch API 客户端（默认关闭）
+├── media.py         # 供应商 OCR / 语音识别 / 语音合成 / 文件解析客户端
+├── vision.py        # 供应商视觉客户端
+├── reminder.py      # latest_reminder 的内容（日期、星期、平台、语言）
+├── clawd.py         # Clawd on Desk 桌宠的生命周期上报
+├── clipboard.py     # 系统剪贴板图片读取
+├── importer.py      # Pi 配置迁移
+├── errors.py        # 统一异常类型
+└── defaults.json    # 内置默认配置
+```
+
+五个包的 `__all__` 是唯一公开接口（`tools`、`sandbox`、`provider`、`highlight`、`webui`）。0.7.0 起不再为拆分前的模块级名字提供回退；私有 helper 从定义它的子模块导入，详见 [docs/compatibility.md](docs/compatibility.md)。
+
+请求链路：CLI → 配置与 shell 探测 → 会话加载/创建 → 供应商流式请求 → 工具调用与执行 → 结果追加到 JSONL → 下一轮模型请求 → 最终文本或 JSON。每次运行只有一个常驻主进程和一个复用的 HTTP 连接池，没有守护进程、嵌入式数据库或后台服务（`shell` 工具会按需启动子进程）。更多细节见 [docs/architecture.md](docs/architecture.md)。
+
+## 文档
+
+- [docs/architecture.md](docs/architecture.md)：请求链路、模块职责与性能取舍。
+- [docs/configuration.md](docs/configuration.md)：全部配置字段、默认值与安全边界。
+- [docs/compatibility.md](docs/compatibility.md)：1.0 兼容承诺、公开面定义，以及 0.6 → 0.7 的导入与 patch 迁移对照表。
+- [CHANGELOG.md](CHANGELOG.md)：逐版本的新增、修复与行为变化；每个版本的发布说明见 [.github/releases](.github/releases)。
+
 ## 升级指南
+
+每个版本都保持向后兼容：1.x 内没有删除公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。下面按从新到旧排列，只列升级时需要留意的行为变化；逐条明细见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 从 1.9.0 升级到 1.10.0
+
+1.10.0 只新增能力，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有的 `settings.json` 不需要改动。下面的变化都是把原本会失败或静默的事说清楚：
+
+- DeepSeek 专属能力可以来自另一个接入点：配置里只要有带 Key 的 `api.deepseek.com` provider（默认预设 `deepseek` / `deepseek-anthropic`），即使当前对话跑在 OpenAI、Ollama 或自定义网关上，OCR、语音识别、朗读与独立 Search/Fetch API 仍由它执行；服务端工具、文档、内容安全、会话标题仍要求当前接入点是 DeepSeek API。CLI 与网页端同一套判定（`minimalcode/deepseek.py` 的 `feature_source()`），切换供应商不再把这些工具一起丢掉。详见[同时使用多家 API](#同时使用多家-api)。
+- 自定义接入点：新增 `minimalcode config add-provider` 与网页端「自定义 API…」，只新增 `providers.<name>` 块，不改内置预设、不改其它键。远程接入点必须带 Key，本地服务可以留空。详见[自定义接入点](#自定义接入点)。
+- Chat 工具循环补上推理：模型带 `tool_calls` 的助手消息会把本轮 `reasoning_content` 存进会话并在下一次请求回传（DeepSeek 的要求，缺了它思考模型会重复或推翻自己的计划）；已经结束的回答仍然不保留，避免把上一轮的推理塞进新请求。Anthropic Messages 的签名块回传逻辑不变。
+- 修掉 1.9.0 遗留的几处：`/model` 与 `/new` 重建工具运行时会带上当前 provider 的 `server_tools`；`server_tools.enabled: false` + `web_tools.enabled: true` 时「联网搜索」按钮不再隐藏；`_apply_switches()` 不再重复执行开关，也不会在切换失败时改动旧 agent；`defaults.json` 里重复的 `web_tools.base_url` 已删除。
+
+### 从 1.8.1 升级到 1.9.0
+
+1.9.0 只新增能力，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有的 `settings.json` 不需要改动。但**联网的默认路径变了**，这部分值得看一眼。
+
+- 联网默认改走服务端工具：`deepseek` 与 `deepseek-anthropic` 预设的 `server_tools.enabled` 默认 `true`，模型在回答前直接调用 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在 DeepSeek 服务端完成，只计模型 token。此时本地的 `web_search` / `web_fetch` 不再出现在工具列表里，`--read-only` 与 `tools.allow` 里的这两个名字仍然有效（不会误报未知工具），只是不生效。
+- 独立的 Search/Fetch API 变成可选 fallback：`web_tools.enabled` 的预设默认值从 `true` 改成 `false`（5 元/千次成功请求）。你的 `settings.json` 里如果显式写了 `web_tools.enabled: true`，行为不变、也不会被改写，只是启动时会打印一行提示告诉你这条路径按次计费；想换回新默认就把它设成 `false`。
+- 两条路互斥：`server_tools` 生效时，恢复的旧会话或模型误调本地 `web_search` / `web_fetch` 会被 `dispatch` 拒绝并说明原因，一轮里不会同时产生两种计费。确实想用独立 API 时把 `server_tools.enabled` 设成 `false`，同时打开 `web_tools.enabled`。
+- 网页端「联网搜索」开关现在驱动服务端工具：打开后下一次请求才声明它们，摘要与压缩请求永不联网。状态里新增 `web_search_mode`（`server` / `local` / `off`）与 `web_search_available`。
+- 非 `api.deepseek.com` 的接入点（含 `deepseek-web` 协议）不声明、也不接受这些服务端工具，网页上的相关按钮直接隐藏并给出原因。
 
 ### 从 1.8.0 升级到 1.8.1
 
@@ -238,554 +925,6 @@ minimalcode --web --web-port 9000 --cwd D:\work\repo --provider deepseek -m deep
 完整对照表见 [docs/compatibility.md](docs/compatibility.md)。
 
 0.7 → 0.8 只补充文档与注释、补全供应商重试策略的测试，公开面与 0.7.0 一致，升级无需改代码。
-
-## 快速开始
-
-推荐 API：[<img src="https://www.deepseek.com/favicon.ico" width="16" height="16" alt="DeepSeek 图标"> DeepSeek 开放平台](https://platform.deepseek.com)
-
-```powershell
-$env:DEEPSEEK_API_KEY = "your-key"
-minimalcode
-```
-
-交互模式启动后会显示供应商/模型、当前工作区、shell 和会话文件路径。
-
-输入支持多行：行尾写 `\` 回车继续下一行（`... ` 提示符），行尾 `\\` 表示字面反斜杠；也可以直接粘贴整段长文本，粘贴块里的换行不会被当作多次提交，整段内容作为一条消息发送。`-p` 或管道输入时不做改写。
-
-如果剪贴板里是图片，先按终端的粘贴快捷键（Windows 为 `Ctrl+V`，macOS 为 `Cmd+V`，多数 Linux 终端为 `Ctrl+Shift+V`）再回车即可发送：终端本身无法把图片粘进输入行，所以 MinimalCode 把空回车当作读取剪贴板的信号。随后可以输入要一起发送的问题再回车；直接回车则让视觉模型完整描述图片。图片不需要事先保存成文件，由供应商 `vision` 配置的视觉模型转成文字描述后随消息一起发给主模型；未配置 `vision` 时该功能不可用。
-
-单次任务：
-
-```powershell
-minimalcode "找出这个项目测试失败的原因并修好"
-minimalcode -p "运行测试并总结" --json
-```
-
-`-p/--print` 表示非交互执行，必须同时给出提示词或通过标准输入管道传入；`--json` 隐含该模式。
-
-## CLI 参考
-
-```text
-minimalcode [prompt ...] [options]
-```
-
-| 选项 | 说明 |
-|---|---|
-| `prompt ...` | 初始消息。给出后执行一轮任务并退出 |
-| `-p`, `--print` | 非交互模式；缺少提示词时报错 |
-| `--json` | 输出 JSON 并隐含 `--print`，同时隐藏工具活动 |
-| `-c`, `--continue` | 继续当前目录最近一次会话 |
-| `--session <id>` | 指定会话：完整 ID、前缀或 `.jsonl` 路径 |
-| `--no-session` | 本次运行不读写会话 |
-| `--provider <name>` | 覆盖配置中的供应商 |
-| `--anthropic-env` | 用 Claude Code 风格的 `ANTHROPIC_*` / `CLAUDE_CODE_*` 环境变量直接启动 Anthropic Messages 协议，不修改配置文件；不能与 `--provider` 同用 |
-| `-m`, `--model <id>` | 覆盖模型 |
-| `--attach <path>` | 首轮之前上传并解析该文档，`file_id` 随第一条用户消息附带；可重复。适合非交互（`-p`）运行 |
-| `--thinking <effort>` | 覆盖推理强度：`none`（关闭）、`minimal`、`low`、`medium`、`high`、`xhigh`、`ultra`、`max` |
-| `--max-turns <n>` | 覆盖最大工具轮次（1–10000） |
-| `--read-only` | 只保留 `read`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`，以及 MCP 服务器标记为只读的工具；拒绝任何可能改动工作区的工具 |
-| `--cwd <dir>` | 指定工作区 |
-| `--home <dir>` | 指定配置目录，默认 `~/.MinimalCode` |
-| `--web` | 启动本地网页界面代替终端交互；不能与提示词、`--session`、`--continue` 同用 |
-| `--web-host <host>` | 网页界面绑定地址，默认 `127.0.0.1`（只绑回环） |
-| `--web-port <port>` | 网页界面端口，默认 `8090`；`0` 表示由系统分配 |
-| `--sandbox`, `--no-sandbox` | 开启/关闭沙箱执行层（默认关闭，等价于默认 `--no-sandbox`）。无论开关，文件工具的工作区与敏感文件边界都生效 |
-| `--sandbox-backend <name>` | `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker` |
-| `--sandbox-root <path>` | 额外允许的读写根，可重复 |
-| `--sandbox-network <policy>` | `deny`（默认）、`allowlist`、`allow` |
-| `--sandbox-allow-host <host>` | `allowlist` 允许的主机，可重复 |
-| `--sandbox-timeout <sec>` | 单条命令的硬超时 |
-| `--sandbox-max-output <chars>` | 单条命令返回的 stdout/stderr 上限 |
-| `--sandbox-allow-sensitive` | 允许访问 `.env`、私钥等敏感文件 |
-| `--quiet` | 隐藏工具活动和 token 用量摘要 |
-| `--no-highlight` | 关闭 Markdown 高亮 |
-| `--version` | 打印版本 |
-
-管理命令按第一个词识别，`--home` 可以写在命令前面（`minimalcode --home DIR sessions` 等价于 `minimalcode sessions --home DIR`）；其他选项写在前面时会被当成普通提示词。以命令词开头的提示词需要用 `--` 分隔：`minimalcode -- init config show` 发送的是提示词而不是执行子命令。
-
-管理命令：
-
-| 命令 | 说明 |
-|---|---|
-| `minimalcode init [--force]` | 创建配置目录与 `settings.json` |
-| `minimalcode config [show]` | 打印合并后的配置，敏感字段显示为 `<redacted>` |
-| `minimalcode config path` | 打印配置文件路径 |
-| `minimalcode config set-model <id>` | 写入默认模型 |
-| `minimalcode config set-provider <name>` | 写入默认供应商 |
-| `minimalcode sessions` | 列出已保存会话（时间、ID、模型、工作区） |
-| `minimalcode shell` | 显示探测到的 shell |
-| `minimalcode sandbox` | 打印当前沙箱策略与各后端可用性 |
-| `minimalcode mcp [--cwd DIR]` | 启动配置的 MCP 服务器并打印状态、协议版本与工具清单（JSON），不发起模型请求 |
-| `minimalcode clawd [status\|install\|remove\|test]` | 查看、注册或撤回 Clawd on Desk 桌宠集成（`install` / `remove` 要在 Clawd 退出时执行） |
-| `minimalcode import-pi` | 从 Pi 配置迁移供应商、模型和上下文窗口 |
-
-`import-pi` 默认**不**复制 API key，而是写入指向环境变量的 `api_key_env`；确实要把密钥复制进权限受限的配置时加 `--secrets`（密钥不会在终端打印）。`--pi-home` 指定 Pi 目录，`--overwrite` 允许覆盖已有供应商。
-
-退出码：`0` 任务完成，`1` 未在轮次上限内完成，`2` 配置或运行错误，`130` 被 Ctrl+C 中断。stdout 的读取端提前关闭（例如 `minimalcode ... | head`）按 `0` 退出，不会打印错误或 `Exception ignored`。
-
-JSON 输出字段：
-
-```json
-{"text":"...","completed":true,"turns":3,"usage":{},"session_usage":{},"usage_estimated":false,"session":"...jsonl"}
-```
-
-`usage` 是本次运行新增的用量，`session_usage` 是整个会话的累计值（`-c` 继续会话时两者不同）；`usage_estimated` 为 `true` 表示至少有一轮没有供应商返回的 usage，数字来自本地估算。
-
-## 交互命令
-
-| 命令 | 作用 |
-|---|---|
-| `/new`、`/clear` | 新建会话 |
-| `/compact` | 立即压缩历史 |
-| `/summary` | 让模型总结全部上下文并写入工作区 `AGENTS.md`；文件不存在则创建，已存在则只更新 `<!-- minimalcode:summary:start/end -->` 之间的块，其余内容原样保留 |
-| `/session` | 显示会话文件路径 |
-| `/effort [none\|minimal\|low\|medium\|high\|xhigh\|ultra\|max]` | 查看或修改本次运行的推理强度；`none` 关闭思考 |
-| `/model [供应商/模型]` | 查看当前模型和可用供应商（只列出已检测到凭据的，含免密钥的本地预设）；给出 `供应商/模型` 时切换本次会话，例如 `/model deepseek/deepseek-flash`。只切换当前会话，不写回 `settings.json` |
-| `/status` | 显示模型、推理强度、shell、上下文、token 统计与 MCP 服务器状态（JSON） |
-| `/mcp [refresh]` | 显示每个 MCP 服务器的状态；`refresh` 重新拉取工具列表（并重试启动失败的服务器），重建本会话的工具定义 |
-| `/attach <路径> [用途]` | 上传并解析文档（PDF / Word / PowerPoint / 图片 / 表格 / 电子书），`file_id` 随下一条消息发给模型；`rich_layout_recognition` 会把文档里的图按原位置一起交给模型 |
-| `/listen <音频路径>` | 把音频转写成文字，并把转写结果作为本轮消息发送（语音输入） |
-| `/say [文本]` | 把文本（省略时为上一条回答）合成为语音，写入工作区 `speech-<时间戳>.wav` |
-| `/help` | 显示命令 |
-| `/exit`、`/quit` | 退出 |
-
-未知的 `/` 命令只报错，不会结束会话。多行消息的行间换行会原样保留在会话记录里。
-
-## 工具
-
-| 工具 | 作用 | 主要参数 |
-|---|---|---|
-| `read` | 按行范围读取 UTF-8 文本，输出带行号并报告 `line_ending`；非 UTF-8 内容会带 `warnings` 提示 | `path`、`start_line`、`end_line` |
-| `read_range` | 读取显式行区间（带行号），用于行号编辑前确认目标 | `path`、`start_line`、`end_line` |
-| `write` | 创建或整体覆盖文件 | `path`、`content` |
-| `append_file` | 在 EOF 追加文本，文件不存在时创建，保留既有换行风格 | `path`、`content` |
-| `edit` | 按行号替换区间，`end_line = start_line - 1` 表示在该行前插入；`old_text` 是精确文本兜底，两者不能混用 | `path`、`start_line`、`end_line`、`new_text`、`old_text`、`replace_all` |
-| `shell` | 在配置的 shell 中执行命令 | `command`、`timeout`、`cwd` |
-| `grep` | 正则搜索文本，返回 `path:line:text` | `pattern`、`path`、`glob`、`max_results` |
-| `find` | 按 glob 查找文件 | `pattern`、`path`、`max_results` |
-| `web_search` | 通过供应商检索网页，结果按 `rerank_score` 排序并去重 | `query`、`count`、`need_content`、`ori_question`、`localization` |
-| `web_search` | 通过供应商检索网页，结果按 `rerank_score` 排序并去重 | `query`、`count`、`need_content`、`ori_question`、`localization` |
-| `web_fetch` | 通过供应商抓取 HTTP/HTTPS 页面 | `url` |
-| `ocr` | 逐页识别 PDF / Word / PowerPoint / 图片中的文字 | `path`、`purpose` |
-| `transcribe` | 把 16 位 PCM WAV 或 Ogg Opus 音频转写成文字 | `path` |
-| `speech` | 把文本合成为音频并写入工作区 | `text`、`path`、`voice_id` |
-| `read_image` | 读取本地图片并交给配置的 OpenAI 兼容视觉端点，返回描述或对 `prompt` 的回答 | `path`、`prompt` |
-| `subagent` | 在子 shell 中启动一个新的 `minimalcode`，只返回它的最终答复 | `task`、`cwd`、`timeout`、`max_turns` |
-
-`web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用；`ocr`、`transcribe`、`speech` 由供应商的 `media` 配置启用，写哪个 `*_path` 就开哪项能力。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
-
-`tools.allow` 给出允许的工具名列表（例如 `["read", "grep", "find"]`），`--read-only` 是它的一种预设。两者取交集，且被禁用的工具不会出现在请求的 `tools` 里；即使模型仍然发起调用（恢复的旧会话、忽略 schema 的供应商），`dispatch` 也会返回形如 `tool 'write' is disabled by --read-only` 的错误。只读模式下列表以外的工具一律不可用，包括 `subagent`（它会启动一个能写文件的子进程）。
-
-`subagent` 默认开启，但受 `subagent.enabled` 和 `subagent.max_depth` 约束；超过嵌套深度的子进程既收不到该工具定义，直接调用也会被拒绝。同一轮里相邻的多个 `subagent` 调用会并发执行（上限 `subagent.max_parallel`，默认 4），结果仍按请求顺序写回会话；它们不会与相邻的其他工具重叠，因为 `write` 后接 `shell` 这类顺序是有意义的。相邻的只读工具（`read`、`read_range`、`grep`、`find`、`read_image`、`web_search`、`web_fetch`、`ocr`、`transcribe`）同样会并发执行，上限 `tools.max_parallel`。子进程就是一条命令，因此开启沙箱执行层时其超时还要再受 `sandbox.timeout_seconds` 约束：`subagent.timeout_seconds` 更大时会被压到该值，并在 `minimalcode sandbox` / `/status` 的 `notes` 中记录；执行层关闭时只受 `subagent.timeout_seconds` 约束。
-
-`write`、`edit`、`append_file` 写入 Python 文件后会先跑 `py_compile`，装有时再跑 `ruff`；出现新诊断就原子回滚并返回文件、行号和源码预览。改动前已经存在的 lint 问题不会阻塞无关编辑。
-
-### MCP 服务器
-
-MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一套工具循环。服务器在 `settings.json` 的 `mcp.servers` 里声明，工具名是 `mcp__<服务器名>__<工具名>`：
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "files": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
-      },
-      "docs": {
-        "transport": "http",
-        "url": "https://mcp.example.com/mcp",
-        "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
-      }
-    }
-  }
-}
-```
-
-- 传输：`stdio`（默认，子进程）、`http`（streamable HTTP，响应可以是 JSON 或 SSE）、`sse`（旧版 HTTP+SSE）。
-- 发现：`tools/list` 会读完全部分页；缺少 `inputSchema` 的工具按无参数处理；非法字符、超长名字会被规范化，并用短哈希区分冲突。
-- 结果：文本原样返回，图片/音频只报告类型与大小，`structuredContent` 在没有文本时转成 JSON，总长度按 `mcp.max_output_chars` 首尾截断。
-- 失败隔离：某个服务器启动失败或调用超时，只返回该服务器的错误，其余工具和后续回合照常。
-- 权限：`tools.allow` 支持 `mcp__<服务器>` / `mcp__<服务器>__*`；`--read-only` 只保留 `readOnlyHint: true` 或整台服务器 `read_only: true` 的工具。
-- 生命周期：`/new` 和 `/model` 复用同一批服务器进程；`/mcp refresh` 重新发现工具；退出时统一关闭。
-- 边界：`stdio` 服务器默认只拿到启动所需的环境变量；`cwd` 经过与文件工具相同的沙箱路径检查；服务器进程本身由你声明，不在沙箱后端内运行。
-
-完整字段与安全说明见 [docs/configuration.md](docs/configuration.md)。
-
-### 图像理解
-
-`read_image` 是通用工具，不绑定某个供应商，也不受供应商自身 `protocol` 限制：只要在供应商配置里加一个 `vision` 块，指向任意 OpenAI 兼容的 `/chat/completions` 端点，该供应商就能获得这个工具。`base_url`、`model` 和密钥默认沿用供应商的同名字段，也可以单独覆盖：
-
-```json
-"vision": {
-  "enabled": true,
-  "base_url": "https://api.example.com/v1",
-  "model": "vision-model",
-  "timeout_seconds": 120,
-  "max_image_bytes": 33554432,
-  "max_chars": 8000,
-  "detail": "auto",
-  "api_key_env": "EXAMPLE_API_KEY",
-  "headers": {}
-}
-```
-
-- 图片以 base64 data URL 内联发送，格式按文件内容判断，支持 JPEG、PNG、GIF 和 WebP，不依赖扩展名。
-- 交互模式下也可以直接从剪贴板粘贴图片：按终端的粘贴快捷键后再回车（Windows `Ctrl+V`、macOS `Cmd+V`、多数 Linux 终端 `Ctrl+Shift+V`），不需要先保存文件。MinimalCode 调用同一个 `vision` 配置读取剪贴板图片并生成描述；图片超过 `max_image_bytes`、剪贴板里没有图片或读取失败时会报错并继续会话。
-- `prompt` 可选；缺省时要求模型详细描述图片并逐字转写可见文字，结果超过 `max_chars` 时截断并标记 `<description truncated>`。
-- `read_image` 和其他文件工具一样受工作区限制，读取工作区外的图片需要 `tools.allow_outside_workspace`。
-- 内置默认配置只为 DeepSeek 打开了 `vision`（`deepseek-flash`），其他供应商默认关闭，需要时按上面的结构自行添加。
-
-### 实现要点
-
-- **工作区约束**：所有接受路径的工具都经同一处校验。相对路径以工作区为基准，解析后必须位于工作区内；`tools.allow_outside_workspace: true` 可放行外部路径，但仍受敏感文件策略约束。`shell` 与 `subagent` 同样经过沙箱入口，命令的工作目录和解析后的符号链接都在允许根内。`--no-sandbox` 只关闭执行层（后端包装、网络策略、资源限制），工作区与敏感文件边界照旧生效。
-- **沙箱执行层**：`sandbox.enabled` 默认关闭（等同默认 `--no-sandbox`），`--sandbox` 或任意 `--sandbox-*` 选项会开启它；开启后默认后端 `local`（跨平台策略与子进程限制基线），可选 `auto`（Linux 依次尝试 `bwrap`、`firejail`，macOS 尝试 `sandbox-exec`，否则 `local`）以及 `bwrap`、`firejail`、`sandbox-exec`、`docker`。默认网络策略 `deny`，默认拒绝 `.env`、私钥、`.ssh/`、`.aws/` 等敏感路径。开启时路径逃逸、符号链接逃逸、敏感文件、网络命令、后端缺失都会 fail-closed 拒绝并记录原因。命令统一受 `sandbox.timeout_seconds`、`sandbox.max_output_chars` 和子进程资源上限约束，临时目录用后删除。详见 `docs/configuration.md` 的 Sandbox 一节。
-- **grep / find**：检测到 `rg` 时直接以参数数组调用子进程（`rg --no-config --line-number --no-heading --color never --smart-case ...` 和 `rg --files --glob ...`），不拼接命令行字符串；没有 `rg` 时退回 Python 的 `re` + `os.walk`，并用独立子进程执行正则，超时会终止。两条路径跳过相同的忽略目录（`.git`、`node_modules`、`build`、`dist`、缓存和虚拟环境），支持相同的 smart-case 语义和相同的 glob 语义（`*` 不跨目录、`**/` 可匹配零层、大小写敏感），都不解析 `.gitignore`，也都不受 `RIPGREP_CONFIG_PATH` 影响；显式把 `path` 指向 `build` 等目录时仍会搜索该目录。两条路径的输出都再经过一次敏感文件策略过滤，被沙箱截断产生的标记行不会作为匹配返回。单行结果按 300 字符截断，`rg`/`find` 输出达到上限即停止读取。
-- **shell**：自动探测会先用一条 `exit 0` 验证候选 shell 能否真正启动，`pwsh` 因缺少 libicu、.NET 无法预留内存或架构不符而崩溃时会继续尝试 `bash` → `zsh` → `sh`（Windows 为 `powershell` → Git Bash）；探测结果按可执行文件缓存，每个进程只付一次启动开销（pwsh 约 0.2 秒）。Windows 上 `System32\bash.exe` 与 `WindowsApps\bash.exe`（WSL 或应用商店启动器）不会作为原生 shell 候选，`pwsh-preview` / `powershell-preview` 按对应的 PowerShell 处理。显式配置的 `shell.path` 同样会验证，启动失败会直接报出原因而不是静默换 shell；`cmd.exe` 会被直接拒绝，因为它不接受 `-c`，用 `-c` 启动只会打印横幅、退出 0 而什么都不执行。`pwsh`/`powershell` 以 `-NoLogo -NoProfile -NonInteractive -Command` 启动，并在命令前注入 bootstrap：关闭进度条、`$ErrorActionPreference='Stop'`、控制台输出编码设为无 BOM 的 UTF-8。bash/zsh/sh 分别使用 `-c` 及各自的 no-profile 参数。stdout/stderr 由后台线程持续读取，只在内存中保留首尾有界片段，因此超长输出不会占满磁盘或内存，超时后仍能返回已产生的部分输出。超时会终止整个进程树（Windows 用 `taskkill /T`，POSIX 用进程组）。
-- **误报网络命令**：`local` 基线的 `deny` 基于命令字符串识别，只读的 `python -m pip show/list`、`pip --version` 会被放行，`pip install/download` 等会触网子命令才会被拒绝。
-- **资源限制**：POSIX 下对子进程设置 `RLIMIT_CORE` 和按超时推算的 `RLIMIT_CPU`；Linux 的 `RLIMIT_AS`（`sandbox.max_memory_mb`）和 `RLIMIT_NPROC`（`sandbox.max_processes`）默认关闭，因为 `RLIMIT_AS` 限制的是预留地址空间而非实际占用，2 GB 的默认值会让 .NET（pwsh）、JVM、Go 子进程在真正运行前就报 `Out of memory`。
-- **subagent**：没有新的子协议，就是一条 shell 命令 `<python> -m minimalcode -p --no-session --quiet`，透传父进程的 `--provider` / `-m` / `--thinking` / `--home` / 工作区。任务正文通过 stdin 传入，因此提示词不会出现在命令行里，也没有引号转义问题；PowerShell 使用调用运算符 `&`，并在末尾用空值安全的 `exit` 保留子进程真实退出码（无法启动时返回 1）。子进程通过 `MINIMALCODE_SUBAGENT_DEPTH` 得知自己的层级，超过 `subagent.max_depth` 后不再获得 `subagent` 工具；`PYTHONPATH` 指向当前包所在目录，因此子进程跑的是同一份代码。
-- **网络重试**：请求在拿到响应之前失败（`ConnectError`、`ConnectTimeout`，以及 `Server disconnected without sending a response.` 这类 `RemoteProtocolError`）会自动重试 10 次，退避从 0.5 秒翻倍到最多 8 秒；已经开始返回数据的流式中断不重试，避免重复输出或重复计费。HTTP 429/503 仍按 `Retry-After` 重试一次。
-- **输出裁剪**：工具结果按首尾保留截断，超长输出中间以 `... <truncated N chars> ...` 标记，既保留开头上下文也保留结尾错误信息。
-- **编码与并发**：`read` 先用 `errors="strict"` 扫描请求范围，只有真正遇到非 UTF-8 字节时才退回替换解码并写 `warnings`，因此正常文件不多读一遍、也不会把有损内容当成干净内容。同一轮的只读调用走同一个分组器：结果按调用顺序回填，`[read]` 等活动行仍在主线程打印；`write` / `edit` / `shell` / `subagent` 不参与并发，紧挨着它们的只读调用也留在主线程。
-
-## 桌宠集成（Clawd on Desk）
-
-MinimalCode 可以把工作状态上报给 [Clawd on Desk](https://github.com/rullerzhou-afk/clawd-on-desk)：提问时它思考，工具执行时它打字，子代理时它杂耍，压缩上下文时它扫除，回合结束弹完成动画。
-
-先退出 Clawd on Desk，再注册，然后重新打开它：
-
-```bash
-# 1. 退出 Clawd on Desk（托盘菜单 Quit，不是关窗口）
-minimalcode clawd install   # 把 MinimalCode 注册成 Clawd 的「自定义 HTTP Agent」
-minimalcode clawd status    # 查看 Clawd 是否在运行、agent id 与偏好文件版本
-minimalcode clawd test      # 真发一条探测事件，看 Clawd 是否接受（200 / 204）
-minimalcode clawd remove    # 撤回注册（同样要先退出 Clawd）
-```
-
-`install` 在 Clawd 仍在运行时会拒绝写入：Clawd 把偏好设置放在内存里，移动桌宠或改设置时会把整份快照写回文件，运行期间的注册会被它覆盖成"看起来注册成功、其实没生效"。注册后 Clawd 只在启动时读取偏好文件，所以重新打开它就生效。
-
-`clawd status` 里的 `schema` 是 Clawd 偏好文件的 schema 版本（1.6.0 是 21）。它和 Clawd 自身版本不同步时可以据此判断手上的偏好文件是哪个构建写的。`clawd test` 会真的 POST 一条 `SessionStart`：200 表示 Clawd 接受了这个 agent，204 表示它在运行但这个 agent 未知或被关掉（常见原因是注册后没重启 Clawd），连不上表示 Clawd 没运行。
-
-之后 MinimalCode 每次运行都会读 `~/.clawd/runtime.json` 找到 Clawd 当前端口，把生命周期事件 POST 到 `127.0.0.1` 的 `/state`；端口变了会自动重读，Clawd 没运行、集成被关闭或没有注册时完全静默，不会拖慢或打断任何一次工具调用。
-
-上报内容只有生命周期元数据：agent id、会话 id、状态、事件名、工具名、工作目录和平台。提示词、工具参数、文件和密钥都不会发送。Clawd 只接受它认识的 agent id，未注册的 id 会被它并进 Claude Code 的子代理流，因此 MinimalCode 在注册之前什么也不发。
-
-偏好文件位置：Windows `%APPDATA%\clawd-on-desk\clawd-prefs.json`，macOS `~/Library/Application Support/clawd-on-desk/`，Linux `${XDG_CONFIG_HOME:-~/.config}/clawd-on-desk/`。文件不存在时 `install` 会创建一个只含 `customApplications` 的文档，Clawd 启动时用自己的 schema 补齐其余字段——所以源码 checkout 在第一次 `npm start` 之前就能注册。
-
-### 源码版与安装版
-
-两套安装共用同一份偏好文件（`app.getPath("userData")` + `clawd-prefs.json`）和同一个 `~/.clawd/runtime.json`，所以注册一次、两边都生效；`npm start` 启动的源码版和安装版同时只会有其中一个在跑，端口以 `runtime.json` 为准。
-
-源码版不需要打任何补丁。Clawd 侧的「自定义 HTTP Agent」实现在 `src/custom-applications.js`、`src/server-agent-id.js` 和 `src/server-route-state.js` 里，这些文件在 1.6.0 标签和当前源码 HEAD 之间没有改动，因此上报路径完全一致。注意 `package.json` 的 `version` 在发版前不会跟着提交走，源码 checkout 常常写着 1.6.0 但代码已经比标签新（用 `git describe --tags` 看真实位置）；判断依据请用 `minimalcode clawd status` 的 `schema`，别用版本号字符串。
-
-配置项 `integrations.clawd`：`enabled`（默认 `true`）、`agent_id`（留空表示使用注册得到的 id；把 Clawd 打了原生 MinimalCode 支持时可填 `minimalcode`）、`runtime_file`（默认 `~/.clawd/runtime.json`）、`timeout_seconds`（默认 `1.0`）。
-
-## 配置
-
-默认目录：
-
-```text
-~/.MinimalCode/
-├── settings.json   # 自动创建，与包内 defaults.json 深度合并
-├── SYSTEM.md       # 可选，替换默认系统提示词
-├── AGENTS.md       # 可选，全局规则
-├── sessions/       # 按工作区分组的 JSONL 会话
-└── webui/          # 网页端专用：folders.json 记住文件夹与对话归属
-```
-
-配置目录可用 `MINIMALCODE_HOME` 或 `--home` 覆盖。
-
-默认供应商是 DeepSeek，使用 Responses 协议和环境变量中的密钥：
-
-```json
-{
-  "provider": "deepseek",
-  "model": "deepseek-flash",
-  "thinking": "high",
-  "max_turns": 1000,
-  "providers": {
-    "deepseek": {
-      "protocol": "openai_responses",
-      "base_url": "https://api.deepseek.com/v1",
-      "api_key_env": "DEEPSEEK_API_KEY",
-      "context_window": 1000000,
-      "timeout_seconds": 120,
-      "stream": true,
-      "include_usage": false,
-      "send_reasoning_effort": true,
-      "headers": {},
-      "extra_body": {}
-    }
-  }
-}
-```
-
-- `protocol` 取 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `deepseek_web`（网页版对话接口，见 [docs/configuration.md](docs/configuration.md#deepseek-web-chatdeepseekcom)）。
-- 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
-- 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
-- `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。
-- `max_tokens` 仅 Anthropic Messages 使用，默认 `8192`。官方 Anthropic API 要求该字段；`thinking` 的 `budget_tokens` 会按 `thinking` 等级映射，并保证小于 `max_tokens`。
-- `prompt_cache: true` 只对 Anthropic Messages 生效：给 system 提示与工具定义打一个 `cache_control` 缓存断点，长工具循环里这段静态前缀按缓存读取计费。默认关闭，因为部分兼容端点不接受该字段。
-- 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可。
-- 代理：供应商、`web_tools`、`vision` 默认沿用环境变量与系统代理设置。`base_url` 指向环回地址（`127.0.0.1`、`::1`、`localhost`）时自动忽略代理，否则本机运行的 Ollama、vLLM 或测试服务器会被 Clash 之类的代理劫走；需要强制时可在对应配置块里写 `"trust_env": true|false`。显式传入自建 transport 时默认不读环境代理，避免代理映射覆盖注入的连接。
-
-### 内置供应商预设
-
-`defaults.json` 已经为常用供应商准备好端点、协议和密钥环境变量。它们不会猜模型 ID：交互中用 `/model 供应商/模型` 时显式给出模型，例如：
-
-```text
-/model deepseek/deepseek-flash
-/model openai/<model-id>
-/model anthropic/<model-id>
-/model moonshot/<model-id>
-```
-
-| 供应商 | API key 环境变量 | 端点 |
-|---|---|---|
-| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1`（Responses） |
-| `deepseek-anthropic` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/anthropic`（Anthropic Messages） |
-| `openai` | `OPENAI_API_KEY` | `https://api.openai.com/v1`（Responses） |
-| `anthropic` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1`（Anthropic Messages） |
-| `google` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
-| `groq` | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
-| `mistral` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
-| `xai` | `XAI_API_KEY` | `https://api.x.ai/v1` |
-| `moonshot` | `MOONSHOT_API_KEY` | `https://api.moonshot.cn/v1` |
-| `zhipu` | `ZHIPUAI_API_KEY` | `https://open.bigmodel.cn/api/paas/v4` |
-| `dashscope` | `DASHSCOPE_API_KEY` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| `siliconflow` | `SILICONFLOW_API_KEY` | `https://api.siliconflow.cn/v1` |
-| `together` | `TOGETHER_API_KEY` | `https://api.together.ai/v1` |
-| `fireworks` | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` |
-| `perplexity` | `PERPLEXITY_API_KEY` | `https://api.perplexity.ai` |
-| `cerebras` | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` |
-| `sambanova` | `SAMBANOVA_API_KEY` | `https://api.sambanova.ai/v1` |
-| `nebius` | `NEBIUS_API_KEY` | `https://api.studio.nebius.com/v1` |
-| `deepinfra` | `DEEPINFRA_TOKEN` | `https://api.deepinfra.com/v1/openai` |
-| `novita` | `NOVITA_API_KEY` | `https://api.novita.ai/openai/v1` |
-| `cohere` | `COHERE_API_KEY` | `https://api.cohere.ai/compatibility/v1` |
-| `github` | `GITHUB_TOKEN` | `https://models.github.ai/inference` |
-| `volcengine` | `ARK_API_KEY` | `https://ark.cn-beijing.volces.com/api/v3` |
-| `minimax` | `MINIMAX_API_KEY` | `https://api.minimax.io/v1` |
-| `hunyuan` | `HUNYUAN_API_KEY` | `https://api.hunyuan.cloud.tencent.com/v1` |
-| `qianfan` | `QIANFAN_API_KEY` | `https://qianfan.baidubce.com/v2` |
-| `modelscope` | `MODELSCOPE_API_KEY` | `https://api-inference.modelscope.cn/v1` |
-| `baichuan` | `BAICHUAN_API_KEY` | `https://api.baichuan-ai.com/v1` |
-| `yi` | `YI_API_KEY` | `https://api.lingyiwanwu.com/v1` |
-| `stepfun` | `STEP_API_KEY` | `https://api.stepfun.com/v1` |
-| `spark` | `SPARK_API_PASSWORD` | `https://spark-api-open.xf-yun.com/v1` |
-| `ppio` | `PPIO_API_KEY` | `https://api.ppio.com/openai/v1` |
-| `ollama` | 无需密钥 | `http://localhost:11434/v1` |
-| `lmstudio` | 无需密钥 | `http://localhost:1234/v1` |
-| `vllm` | 无需密钥 | `http://localhost:8000/v1` |
-
-预设只固定端点和密钥变量名，`context_window` 保持一个保守值（本地三家为 `32768`，其余按各家公开的主推窗口填写），换到更大或更小的模型时按需在 `settings.json` 里调整。区域或套餐端点不同时（例如 MiniMax 国内站 `https://api.minimax.cn/v1`、StepFun 国际站 `https://api.stepfun.ai/v1`、火山方舟 `step_plan` 端点），覆盖 `base_url` 即可；Cohere 的兼容端点不接受 `stream_options`，所以预设里 `include_usage` 为 `false`。
-
-`/model` 切换的是当前会话，不会修改 `settings.json`；要改默认值仍用 `minimalcode config set-provider` / `set-model`。切换后子代理也会继承新的供应商和模型。新供应商如果没有配置 `web_tools` / `vision`，对应的 `web_search`、`web_fetch`、`read_image` 工具会从工具列表中移除，切回带这些配置的供应商后恢复。
-
-Anthropic Messages 模式可以直接接入 DeepSeek 的 Anthropic 兼容端点，内置预设 `deepseek-anthropic`：
-
-```json
-"deepseek-anthropic": {
-  "protocol": "anthropic_messages",
-  "base_url": "https://api.deepseek.com/anthropic",
-  "api_key_env": "DEEPSEEK_API_KEY",
-  "model": "deepseek-flash",
-  "context_window": 1000000,
-  "timeout_seconds": 120,
-  "stream": true,
-  "send_reasoning_effort": true,
-  "max_tokens": 8192,
-  "headers": {},
-  "extra_body": {}
-}
-```
-
-```powershell
-$env:DEEPSEEK_API_KEY = "your-key"
-minimalcode --provider deepseek-anthropic "运行测试并总结"
-```
-
-端点从 `base_url` 推导：`https://api.deepseek.com/anthropic` 会请求 `/anthropic/v1/messages`；`base_url` 已以 `/v1` 结尾时只补 `/messages`，已经是完整 `/messages` 地址时原样使用。鉴权发送 `x-api-key`，并附带 `anthropic-version: 2023-06-01`（自定义 `headers` 中的同名字段优先）。工具定义会转换为 Anthropic 的 `name` / `description` / `input_schema`，连续的工具结果会合并到同一条 user 消息，且 `tool_result` 块放在文本之前。思考模式下通过工具调用继续对话时，assistant 的 thinking 块（含 signature）会保存在会话中并原样回传，以保证 Anthropic 的多轮工具调用可以继续。需要复用系统提示与工具定义的缓存时，在该供应商里加上 `"prompt_cache": true`；内置预设默认不开，避免端点不支持 `cache_control` 时整轮请求失败。
-
-### 从 Claude Code 环境变量启动
-
-如果本机已经按 [DeepSeek 的 Claude Code 接入文档](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/claude_code)配好了环境变量，可以跳过配置文件直接用：
-
-```powershell
-$env:ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
-$env:ANTHROPIC_AUTH_TOKEN="<你的 DeepSeek API Key>"
-$env:ANTHROPIC_MODEL="deepseek-flash[1m]"
-$env:CLAUDE_CODE_EFFORT_LEVEL="max"
-$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW="786432"
-
-minimalcode --anthropic-env
-```
-
-`--anthropic-env` 只在本进程内合成一个名为 `anthropic-env` 的供应商，不读写 `settings.json`，因此普通启动（不带该参数）仍然使用文件配置；它也不能与 `--provider` 同时使用。
-
-| 环境变量 | 作用 |
-|---|---|
-| `ANTHROPIC_BASE_URL` | 端点根，默认 `https://api.deepseek.com/anthropic` |
-| `ANTHROPIC_AUTH_TOKEN` | Bearer 凭据，作为 `Authorization: Bearer` 发送；与 `ANTHROPIC_API_KEY` 同时存在时优先 |
-| `ANTHROPIC_API_KEY` | 作为 `x-api-key` 发送（两者至少需要一个） |
-| `ANTHROPIC_MODEL` | 模型名；缺省时回退到 `ANTHROPIC_DEFAULT_SONNET_MODEL`，再缺省则报错。`--model` 优先级最高 |
-| `CLAUDE_CODE_EFFORT_LEVEL` | 推理强度，取值同 `--thinking`；`--thinking` 优先 |
-| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 自动压缩阈值（token），换算成 `context.compact_at`，只在本次运行生效 |
-| `ANTHROPIC_CONTEXT_WINDOW` | 覆盖上下文窗口（MinimalCode 扩展项） |
-| `ANTHROPIC_MAX_TOKENS` | 覆盖输出上限，默认 `8192`（MinimalCode 扩展项） |
-
-模型名里的 `[1m]` / `[200k]` 这类 Claude Code 后缀只用于选择上下文窗口，发送请求前会被去掉（`deepseek-flash[1m]` → `deepseek-flash`，窗口 1000000）；不带后缀时默认按 Anthropic 标准的 200000。`--anthropic-env` 不读取配置文件里的 `web_tools` / `vision`，因此这次运行没有 `web_search`、`web_fetch` 和 `read_image` 工具；需要这些工具时仍用 `--provider deepseek-anthropic`。
-
-沙箱执行层默认关闭（默认 `--no-sandbox`），需要时用 `--sandbox` 或把 `enabled` 设为 `true` 开启；开启后默认只允许工作区、默认禁网：
-
-```json
-"sandbox": {
-  "enabled": false,
-  "backend": "local",
-  "allowed_roots": [],
-  "network_policy": "deny",
-  "allowed_hosts": [],
-  "timeout_seconds": 120,
-  "max_output_chars": 60000,
-  "allow_sensitive_files": false,
-  "max_memory_mb": 0,
-  "max_processes": 0,
-  "docker_image": "alpine:3"
-}
-```
-
-`backend` 可选 `auto`、`local`、`bwrap`、`firejail`、`sandbox-exec`、`docker`；不可用的后端会拒绝执行而不是降级。命令行提供 `--sandbox/--no-sandbox`、`--sandbox-backend`、`--sandbox-root`、`--sandbox-network`、`--sandbox-allow-host`、`--sandbox-timeout`、`--sandbox-max-output` 和 `--sandbox-allow-sensitive`，`minimalcode sandbox` 可查看当前策略与后端可用性。
-
-完整字段、默认值、Web 工具和视觉配置见 [docs/configuration.md](docs/configuration.md)；内置默认值以包内 `minimalcode/defaults.json` 为准。
-
-## 终端高亮
-
-当输出目标是支持 ANSI 的交互式终端时，模型输出中的标题、强调、行内代码、引用、列表、表格和围栏代码块会被着色，并按流式 delta 逐词显示，不等待整行或完整回复。未闭合的 Markdown 标记会立即按对应样式渲染且不打印语法字符；`#` 到 `######` 标题标记本身也不打印，`## 标题` 只输出着色的标题文字；链接显示为 `文本 (URL)`。正文不重排，会话中保存的仍是模型返回的原始 Markdown。模型输出、工具输出和错误信息在写到终端前会移除 ANSI/OSC 等控制序列，只保留换行和制表符，避免转义序列操纵终端。
-
-主题通过配置切换：
-
-```json
-"output": {
-  "markdown_highlight": true,
-  "theme": "dark"
-}
-```
-
-`theme` 支持 `dark` 和 `light`。以下情况保持纯文本：`--json`、stdout 被重定向、设置 `NO_COLOR`、`--no-highlight`、或配置中关闭高亮。
-
-工具活动（`[shell]`、`[read]` 等标签）写入 stderr，助手正文写入 stdout；`--quiet` 和 `--json` 下不显示工具活动。长 shell 输出在终端只保留首尾各若干行（最多 12 行、4000 字符，省略部分标记 `… N lines omitted`），模型收到的完整输出不受影响。
-
-## 安全边界
-
-- MinimalCode 会执行模型生成的 shell 命令，所有命令统一经过沙箱入口。文件工具始终拒绝工作区外路径、符号链接逃逸和常见敏感文件。沙箱执行层默认关闭（默认 `--no-sandbox`），此时不施加网络策略、命令超时/输出上限和子进程资源限制；用 `--sandbox` 或 `sandbox.enabled: true` 开启后，疑似联网命令会被拒绝，后端不可用时 fail-closed 拒绝执行。
-- 默认关闭的执行层意味着 `shell` 直接以当前用户身份运行，没有禁网推断、命令超时和输出上限；需要这些约束时请加 `--sandbox`（或在配置中开启）。开启后的 `local` 基线是策略、超时、输出和子进程资源限制层，不是操作系统级文件系统或网络隔离。需要硬隔离时请选择 `bwrap`/`firejail`/`sandbox-exec`/`docker`（`docker` 仅在 POSIX 宿主上可用，并以当前 `uid:gid` 运行容器，避免工作区出现 root 属主文件），或把 MinimalCode 放进容器、虚拟机或受限账户中运行。
-- 执行层关闭时 `local` 的网络 `deny` 不生效；开启后 `deny` 基于命令字符串识别，无法阻止任意程序自行发起网络连接；`allowlist` 同样依赖命令中的主机可被识别。真正的禁网依赖支持网络命名空间的后端。
-- 文件工具默认限制在工作区内；这不能替代操作系统级隔离，路径检查与真正打开文件之间存在 TOCTOU 窗口。
-- `sandbox` 不清理子进程环境变量，`shell` 仍能看到当前用户的凭据环境变量；不要在不信任的仓库中运行不可信命令。
-- 网络策略 `deny` / `allowlist` 只检查命令位置上的可执行文件名与少量已知联网子命令（`pip install`、`git clone`、`npm install` 等）。因此 `rg curl`、`git log --grep=curl` 这类把网络命令名当参数或搜索词的命令会被放行，引号内的 `|` / `;` 也不会被拆成多条命令（`rg 'nc|netcat'` 同样放行）；而 `echo x | curl ...`、`pwsh -Command "iwr ..."`、`sudo wget ...`、`busybox wget ...`、`sh -c "sudo curl ..."` 仍会被拒绝。它不是网络防火墙。
-- `AGENTS.md` / `CLAUDE.md` / `SYSTEM.md` 会进入系统提示词，并在每次运行开始前重新读取（文件不存在则跳过）。解析后的文件必须仍位于声明它的目录中，指向目录外的符号链接会被忽略，避免把工作区外文件带进模型上下文。`/summary` 写入 `AGENTS.md` 的路径同样经过这层校验。
-- `web_fetch` 的目标 URL 由配置的 provider 服务端抓取，而不是由 MinimalCode 直接访问。`web_tools.base_url` 及其凭据属于可信配置，不要指向不可信或能访问敏感内网的服务。
-- `read_image` 同样受工作区限制，图片以 base64 data URL 内联发送，受 `max_image_bytes` 约束。请求由 MinimalCode 直接发往 `vision.base_url`（未设置时回退到供应商的 `base_url`），与主协议无关，因此该端点及其凭据属于可信配置。
-
-## 开发
-
-```powershell
-python -m pip install -e ".[dev]"
-python -m unittest discover -s tests -v
-python -m compileall -q minimalcode tests main.py
-python -m ruff check minimalcode tests benchmarks main.py
-python -m ruff format --check minimalcode tests benchmarks main.py
-python benchmarks/deepseek_responses.py --runs 3
-```
-
-`benchmarks/coding_suite.py --validate-only` 用于在无网络、无密钥的情况下校验基准任务定义。结果报告只列出实际运行过的 agent：只跑了 MinimalCode 时不会输出与 Pi 的对比列。
-
-旧入口仍然可用：
-
-```powershell
-python main.py -p "inspect this repository"
-```
-
-## 项目结构
-
-```text
-minimalcode/
-├── cli.py           # 参数解析、管理命令、交互循环
-├── agent.py         # 工具循环、用量统计、上下文压缩
-├── subagent.py      # 子代理的子进程构造与深度限制
-├── provider/        # OpenAI Chat / Responses 与 Anthropic Messages 客户端
-│   ├── client.py    #   共享客户端与协议分派
-│   ├── chat.py      #   Chat Completions 载荷、流与解析
-│   ├── responses.py #   Responses 载荷、事件流与解析
-│   ├── anthropic.py #   Anthropic Messages 载荷、流与解析
-│   ├── transport.py #   HTTP 请求建立与连接重试
-│   ├── common.py    #   usage / 内容 / 参数归一化
-│   ├── types.py     #   ToolCall、ProviderReply
-│   └── factory.py   #   create_provider
-├── tools/           # 工作区工具
-│   ├── runtime.py       #   共享状态与工具分派
-│   ├── schemas.py       #   工具定义
-│   ├── files.py         #   read / read_range / write / append_file / edit
-│   ├── search.py        #   子进程搜索与输出解析
-│   ├── search_tools.py  #   grep / find
-│   ├── process.py       #   shell / subagent
-│   ├── remote.py        #   vision / web 工具
-│   ├── media_tools.py   #   ocr / transcribe / speech
-│   └── validation.py    #   模型参数校验
-├── mcp/             # MCP 客户端
-│   ├── protocol.py  #   JSON-RPC、内容与 schema 转换
-│   ├── transport.py #   stdio / streamable HTTP / 旧版 HTTP+SSE
-│   ├── client.py    #   握手、工具发现与调用
-│   └── manager.py   #   服务器生命周期与工具索引
-├── sandbox/         # 沙箱策略、后端与有界执行
-│   ├── runner.py    #   统一入口
-│   ├── policy.py    #   路径与网络策略
-│   ├── sensitive.py #   敏感文件规则
-│   ├── network.py   #   联网命令识别与主机白名单
-│   ├── backends.py  #   bwrap / firejail / sandbox-exec / docker
-│   ├── execution.py #   子进程捕获、超时与资源限制
-│   └── audit.py     #   拒绝与运行记录
-├── highlight/       # 流式 Markdown 渲染
-│   ├── markdown.py  #   增量渲染状态机
-│   ├── code.py      #   围栏代码着色
-│   ├── sanitize.py  #   终端控制序列清理
-│   ├── color.py     #   ANSI 能力探测
-│   └── palette.py   #   深色/浅色调色板
-├── webui/           # 本地网页界面
-│   ├── runtime.py   #   WebRuntime：设置写入、工作区切换、会话、单轮流式回合
-│   ├── server.py    #   ThreadingHTTPServer 路由、Host/Origin 校验、SSE 分帧
-│   ├── library.py   #   文件夹与对话的归属（<home>/webui/folders.json）
-│   ├── thinking.py  #   刷新后仍在的推理块（<home>/webui/thinking.json）
-│   └── assets/      #   index.html / app.css / app.js（随 wheel 安装，无构建步骤）
-├── shell.py         # shell 探测与子进程执行
-├── shell.py         # shell 探测与子进程执行
-├── httpclient.py    # HTTP 客户端构造、代理策略与连接重试
-├── prompt.py        # 系统提示词与 AGENTS.md 发现
-├── session.py       # JSONL 会话存储与检索
-├── config.py        # 配置合并、校验、脱敏、原子写入
-├── web.py           # 供应商 web_search / web_fetch 客户端
-├── media.py         # 供应商 OCR / 语音识别 / 语音合成 / 文件解析客户端
-├── vision.py        # 供应商视觉客户端
-├── reminder.py      # latest_reminder 的内容（日期、星期、平台、语言）
-├── clawd.py         # Clawd on Desk 桌宠的生命周期上报
-├── reminder.py      # latest_reminder 的内容（日期、星期、平台、语言）
-├── clipboard.py     # 系统剪贴板图片读取
-├── importer.py      # Pi 配置迁移
-├── errors.py        # 统一异常类型
-└── defaults.json    # 内置默认配置
-```
-
-五个包的 `__all__` 是唯一公开接口（`tools`、`sandbox`、`provider`、`highlight`、`webui`）。0.7.0 起不再为拆分前的模块级名字提供回退；私有 helper 从定义它的子模块导入，详见 [docs/compatibility.md](docs/compatibility.md)。
-
-请求链路：CLI → 配置与 shell 探测 → 会话加载/创建 → 供应商流式请求 → 工具调用与执行 → 结果追加到 JSONL → 下一轮模型请求 → 最终文本或 JSON。每次运行只有一个常驻主进程和一个复用的 HTTP 连接池，没有守护进程、嵌入式数据库或后台服务（`shell` 工具会按需启动子进程）。更多细节见 [docs/architecture.md](docs/architecture.md)。
-
-## 文档
-
-- [docs/architecture.md](docs/architecture.md)：请求链路、模块职责与性能取舍。
-- [docs/configuration.md](docs/configuration.md)：全部配置字段、默认值与安全边界。
-- [docs/compatibility.md](docs/compatibility.md)：1.0 兼容承诺、公开面定义，以及 0.6 → 0.7 的导入与 patch 迁移对照表。
 
 ## 后续工作
 

@@ -33,6 +33,11 @@ class ProviderReply:
     # Short conversation title the provider generated alongside the answer. Only
     # the first request of a session asks for one, so this is usually None.
     title: str | None = None
+    # Reasoning text the turn produced. Only a tool-call step keeps it in the
+    # transcript: DeepSeek's Chat API wants `reasoning_content` back on the
+    # assistant message that asked for tools, while a finished answer's
+    # reasoning is ignored by the next request (and rejected by some servers).
+    reasoning: str = ""
 
     def as_message(self) -> dict[str, Any]:
         """Render the reply as an assistant message for the conversation log."""
@@ -49,6 +54,10 @@ class ProviderReply:
             message["server_tools"] = self.server_tools
         if self.citations:
             message["citations"] = self.citations
+        if self.tool_calls and self.reasoning:
+            # The next request of this tool loop has to see the reasoning that
+            # asked for the call; a finished answer keeps it out of the log.
+            message["reasoning_content"] = self.reasoning
         if self.tool_calls:
             message["tool_calls"] = [
                 {

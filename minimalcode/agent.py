@@ -632,12 +632,16 @@ class Agent:
         """Build the advertised schema list, including discovered MCP tools."""
         manager = getattr(tool_runtime, "mcp", None)
         mcp_schemas = manager.schemas() if manager is not None else []
+        # The runtime carries the provider's active server-side tools, and the
+        # owner refreshes them together with the provider when a switch changes,
+        # so the schema list and the dispatcher never disagree.
         return available_tool_schemas(
             tool_runtime.web_client,
             tool_runtime.vision_client,
             tool_runtime.subagent_enabled,
             allowed=self._allowed_tools(tool_runtime),
             mcp_schemas=mcp_schemas,
+            server_tools=tuple(getattr(tool_runtime, "server_tools", ())),
         )
 
     def refresh_tools(self) -> list[str]:

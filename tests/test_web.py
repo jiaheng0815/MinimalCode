@@ -447,9 +447,37 @@ class WebToolTests(unittest.TestCase):
             settings = load_settings(Path(temp) / ".MinimalCode")
         _, provider = settings.provider_config("deepseek")
         web = provider["web_tools"]
-        self.assertTrue(web["enabled"])
+        # The default path is the model-side tool set, so the per-request
+        # Search/Fetch API stays off until someone opts in.
+        self.assertFalse(web["enabled"])
         self.assertEqual(web["base_url"], "https://api.deepseek.com/v1/tools")
         self.assertEqual(web["search_path"], "search")
+        self.assertEqual(web["fetch_path"], "fetch")
+        server = provider["server_tools"]
+        self.assertTrue(server["enabled"])
+        self.assertTrue(server["web_search"])
+        self.assertTrue(server["read_url"])
+
+    def test_local_schemas_step_aside_for_the_server_side_tools(self) -> None:
+        client = ProviderWebClient("custom", _web_config())
+        try:
+            local = {
+                tool["function"]["name"] for tool in available_tool_schemas(client)
+            }
+            replaced = {
+                tool["function"]["name"]
+                for tool in available_tool_schemas(
+                    client, server_tools=("deepseek_web_search", "deepseek_read_url")
+                )
+            }
+        finally:
+            client.close()
+        self.assertIn("web_search", local)
+        self.assertIn("web_fetch", local)
+        self.assertNotIn("web_search", replaced)
+        self.assertNotIn("web_fetch", replaced)
+        # Everything else stays advertised: only the two web tools are replaced.
+        self.assertEqual(local - {"web_search", "web_fetch"}, replaced)
 
     def test_web_client_inherits_provider_headers(self) -> None:
         # A provider that authenticates with a custom header must not lose it in

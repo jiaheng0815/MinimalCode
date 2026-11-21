@@ -72,6 +72,17 @@ def _is_loopback_url(value: object) -> bool:
     return any(token in value for token in ("//127.0.0.1", "//localhost", "//[::1]"))
 
 
+def _valid_provider_name(name: str) -> bool:
+    """True when a name is safe to use as a ``providers`` key.
+
+    The rule lives in ``config`` so the CLI's ``add-provider`` and this page
+    accept exactly the same names.
+    """
+    from ..config import valid_provider_name
+
+    return valid_provider_name(name)
+
+
 class Busy(RuntimeError):
     """A second turn was requested while one is still streaming."""
 
@@ -305,27 +316,58 @@ class WebRuntime:
             return preset
         return self._default_model()
 
-    def capabilities(self) -> dict[str, Any]:
-        """Return the DeepSeek-only features this provider may use right now.
-
-        A live provider already answered this at construction; before the first
-        turn the same question is asked of the configured preset, so the composer
-        can hide a switch it cannot honour instead of failing later.
-        """
-        from ..deepseek import features as deepseek_features
-
+    def _chat_config(self) -> dict[str, Any]:
+        """Return the config of the provider that carries the chat request."""
         provider = self._provider
-        capability = getattr(provider, "deepseek", None)
-        if isinstance(capability, dict):
-            return dict(capability)
+        config = getattr(provider, "config", None)
+        if isinstance(config, dict):
+            return config
         try:
             _, config = self.settings.provider_config(self.provider_name or None)
         except (ConfigError, ValueError):
-            return dict(deepseek_features({}))
-        return dict(deepseek_features(config))
+            return {}
+        return config
+
+    def _feature_source(self) -> tuple[str, dict[str, Any]] | None:
+        """Return the provider that supplies the DeepSeek-only features.
+
+        A session may talk to another vendor while a DeepSeek key is configured:
+        OCR, speech, and the standalone Search API are plain HTTP calls, so that
+        block can still run them. The live provider wins when it is the DeepSeek
+        API, which keeps a single-provider setup on its own credentials.
+        """
+        from ..deepseek import feature_source, is_deepseek_api
+
+        provider = self._provider
+        config = getattr(provider, "config", None)
+        if isinstance(config, dict) and is_deepseek_api(config):
+            return str(provider.name), config
+        return feature_source(self.settings, self.provider_name or None)
+
+    def capabilities(self) -> dict[str, Any]:
+        """Return the DeepSeek-only features this runtime may use right now.
+
+        A live provider already answered this at construction; before the first
+        turn the same question is asked of the configured preset, so the composer
+        can hide a switch it cannot honour instead of failing later. The chat
+        provider and the feature provider are resolved separately: the former
+        owns the request-side features, the latter the HTTP-call ones.
+        """
+        from ..deepseek import features as deepseek_features
+
+        source = self._feature_source()
+        return dict(
+            deepseek_features(
+                self._chat_config(),
+                source=source[1] if source is not None else None,
+                source_name=source[0] if source is not None else "",
+            )
+        )
 
     def describe(self) -> dict[str, Any]:
         """Return everything the settings panel and header need."""
+        from ..deepseek import is_deepseek_api
+
         providers: list[dict[str, Any]] = []
         default_model = self._default_model()
         for name, block in self._providers().items():
@@ -344,6 +386,9 @@ class WebRuntime:
                     "has_api_key": provider_api_key(block) is not None,
                     "api_key_env": str(block.get("api_key_env") or ""),
                     "local": _is_loopback_url(block.get("base_url")),
+                    # The page marks the options that can supply the DeepSeek
+                    # feature set, so a custom endpoint is never mistaken for one.
+                    "deepseek": is_deepseek_api(block),
                 }
             )
         providers.sort(key=lambda item: item["name"])
@@ -351,6 +396,7 @@ class WebRuntime:
             (item for item in providers if item["name"] == self.provider_name), None
         )
         session = self._session
+        capability = self.capabilities()
         return {
             "version": __version__,
             "workspace": str(self.workspace),
@@ -363,11 +409,23 @@ class WebRuntime:
             "settings_path": str(self.settings.source),
             "busy": self._lock.locked(),
             "thinking": self._thinking != "none",
-            # Everything below is DeepSeek-API-only. `deepseek.available` is
-            # false for any other endpoint, including the deepseek_web protocol.
-            "deepseek": self.capabilities(),
+            # `deepseek.available` means a DeepSeek block exists somewhere in
+            # the file; `deepseek.active` means the chat provider is that block.
+            # Server tools, documents, safety, and titles need the second one.
+            "deepseek": capability,
             "web_search": self._web_search,
-            "safety": (self._safety or self._preset_safety()) == "high",
+            # Which code path a search would take: `server` means the model asks
+            # DeepSeek to search on its servers, `local` means this process would
+            # POST the per-request Search API, `off` means neither is configured.
+            "web_search_mode": self._web_search_mode(capability),
+            # Either path is enough to show the composer switch. Hiding it while
+            # the standalone Search API is enabled left that configuration with
+            # no way to turn web access on at all.
+            "web_search_available": self._web_path(capability) != "off",
+            # The review rides on the chat request, so a remembered "high" must
+            # not look active after switching to a provider that cannot carry it.
+            "safety": bool(capability.get("active"))
+            and (self._safety or self._preset_safety()) == "high",
             "attachments": list(self._attachments),
             "session": (
                 {"id": session.session_id, "title": session.title}
@@ -375,6 +433,30 @@ class WebRuntime:
                 else None
             ),
         }
+
+    def _web_path(self, capability: dict[str, Any] | None = None) -> str:
+        """Return the path a search would take if the switch were on.
+
+        ``server`` — the model asks DeepSeek's servers to search, which needs the
+        chat provider to be the DeepSeek API; ``local`` — a turn would POST the
+        standalone Search/Fetch API from here, which any configured DeepSeek
+        block can do; ``off`` — neither is configured, so the switch could not do
+        anything.
+        """
+        capability = self.capabilities() if capability is None else capability
+        if capability.get("web_search"):
+            return "server"
+        if capability.get("search_api") or capability.get("fetch_api"):
+            return "local"
+        return "off"
+
+    def _web_search_mode(self, capability: dict[str, Any] | None = None) -> str:
+        """Return the web path this runtime would actually take.
+
+        The switch is part of the answer: an off switch means no web access at
+        all, whatever the provider could have done.
+        """
+        return self._web_path(capability) if self._web_search else "off"
 
     def _preset_safety(self) -> str:
         """Return the safety level the provider preset asks for."""
@@ -526,31 +608,61 @@ class WebRuntime:
         return self.describe()
 
     def _apply_switches(self, provider: Any) -> None:
-        """Push the composer's DeepSeek switches onto a live provider."""
+        """Push the composer's DeepSeek switches onto a live provider.
+
+        The 联网 switch is the server-tool switch when the chat provider is the
+        DeepSeek API: turning it on declares ``deepseek_web_search`` /
+        ``deepseek_read_url`` for the next request, so the model searches inside
+        the turn instead of this process paying the standalone Search/Fetch fee
+        per call. Another vendor's endpoint would reject those declarations, so
+        there the switch only drives the standalone client instead. The tool
+        runtime is refreshed too, because it decides which schemas are advertised
+        and refuses a replayed local ``web_search`` while a server tool covers it.
+        """
+        from ..deepseek import is_deepseek_api
         from ..deepseek import server_tools as preset_server_tools
 
         if not hasattr(provider, "set_server_tools"):
             # A stand-in provider (tests, a plugin) has no server tools, so the
             # switches stay inert instead of failing the turn.
             return
+        deepseek = is_deepseek_api(provider.config)
+        if not deepseek:
+            # The review is a request field, so another endpoint cannot carry
+            # it; a remembered "high" must not look active after a switch.
+            self._safety = ""
         provider.set_server_tools(
-            preset_server_tools(provider.config) if self._web_search else ()
+            preset_server_tools(provider.config)
+            if self._web_search and deepseek
+            else ()
         )
-        if self._safety:
+        if self._safety and deepseek:
             provider.set_safety_level(self._safety)
-
-        provider.set_server_tools(
-            preset_server_tools(provider.config) if self._web_search else ()
-        )
-        if self._safety:
-            provider.set_safety_level(self._safety)
+        agent = self._agent
+        # Only a live provider has an agent whose tool list this switch drives;
+        # during `_build()` the new runtime gets its own `server_tools` from the
+        # caller, and mutating the old agent there would leak a rejected change.
+        if agent is not None and provider is agent.provider:
+            agent.tools.server_tools = tuple(provider.server_tools)
+            agent.refresh_tools()
 
     def _require_media(self, capability: str) -> ProviderMediaClient:
-        """Return the media client, building the agent when it does not exist."""
+        """Return the media client, building the agent when it does not exist.
+
+        The capability flag and the client have to agree: OCR and speech can be
+        supplied by another configured DeepSeek block, while a document's
+        ``file_id`` is attached to the chat request and needs the chat provider
+        itself to be the DeepSeek API.
+        """
         self._ensure_agent()
         client = self._media
-        if client is None or not getattr(client, f"{capability}_enabled", False):
-            reason = self.capabilities().get("reason")
+        state = self.capabilities()
+        if (
+            client is None
+            or not state.get(capability)
+            or not getattr(client, f"{capability}_enabled", False)
+        ):
+            reason = state.get("active_reason") or state.get("reason")
             raise ConfigError(
                 reason or f"{capability} is not available for this provider"
             )
@@ -558,11 +670,21 @@ class WebRuntime:
 
     @_mutating
     def set_web_search(self, enabled: object) -> dict[str, Any]:
-        """Turn the composer's 联网 switch on or off."""
+        """Turn the composer's 联网 switch on or off.
+
+        The switch drives the server-side tools (see ``_apply_switches``), and
+        ``_web_search`` is only the page's view of it; what actually reaches the
+        request is decided by ``provider.server_tools``.
+
+        A provider with the standalone Search/Fetch API enabled is just as valid
+        a web path, so the guard asks ``_web_path`` instead of the server-tool
+        flag alone: refusing here made the switch error out on a configuration
+        that can search perfectly well.
+        """
         if not isinstance(enabled, bool):
             raise ConfigError("web_search must be a boolean")
         capability = self.capabilities()
-        if enabled and not capability.get("web_search"):
+        if enabled and self._web_path(capability) == "off":
             raise ConfigError(
                 capability.get("reason") or "web search is not available here"
             )
@@ -573,13 +695,19 @@ class WebRuntime:
 
     @_mutating
     def set_safety(self, enabled: object) -> dict[str, Any]:
-        """Turn the composer's 内容安全 switch on or off."""
+        """Turn the composer's 内容安全 switch on or off.
+
+        The review rides on the chat request, so it needs the chat provider to be
+        the DeepSeek API even when another block supplies the media features.
+        """
         if not isinstance(enabled, bool):
             raise ConfigError("safety must be a boolean")
         capability = self.capabilities()
-        if enabled and not capability.get("available"):
+        if enabled and not capability.get("active"):
             raise ConfigError(
-                capability.get("reason") or "content safety is not available here"
+                capability.get("active_reason")
+                or capability.get("reason")
+                or "content safety is not available here"
             )
         self._safety = "high" if enabled else "low"
         if self._provider is not None:
@@ -672,6 +800,11 @@ class WebRuntime:
         by this process (``--sandbox`` and friends) survive because the live
         settings mapping is updated instead of reloaded.
 
+        ``custom: true`` defines a new endpoint instead of overriding one: the
+        page sends a name and a base URL, and the block is validated by
+        ``write_settings_document`` before the live mapping changes, so a typo is
+        reported here rather than failing the next start.
+
         A provider that only exists in this process (``--anthropic-env``
         injects one into ``settings.data``) is never written: a block holding a
         model and nothing else would fail validation on the next start, and a
@@ -679,8 +812,19 @@ class WebRuntime:
         """
         if not isinstance(payload, dict):
             raise ConfigError("settings payload must be an object")
-        name = payload.get("provider")
-        if name is not None and (
+        custom = bool(payload.get("custom"))
+        name = payload.get("name") if custom else payload.get("provider")
+        if custom:
+            if not isinstance(name, str) or not name.strip():
+                raise ConfigError("a custom API needs a name")
+            name = name.strip()
+            if not _valid_provider_name(name):
+                raise ConfigError(
+                    "provider names match [A-Za-z0-9][A-Za-z0-9._-]{0,31}"
+                )
+            if name in self._providers():
+                raise ConfigError(f"provider {name!r} already exists")
+        elif name is not None and (
             not isinstance(name, str) or name not in self._providers()
         ):
             raise ConfigError(f"unknown provider: {name!r}")
@@ -697,6 +841,19 @@ class WebRuntime:
             if not isinstance(api_key, str):
                 raise ConfigError("api_key must be a string")
             api_key = api_key.strip()
+        base_url = payload.get("base_url")
+        if base_url is not None:
+            if not isinstance(base_url, str):
+                raise ConfigError("base_url must be a string")
+            base_url = base_url.strip()
+            if custom and not base_url:
+                raise ConfigError("a custom API needs a base_url")
+        if custom and not api_key and not _is_loopback_url(base_url):
+            # A hosted endpoint without a credential can only fail on the first
+            # turn; a local server is the one case that legitimately has none.
+            raise ConfigError(
+                "a custom API needs an API key; a local endpoint may omit it"
+            )
 
         target = name or self.provider_name
         block: dict[str, Any] = {}
@@ -710,10 +867,17 @@ class WebRuntime:
             block["protocol"] = protocol
         if api_key:
             block["api_key"] = api_key
+        if base_url:
+            block["base_url"] = base_url
+        if custom:
+            # A new endpoint must not inherit another protocol's request shape,
+            # so the format is explicit even when the page sent the default.
+            block.setdefault("protocol", "openai_chat")
+            if not api_key:
+                block["require_api_key"] = False
         if block:
             updates["providers"] = {target: block}
-        if updates:
-            if self._persistable(target):
+            if custom or self._persistable(target):
                 document = _merge(dict(self.settings.raw or {}), updates)
                 write_settings_document(document, self.settings.home)
                 self.settings.raw = document
@@ -907,16 +1071,34 @@ class WebRuntime:
             sink(event, data)
 
     def _build(self) -> tuple[Any, str, str, list[Any], ToolRuntime]:
-        """Create a provider, its optional clients, and a tool runtime."""
+        """Create a provider, its optional clients, and a tool runtime.
+
+        The chat provider owns the model request; the DeepSeek feature set may
+        come from another configured block (OCR, speech, the standalone Search
+        API), so the media client is built from that block's credentials. Vision
+        stays on the chat provider: it is the block that describes the image the
+        user is about to send.
+        """
         provider, name, model = create_provider(
             self.settings,
             provider_name=self.provider_name or None,
             model=self.model or None,
             thinking=self._thinking or None,
         )
-        web_client = ProviderWebClient(name, provider.config)
+        source = self._feature_source()
+        source_name, source_config = (
+            source if source is not None else (name, provider.config)
+        )
+        # A provider that brought its own `web_tools` keeps them; otherwise the
+        # DeepSeek block's standalone Search/Fetch API is the local web path.
+        web_config = (
+            provider.config
+            if isinstance(provider.config.get("web_tools"), dict)
+            else source_config
+        )
+        web_client = ProviderWebClient(name, web_config)
         vision_client = ProviderVisionClient(name, provider.config, model=model)
-        media_client = ProviderMediaClient(name, provider.config)
+        media_client = ProviderMediaClient(source_name, source_config)
         tools = ToolRuntime(
             self.settings,
             self.workspace,
@@ -924,6 +1106,7 @@ class WebRuntime:
             web_client=web_client,
             vision_client=vision_client,
             media_client=media_client,
+            server_tools=(),
             provider_name=name,
             model=model,
             thinking=provider.thinking,
@@ -931,8 +1114,10 @@ class WebRuntime:
         )
         clients = [web_client, vision_client, media_client]
         # A composer switch turned on before the first turn has to reach the
-        # provider that will carry it.
+        # provider that will carry it. The runtime then follows the provider, so
+        # the advertised schemas and the dispatcher agree from the first request.
         self._apply_switches(provider)
+        tools.server_tools = tuple(getattr(provider, "server_tools", ()))
         self._provider = provider
         self._media = media_client if media_client.enabled else None
         return provider, name, model, clients, tools

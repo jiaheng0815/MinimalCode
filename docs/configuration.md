@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.8.1.
+Applies to MinimalCode 1.10.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -354,10 +354,13 @@ The role is DeepSeek-specific, so a provider preset also has to opt in with
 Reasoning deltas reported by the provider (`reasoning_content`, `reasoning`, a
 Responses reasoning summary, or Anthropic thinking) are printed in the `h6`
 heading style before the answer, and only when highlighting is active. They are
-display-only and never enter `--json` output. Anthropic is the one exception to
-the session rule: while a tool call is open, its thinking blocks carry signatures
-that must be replayed, so they are stored with that assistant message and sent
-back on the next turn. Finished answers do not retain them.
+display-only in `--json` output. Two protocols need them in the next request of
+a tool loop, so the assistant message that carried the tool calls keeps them:
+Chat stores the turn's reasoning as `reasoning_content` and sends it back
+(DeepSeek requires the field when a tool result follows), and Anthropic Messages
+stores its thinking blocks with their signatures. A finished answer retains
+neither: the next user turn does not need them, and some servers reject a stale
+`reasoning_content`.
 
 ## Provider fields
 
@@ -368,26 +371,7 @@ back on the next turn. Finished answers do not retain them.
 | `model` | no | Provider-specific default model; overrides the top-level model for this provider |
 | `api_key_env` | no | Environment variable containing the API key |
 | `api_key` | no | Inline API key; prefer an environment variable |
-| `require_api_key` | no | Defaults to true when `api_key_env` is set |
-| `context_window` | no | Model context size, default `128000` |
-| `max_tokens` | no | Anthropic output cap, default `8192`; required by the official API |
-| `timeout_seconds` | no | Whole-generation deadline and HTTP read timeout, default `120` |
-| `stream` | no | SSE streaming, default `true` |
-| `include_usage` | no | Send `stream_options`, default `true` (Chat only) |
-| `send_reasoning_effort` | no | Send reasoning effort or the `none` thinking switch, default `false` |
-| `prompt_cache` | no | Anthropic only: mark the static prefix for prompt caching, default `false` |
-| `headers` | no | Additional HTTP headers |
-| `extra_body` | no | Additional request fields such as `temperature` |
-| `trust_env` | no | Apply environment/system proxies; loopback `base_url` values default to `false` |
-| `session_title` | no | `{"enabled": true}` asks the provider for a short conversation title |
-| `safety_check` | no | `{"level": "low"}` (default) or `{"level": "high"}` for server-side content safety |
-| `latest_reminder` | no | `true` when the endpoint accepts the `latest_reminder` role |
-| `server_tools` | no | `{"enabled": true, "web_search": true, "read_url": true}` declares DeepSeek's server-side web tools |
-
-Provider entries are validated when settings load: `protocol`, `base_url`,
-numeric limits, booleans, and object fields are checked before the first request.
-Values containing `${VAR}` placeholders are expanded later, so they are checked
-again when that provider becomes active.
+| `require_api_key` | no | Defaults to true when `api_key_env` is set; a loopback endpoint added from the page is written with `false` when no key is given |
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
 
@@ -403,14 +387,58 @@ an early stop instead of being shown as a normal answer.
 
 `server_tools` declares the tools DeepSeek executes on its own servers:
 `deepseek_web_search` (web search, and deep search while thinking) and
-`deepseek_read_url` (read the links in the last user message). Only `read_link`
-blocks are replayed in later turns, because the page body comes back encrypted in
-`signature`; search results and opened pages are dropped by the service itself.
-The declarations ride after the function tools and never appear for a plain
-completion, so summaries and compaction never search. All of this — plus
-document parsing, OCR, speech, and the safety review — requires `base_url` to be
+`deepseek_read_url` (read the links in the last user message). It is the default
+web path: the bundled DeepSeek presets ship `server_tools.enabled: true` with
+`web_tools.enabled: false`, so the model searches inside the turn and nothing
+here POSTs the per-request Search API. Only `read_link` blocks are replayed in
+later turns, because the page body comes back encrypted in `signature`; search
+results and opened pages are dropped by the service itself. The declarations ride
+after the function tools and never appear for a plain completion, so summaries
+and compaction never search. While a server tool covers the same ground, the
+local `web_search` / `web_fetch` schemas are not advertised and a replayed call
+to them is refused instead of silently billing the standalone API. Server tools,
+document parsing, the safety review, and session titles are declared on the chat
+request, so they require the **chat** provider's `base_url` to be
 `api.deepseek.com`; any other endpoint, including the `deepseek_web` chat-app
 protocol, refuses the switch with a reason.
+
+### Custom endpoints
+
+`minimalcode config add-provider <name> --base-url URL` (and the page's
+"自定义 API…" entry) append one `providers.<name>` block. The name must match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,31}` and must not exist yet: the command never
+overwrites a bundled preset. `--protocol` defaults to `openai_chat`, `--model`
+also becomes the default model, and the credential comes from `--api-key-env`
+or `--api-key`. The page requires a key for a non-loopback endpoint and writes
+`require_api_key: false` when a loopback one is saved without one. Editing
+`providers.<name>` by hand stays supported; nothing else in the file changes.
+
+### Which provider supplies the DeepSeek feature set
+
+A session has one chat provider, but OCR, speech, and the standalone
+Search/Fetch API are plain HTTP calls, so they can run on another configured
+block. `deepseek.feature_source(settings, active)` looks for the first usable
+`api.deepseek.com` provider: the active one when it is already DeepSeek, then the
+`deepseek` and `deepseek-anthropic` presets, then the remaining names
+alphabetically. A block whose `${VAR}` is unset, or that requires a key it does
+not have, is skipped rather than failing startup (or advertising a tool that can
+only 401). `deepseek.features()` reports `available` (a source exists), `active`
+(the chat provider is the source), `provider` (its name), and `active_reason`
+(why a request-side switch is hidden). The CLI and the web runtime resolve this
+the same way, so switching to another vendor keeps the media tools instead of
+dropping them.
+
+`web_tools` is the fallback for that same capability: `enabled: true` makes this
+process call `POST /v1/tools/search` and `POST /v1/tools/fetch` itself, which
+bills 5 CNY per 1,000 successful requests and is why it is off by default. It
+stays the only web path for vendors that have no server-side tools (OpenRouter,
+Groq, a local model, and so on): with `server_tools` absent or disabled, the
+local `web_search` / `web_fetch` tools are advertised exactly as before. That
+block does not have to belong to the chat provider: `feature_source()` picks a
+configured DeepSeek block, so an OpenRouter session can use DeepSeek's Search API
+with DeepSeek's key. An older settings file that still has `web_tools.enabled:
+true` keeps working and prints one startup line pointing at
+`server_tools.enabled`; nothing is rewritten.
 `prompt_cache: true` on an `anthropic_messages` provider marks one cache
 breakpoint on the last tool definition, which covers the system prompt and the
 tool list together; without tools the system block is marked instead. One
@@ -525,15 +553,18 @@ provider's `vision` endpoint.
 
 Presets pin the endpoint and the credential variable only. `context_window` is a conservative `32768` for the three local servers and the vendor's headline window for the rest; override it in `settings.json` when a different model needs more or less. Regional or plan-specific endpoints (MiniMax's `https://api.minimax.cn/v1`, StepFun's `https://api.stepfun.ai/v1`, Volcengine's `step_plan` endpoint) are a `base_url` override away. Cohere's compatibility API rejects `stream_options`, so its preset sets `include_usage: false`. Providers that need a signature or a query string per request (Azure OpenAI's `api-version`, Bedrock, Vertex) are not presets: configure them manually with `headers` and a full endpoint `base_url`.
 
-`/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Use `/model` without arguments to list the active model and only the providers whose credentials are available: an inline `api_key`, an auth header, a set `api_key_env`, or `require_api_key: false`. Providers with a missing key are omitted instead of listed as unavailable.
+`/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Media tools follow the DeepSeek feature source instead: a provider without a `media` block keeps them while another DeepSeek block is configured. Use `/model` without arguments to list the active model and only the providers whose credentials are available: an inline `api_key`, an auth header, a set `api_key_env`, or `require_api_key: false`. Providers with a missing key are omitted instead of listed as unavailable.
 
 The settings panel of the web UI (`minimalcode --web`) writes the same keys as
-`config set-provider` / `config set-model`, plus two provider-scoped overrides
-the CLI has no command for: `providers.<name>.model` (pins the model for that
-vendor) and `providers.<name>.protocol` (changes the API format without touching
-`base_url`, for a gateway that serves more than one wire format). An API key
-typed in the page is stored as `providers.<name>.api_key`; the page only ever
-reports whether a key is configured, never the key itself.
+`config set-provider` / `config set-model`, plus provider-scoped overrides:
+`providers.<name>.model` (pins the model for that vendor),
+`providers.<name>.protocol` (changes the API format without touching `base_url`,
+for a gateway that serves more than one wire format), and `providers.<name>.base_url`
+(when the custom-API form defines or edits an endpoint). Choosing "自定义 API…"
+writes a whole new `providers.<name>` block with `protocol`, `base_url`, and
+optionally `model`, `api_key`, and `require_api_key`. An API key typed in the page
+is stored as `providers.<name>.api_key`; the page only ever reports whether a key
+is configured, never the key itself.
 
 `deepseek_web` drives the consumer web endpoint rather than an API: the same
 requests the browser makes, on the free account's quota. It needs the account's
@@ -601,8 +632,19 @@ when those tools are needed.
 
 ## Web tools
 
-Web tools are provider configuration, not runtime provider-name or hostname
-checks. The built-in DeepSeek provider enables them with:
+Two paths reach the same capability, and the default is the model-side one.
+
+`server_tools` (see the provider table above) declares DeepSeek's
+`deepseek_web_search` / `deepseek_read_url` on the request; the service searches
+and reads pages inside the turn, only model tokens are billed, and the local
+`web_search` / `web_fetch` schemas are not advertised. The bundled DeepSeek
+presets ship it enabled.
+
+`web_tools` is the standalone Search/Fetch client described in this section. It
+is **off by default** (`enabled: false`) and is the fallback for two cases: a
+vendor without server-side tools, and a DeepSeek user who explicitly wants the
+local pair back. It bills 5 CNY per 1,000 successful requests, so turning it on
+is a deliberate choice:
 
 ```json
 "web_tools": {
@@ -620,6 +662,11 @@ checks. The built-in DeepSeek provider enables them with:
   "headers": {}
 }
 ```
+
+`server_tools` wins when both are enabled: the local pair stays unadvertised and
+a replayed `web_search` call is refused with a message pointing at these keys.
+Set `server_tools.enabled: false` together with `web_tools.enabled: true` to use
+the standalone API exclusively.
 
 `api_key` or `api_key_env` inside `web_tools` override the provider credential.
 When omitted, the provider API key is reused.
@@ -754,7 +801,6 @@ model tool: it uploads a document, and the returned `file_id` is attached to the
 next user message, where each protocol wraps it in its own content block
 (`file`, `document`, `input_file`). The same file name and content hash reuse a
 `file_id`, so attaching a document twice costs one parse.
-`file_id`, so attaching a document twice costs one parse.
 
 ## Clawd on Desk
 
@@ -779,7 +825,6 @@ parent reports. `minimalcode clawd install` writes the agent into Clawd's
 Clawd is running, because Clawd holds its preferences in memory and writes the
 whole snapshot back.
 
-## MCP
 ## MCP
 
 MinimalCode can attach Model Context Protocol servers and expose their tools to

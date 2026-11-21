@@ -10,6 +10,12 @@ encrypted in ``signature`` and is what puts that page into the next turn's
 context, so it must survive verbatim. Search results and the pages a deep search
 opened are dropped from later turns by the service itself, so storing them would
 only grow the transcript.
+
+This is the default web path. ``minimalcode.web.ProviderWebClient`` remains the
+opt-in fallback that calls ``/v1/tools/search`` and ``/v1/tools/fetch`` itself;
+the switch lives in ``deepseek.server_tools()`` versus ``web_tools.enabled``, and
+``tools.schemas.available_tool_schemas`` hides the local pair whenever these
+tools are active, so the two paths never compete inside one turn.
 """
 
 from __future__ import annotations

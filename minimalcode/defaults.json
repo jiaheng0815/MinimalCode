@@ -83,7 +83,7 @@
       "headers": {},
       "extra_body": {},
       "web_tools": {
-        "enabled": true,
+        "enabled": false,
         "base_url": "https://api.deepseek.com/v1/tools",
         "search_path": "search",
         "fetch_path": "fetch",
@@ -148,9 +148,8 @@
       "headers": {},
       "extra_body": {},
       "web_tools": {
-        "enabled": true,
+        "enabled": false,
         "base_url": "https://api.deepseek.com/v1/tools",
-        "search_path": "search",
         "fetch_path": "fetch",
         "timeout_seconds": 60,
         "default_count": 10,

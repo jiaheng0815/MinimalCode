@@ -194,6 +194,10 @@ _MANAGEMENT_COMMANDS = (
     "shell",
 )
 
+# The wire formats a new provider may use, in the same order the web page offers
+# them. `config add-provider` validates here before the settings file does.
+_PROTOCOLS = ("openai_chat", "openai_responses", "anthropic_messages", "deepseek_web")
+
 
 def _management_argv(argv: Sequence[str]) -> list[str] | None:
     """Reorder argv so a management command comes first, or return None.
@@ -283,11 +287,25 @@ def _management_command(argv: Sequence[str]) -> int | None:
         parser.add_argument(
             "action",
             nargs="?",
-            choices=("show", "path", "init", "set-model", "set-provider"),
+            choices=(
+                "show",
+                "path",
+                "init",
+                "set-model",
+                "set-provider",
+                "add-provider",
+            ),
             default="show",
         )
         parser.add_argument("value", nargs="?")
         parser.add_argument("--home")
+        # `add-provider` is the scriptable half of the page's "custom API": a new
+        # endpoint is defined once and then selectable with --provider or /model.
+        parser.add_argument("--base-url")
+        parser.add_argument("--protocol", default="openai_chat")
+        parser.add_argument("--model")
+        parser.add_argument("--api-key-env")
+        parser.add_argument("--api-key")
         args = parser.parse_args(argv[1:])
         if args.action in {"show", "path", "init"} and args.value is not None:
             parser.error(f"unexpected argument: {args.value}")
@@ -342,6 +360,39 @@ def _management_command(argv: Sequence[str]) -> int | None:
                 )
             path = save_settings(settings, updates, args.home)
             print(sanitize_terminal_text(f"{path}: provider={provider}"))
+            return 0
+        if args.action == "add-provider":
+            from .config import valid_provider_name
+
+            name = (args.value or "").strip()
+            if not name:
+                raise ConfigError("provider name must not be empty")
+            if not valid_provider_name(name):
+                raise ConfigError(
+                    "provider names match [A-Za-z0-9][A-Za-z0-9._-]{0,31}"
+                )
+            if name in settings.data["providers"]:
+                raise ConfigError(f"provider {name!r} already exists")
+            if not args.base_url or not args.base_url.strip():
+                raise ConfigError("--base-url is required")
+            if args.protocol not in _PROTOCOLS:
+                raise ConfigError(f"unsupported protocol: {args.protocol!r}")
+            block: dict[str, Any] = {
+                "protocol": args.protocol,
+                "base_url": args.base_url.strip(),
+            }
+            model = (args.model or "").strip()
+            if model:
+                block["model"] = model
+            if args.api_key_env:
+                block["api_key_env"] = args.api_key_env
+            if args.api_key:
+                block["api_key"] = args.api_key
+            updates: dict[str, Any] = {"provider": name, "providers": {name: block}}
+            if model:
+                updates["model"] = model
+            path = save_settings(settings, updates, args.home)
+            print(sanitize_terminal_text(f"{path}: provider={name}"))
             return 0
         print(
             json.dumps(
@@ -663,6 +714,32 @@ def _paste_shortcut() -> str:
     return "Ctrl+Shift+V"
 
 
+def _warn_web_routing(
+    config: dict[str, Any],
+    *,
+    quiet: bool = False,
+    stream: Any = None,
+) -> None:
+    """Print one startup line when settings still pay for the standalone API.
+
+    The default path is DeepSeek's server-side tools; an older settings file that
+    turned ``web_tools.enabled`` on keeps working, but its per-request cost is
+    worth saying out loud once. Machine-readable output stays clean.
+    """
+    if quiet:
+        return
+    from .deepseek import migration_notice
+
+    notice = migration_notice(config)
+    if not notice:
+        return
+    print(
+        sanitize_terminal_text(notice),
+        file=sys.stderr if stream is None else stream,
+        flush=True,
+    )
+
+
 def _print_banner(
     provider: str,
     model: str,
@@ -828,6 +905,21 @@ def _print_models(agent: Agent, settings: Settings) -> None:
     print("use /model provider/model to switch")
 
 
+def _feature_source(
+    settings: Settings, name: str, config: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Return the block that supplies the DeepSeek-only feature set.
+
+    The selected provider carries the chat request. OCR, speech, and the
+    standalone Search API are plain HTTP calls, so another configured DeepSeek
+    block can supply them: switching the chat provider to another vendor then
+    keeps those tools instead of silently dropping them.
+    """
+    from .deepseek import feature_source
+
+    return feature_source(settings, name) or (name, config)
+
+
 def _switch_runtime(
     agent: Agent,
     settings: Settings,
@@ -851,11 +943,17 @@ def _switch_runtime(
     vision_client: ProviderVisionClient | None = None
     media_client: ProviderMediaClient | None = None
     try:
-        web_client = ProviderWebClient(name, provider.config)
+        source_name, source_config = _feature_source(settings, name, provider.config)
+        web_config = (
+            provider.config
+            if isinstance(provider.config.get("web_tools"), dict)
+            else source_config
+        )
+        web_client = ProviderWebClient(name, web_config)
         vision_client = ProviderVisionClient(
             name, provider.config, model=resolved_model
         )
-        media_client = ProviderMediaClient(name, provider.config)
+        media_client = ProviderMediaClient(source_name, source_config)
         tools = ToolRuntime(
             settings,
             agent.session.cwd,
@@ -863,6 +961,10 @@ def _switch_runtime(
             web_client=web_client,
             vision_client=vision_client,
             media_client=media_client,
+            # The new provider declares its own server-side tools; the tool
+            # runtime has to know, or a replayed local `web_search` would slip
+            # past the dispatcher's refusal and bill the Search API twice.
+            server_tools=getattr(provider, "server_tools", ()),
             provider_name=name,
             model=resolved_model,
             thinking=provider.thinking,
@@ -1444,6 +1546,9 @@ def _chat_loop(
                         agent.shell,
                         web_client=agent.tools.web_client,
                         vision_client=agent.tools.vision_client,
+                        # `/new` keeps the running provider, so it keeps its
+                        # server-side tool set too (see the switch above).
+                        server_tools=tuple(getattr(agent.provider, "server_tools", ())),
                         provider_name=agent.provider.name,
                         model=agent.provider.model,
                         thinking=agent.provider.thinking,
@@ -1690,13 +1795,21 @@ def run(argv: Sequence[str] | None = None) -> int:
             session = resumed
         if not effective_cwd.is_dir():
             raise ConfigError(f"session workspace no longer exists: {effective_cwd}")
-        web_client = ProviderWebClient(provider_name, provider.config)
+        source_name, source_config = _feature_source(
+            settings, provider_name, provider.config
+        )
+        web_config = (
+            provider.config
+            if isinstance(provider.config.get("web_tools"), dict)
+            else source_config
+        )
+        web_client = ProviderWebClient(provider_name, web_config)
         vision_client = ProviderVisionClient(
             provider_name, provider.config, model=model
         )
         from .media import ProviderMediaClient
 
-        media_client = ProviderMediaClient(provider_name, provider.config)
+        media_client = ProviderMediaClient(source_name, source_config)
         tools = ToolRuntime(
             settings,
             effective_cwd,
@@ -1704,11 +1817,15 @@ def run(argv: Sequence[str] | None = None) -> int:
             web_client=web_client,
             vision_client=vision_client,
             media_client=media_client,
+            server_tools=getattr(provider, "server_tools", ()),
             provider_name=provider_name,
             model=model,
             thinking=provider.thinking,
             read_only=args.read_only,
         )
+        # An old settings file asked for the per-call Search/Fetch API; say so
+        # once at startup instead of rewriting a working configuration.
+        _warn_web_routing(provider.config, quiet=bool(args.quiet or args.json_output))
         from .clawd import create_bridge
 
         agent = Agent(

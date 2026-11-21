@@ -423,10 +423,92 @@ class CliTests(unittest.TestCase):
                 "new-model",
             )
 
+    def test_config_add_provider_defines_and_selects_an_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    run(
+                        [
+                            "config",
+                            "add-provider",
+                            "my-gateway",
+                            "--base-url",
+                            "https://gateway.example.com/v1",
+                            "--model",
+                            "house-model",
+                            "--api-key-env",
+                            "MY_GATEWAY_KEY",
+                            "--home",
+                            str(home),
+                        ]
+                    ),
+                    0,
+                )
+            settings = load_settings(home, require_file=True)
+            self.assertEqual(settings.get("provider"), "my-gateway")
+            self.assertEqual(settings.get("model"), "house-model")
+            block = settings.data["providers"]["my-gateway"]
+            self.assertEqual(block["base_url"], "https://gateway.example.com/v1")
+            self.assertEqual(block["protocol"], "openai_chat")
+            self.assertEqual(block["api_key_env"], "MY_GATEWAY_KEY")
+
+    def test_config_add_provider_refuses_a_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            with self.assertRaisesRegex(ConfigError, "already exists"):
+                run(
+                    [
+                        "config",
+                        "add-provider",
+                        "ollama",
+                        "--base-url",
+                        "https://gateway.example.com/v1",
+                        "--home",
+                        str(home),
+                    ]
+                )
+
+    def test_config_add_provider_requires_a_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            with self.assertRaisesRegex(ConfigError, "base-url"):
+                run(["config", "add-provider", "gateway", "--home", str(home)])
+
     def test_read_message_keeps_text_after_a_bracketed_paste(self) -> None:
         pasted = "run \x1b[200~pytest -q\x1b[201~ now"
         with patch("builtins.input", lambda prompt="": pasted):
             self.assertEqual(_read_message(), "run pytest -q now")
+
+    def test_feature_source_borrows_the_deepseek_block(self) -> None:
+        from minimalcode.cli import _feature_source
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}):
+                name, config = _feature_source(
+                    settings, "ollama", {"base_url": "http://localhost:11434/v1"}
+                )
+        self.assertEqual(name, "deepseek")
+        self.assertEqual(config["base_url"], "https://api.deepseek.com/v1")
+
+    def test_feature_source_falls_back_to_the_chat_provider(self) -> None:
+        from minimalcode.cli import _feature_source
+
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / ".MinimalCode"
+            ensure_config(home)
+            settings = load_settings(home, require_file=True)
+            config = {"base_url": "http://localhost:11434/v1"}
+            with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
+                name, resolved = _feature_source(settings, "ollama", config)
+        self.assertEqual(name, "ollama")
+        self.assertIs(resolved, config)
 
     def test_provider_credential_rejects_an_unexpanded_placeholder(self) -> None:
         from minimalcode.cli import _provider_credential

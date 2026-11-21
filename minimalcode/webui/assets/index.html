@@ -78,25 +78,25 @@
       </div>
       <div class="function-row">
         <div class="toggles">
-          <button type="button" class="toggle selected" id="thinking-toggle" title="先思考后回答，解决推理问题">
+          <button type="button" class="toggle selected" id="thinking-toggle" title="先思考后回答，解决推理问题" aria-label="深度思考">
             <span class="toggle-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a3.7 3.7 0 0 0-3.7 3.7c0 1.2.5 2 1.2 2.6.5.5.7.8.7 1.4v.6h3.6v-.6c0-.6.2-.9.7-1.4.7-.6 1.2-1.4 1.2-2.6A3.7 3.7 0 0 0 8 1.8Z"/><path d="M6.2 12.2h3.6M6.8 14h2.4"/></svg>
             </span>
             <span class="toggle-label">深度思考</span>
           </button>
-          <button type="button" class="toggle" id="web-search-toggle" title="让 DeepSeek 在回答前联网搜索、打开网页并阅读链接" hidden>
+          <button type="button" class="toggle" id="web-search-toggle" title="让 DeepSeek 在回答前联网搜索、打开网页并阅读链接" aria-label="联网搜索" hidden>
             <span class="toggle-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c3.4 3.6 3.4 7.6 0 11.2M8 2.4c-3.4 3.6-3.4 7.6 0 11.2"/></svg>
             </span>
             <span class="toggle-label">联网搜索</span>
           </button>
-          <button type="button" class="toggle" id="safety-toggle" title="开启服务端内容安全审核，命中风险时拒答" hidden>
+          <button type="button" class="toggle" id="safety-toggle" title="开启服务端内容安全审核，命中风险时拒答" aria-label="内容安全" hidden>
             <span class="toggle-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9 3.2 4v3.9c0 2.9 1.9 5 4.8 6.2 2.9-1.2 4.8-3.3 4.8-6.2V4Z"/><path d="m5.9 8 1.5 1.5 2.7-2.8"/></svg>
             </span>
             <span class="toggle-label">内容安全</span>
           </button>
-          <button type="button" class="toggle" id="workspace-toggle" title="选择本地文件夹">
+          <button type="button" class="toggle" id="workspace-toggle" title="选择本地文件夹" aria-label="工作目录">
             <span class="toggle-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.4c0-.6.5-1.1 1.1-1.1h3l1.2 1.4h5c.6 0 1.1.5 1.1 1.1v5.8c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1Z"/></svg>
             </span>
@@ -159,6 +159,12 @@
                   </div>
                   <input class="text-input" id="model-input" list="model-options" autocomplete="off" spellcheck="false" />
                   <datalist id="model-options"></datalist>
+                </div>
+                <div class="settings-cell settings-cell-stack custom-fields" id="custom-fields" hidden>
+                  <div class="settings-label">自定义接入点</div>
+                  <input class="text-input" id="provider-name-input" placeholder="名称，例如 my-gateway" autocomplete="off" spellcheck="false" aria-label="自定义 API 名称" />
+                  <input class="text-input" id="base-url-input" placeholder="接入地址，例如 https://api.example.com/v1" autocomplete="off" spellcheck="false" aria-label="自定义 API 接入地址" />
+                  <div class="settings-description" id="custom-hint">保存后写入设置文件并立即切换过去，原来的厂家预设保持不变</div>
                 </div>
                 <div class="settings-cell settings-cell-stack">
                   <div class="settings-label">API Key</div>

@@ -61,6 +61,7 @@ class ToolRuntime(
         web_client: ProviderWebClient | None = None,
         vision_client: ProviderVisionClient | None = None,
         media_client: Any = None,
+        server_tools: tuple[str, ...] = (),
         provider_name: str | None = None,
         model: str | None = None,
         thinking: str | None = None,
@@ -72,6 +73,11 @@ class ToolRuntime(
         self.shell_spec = shell
         self.web_client = web_client
         self.web_enabled = bool(web_client and web_client.enabled)
+        # The provider's active server-side tools. When one of them covers web
+        # search, the local `web_search` / `web_fetch` path is not advertised and
+        # not dispatched: the model asks the service to search instead, so this
+        # process must not spend the per-request Search/Fetch fee.
+        self.server_tools = tuple(server_tools)
         self.vision_client = vision_client
         self.vision_enabled = bool(vision_client and vision_client.enabled)
         # Duck-typed on purpose: the media client owns OCR, speech, and speech
@@ -235,12 +241,33 @@ class ToolRuntime(
         """Return the serializable sandbox status used by the CLI."""
         return self.sandbox.summary()
 
+    def _server_tool_covers(self, name: str) -> bool:
+        """True when a server-side tool already handles this local web tool.
+
+        ``deepseek_web_search`` searches, and while thinking it also opens the
+        pages it found; ``deepseek_read_url`` reads the links in the user
+        message. Either one makes a client-side ``web_fetch`` redundant, while
+        only the search tool replaces a client-side ``web_search``.
+        """
+        if not self.server_tools:
+            return False
+        from ..deepseek import READ_URL_TOOL, WEB_SEARCH_TOOL
+
+        if name == "web_search":
+            return WEB_SEARCH_TOOL in self.server_tools
+        return WEB_SEARCH_TOOL in self.server_tools or READ_URL_TOOL in (
+            self.server_tools
+        )
+
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Validate and run one named tool call.
 
         Lookup is explicit rather than ``getattr`` so a model cannot reach
         helper methods or private attributes by name.
         """
+        # `web_search` / `web_fetch` are the standalone Search/Fetch API path.
+        # They are listed so a session recorded before the server-side tools
+        # existed can still be replayed; whether they may run is decided below.
         handlers = {
             "read": self.read,
             "read_range": self.read_range,
@@ -281,6 +308,18 @@ class ToolRuntime(
         except TypeError as exc:
             raise ToolError(f"invalid arguments for {name}: {exc}") from exc
         check_argument_types(name, handler, arguments)
+        if name in {"web_search", "web_fetch"} and self._server_tool_covers(name):
+            # Never POST the standalone Search/Fetch API behind the model's back:
+            # the turn already had the service search, and this call is a replay.
+            from ..deepseek import READ_URL_TOOL, WEB_SEARCH_TOOL
+
+            tool = WEB_SEARCH_TOOL if name == "web_search" else READ_URL_TOOL
+            raise ToolError(
+                f"{name} is handled by the server-side tool {tool}; "
+                "this call was not sent to the Search/Fetch API "
+                "(set providers.<name>.server_tools.enabled=false and "
+                "web_tools.enabled=true to use the standalone API)"
+            )
         return handler(**arguments)
 
     @staticmethod

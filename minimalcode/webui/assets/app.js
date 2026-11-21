@@ -12,6 +12,10 @@ const PROTOCOL_LABELS = {
   deepseek_web: "DeepSeek Web",
 };
 
+// The provider dropdown's "define a new endpoint" entry. It is never a real
+// provider name, so it cannot collide with a preset or a custom block.
+const CUSTOM_PROVIDER = "__custom__";
+
 const ICON_THINK =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a3.7 3.7 0 0 0-3.7 3.7c0 1.2.5 2 1.2 2.6.5.5.7.8.7 1.4v.6h3.6v-.6c0-.6.2-.9.7-1.4.7-.6 1.2-1.4 1.2-2.6A3.7 3.7 0 0 0 8 1.8Z"/><path d="M6.2 12.2h3.6M6.8 14h2.4"/></svg>';
 
@@ -1050,6 +1054,8 @@ function updateWorkspaceLabel() {
   const workspace = app.state ? app.state.workspace : "";
   dom.workspaceLabel.textContent = baseName(workspace) || "工作目录";
   dom.workspaceToggle.title = workspace || "选择本地文件夹";
+  // 窄宽度下这个按钮只剩图标，读屏只能靠 aria-label 知道当前目录。
+  dom.workspaceToggle.setAttribute("aria-label", baseName(workspace) || "工作目录");
 }
 
 function isNarrow() {
@@ -1100,11 +1106,19 @@ function renderState(state) {
   document.title = state.session && state.session.title ? `${state.session.title} · MinimalCode` : "MinimalCode";
   dom.viewTitle.textContent = (state.session && state.session.title) || "新对话";
   dom.thinkingToggle.classList.toggle("selected", Boolean(state.thinking));
-  // DeepSeek 专属能力只在对的接入点出现；其余情况按钮直接隐藏，悬停提示原因。
+  // 联网搜索有两条路：provider 的服务端工具，或本进程直连的 Search/Fetch API。
+  // 任一可用就显示按钮——只认前者会把开了 web_tools 的配置逼成“永远点不了”。
+  // 多家 API 同时配置时，DeepSeek 的能力可以由另一个 provider 提供：
+  // `available` 表示有 DeepSeek 接入点，`active` 表示当前对话就在它上面。
   const deepseek = state.deepseek || {};
-  showToggle(dom.webSearchToggle, Boolean(deepseek.web_search), deepseek.reason);
-  showToggle(dom.safetyToggle, Boolean(deepseek.available), deepseek.reason);
-  showToggle(dom.attachButton, Boolean(deepseek.documents), deepseek.reason);
+  const requestReason = deepseek.active_reason || deepseek.reason;
+  showToggle(
+    dom.webSearchToggle,
+    Boolean(deepseek.web_search || state.web_search_available),
+    deepseek.web_search ? deepseek.reason : requestReason,
+  );
+  showToggle(dom.safetyToggle, Boolean(deepseek.safety), requestReason);
+  showToggle(dom.attachButton, Boolean(deepseek.documents), requestReason);
   showToggle(dom.ocrButton, Boolean(deepseek.ocr), deepseek.reason);
   showToggle(dom.micButton, Boolean(deepseek.asr), deepseek.reason);
   dom.webSearchToggle.classList.toggle("selected", Boolean(state.web_search));
@@ -1377,6 +1391,21 @@ function currentProvider(name) {
 }
 
 function fillProviderFields() {
+  const custom = dom.providerSelect.value === CUSTOM_PROVIDER;
+  dom.customFields.hidden = !custom;
+  if (custom) {
+    // 新接入点没有历史配置可填：格式从 Chat 开始，模型留空由服务端决定。
+    dom.protocolSelect.value = "openai_chat";
+    dom.modelOptions.replaceChildren();
+    dom.modelInput.value = "";
+    dom.apiKeySaved.hidden = true;
+    dom.apiKeyInput.hidden = false;
+    dom.keyInput.value = "";
+    dom.providerDescription.textContent = "任意 OpenAI 兼容、Anthropic 兼容或 DeepSeek 接口";
+    dom.customHint.textContent = "保存后写入设置文件并立即切换过去，原来的厂家预设保持不变";
+    dom.apiKeyHint.textContent = "还没有 API Key：远程接入点必须填，本地服务可以留空";
+    return;
+  }
   const provider = currentProvider(dom.providerSelect.value);
   if (!provider) return;
   dom.protocolSelect.value = provider.protocol;
@@ -1391,7 +1420,9 @@ function fillProviderFields() {
   dom.modelInput.value = isCurrent && app.state.model ? app.state.model : (provider.models || [])[0] || "";
   dom.apiKeySaved.hidden = !provider.has_api_key;
   dom.apiKeyInput.hidden = Boolean(provider.has_api_key);
-  if (!provider.has_api_key) dom.keyInput.value = "";
+  // A key typed into another provider's form must not follow the selection:
+  // `saveSettings` reads this field whether or not it is visible.
+  dom.keyInput.value = "";
   const keyHint = provider.has_api_key
     ? "已配置 API Key（来自设置文件或环境变量）"
     : provider.local
@@ -1423,10 +1454,18 @@ function openSettings(panel) {
   for (const provider of app.state.providers || []) {
     const option = document.createElement("option");
     option.value = provider.name;
-    option.textContent = provider.local ? `${provider.name}（本地）` : provider.name;
+    // 标出能提供 DeepSeek 专属能力的接入点，方便同时使用多家 API 时辨认。
+    const suffix = provider.local ? "（本地）" : provider.deepseek ? "（DeepSeek API）" : "";
+    option.textContent = `${provider.name}${suffix}`;
     dom.providerSelect.append(option);
   }
+  const custom = document.createElement("option");
+  custom.value = CUSTOM_PROVIDER;
+  custom.textContent = "自定义 API…";
+  dom.providerSelect.append(custom);
   dom.providerSelect.value = app.state.provider;
+  dom.providerNameInput.value = "";
+  dom.baseUrlInput.value = "";
   dom.protocolSelect.replaceChildren();
   for (const name of app.state.protocols || []) {
     const option = document.createElement("option");
@@ -1448,18 +1487,32 @@ function closeSettings() {
 }
 
 async function saveSettings() {
+  const custom = dom.providerSelect.value === CUSTOM_PROVIDER;
   const payload = {
-    provider: dom.providerSelect.value,
     protocol: dom.protocolSelect.value,
     model: dom.modelInput.value.trim(),
   };
+  if (custom) {
+    // 新厂家只带名称与接入地址；服务端校验通过后才写入设置文件。
+    const name = dom.providerNameInput.value.trim();
+    const baseUrl = dom.baseUrlInput.value.trim();
+    if (!name || !baseUrl) {
+      dom.customHint.textContent = "自定义 API 需要名称和接入地址";
+      return;
+    }
+    payload.custom = true;
+    payload.name = name;
+    payload.base_url = baseUrl;
+  } else {
+    payload.provider = dom.providerSelect.value;
+  }
   const key = dom.keyInput.value.trim();
   if (key) payload.api_key = key;
   dom.settingsSave.disabled = true;
   try {
     renderState(await api("/api/settings", payload));
     closeSettings();
-    toast("设置已保存");
+    toast(custom ? "自定义 API 已保存" : "设置已保存");
     await loadLibrary();
   } catch (error) {
     dom.apiKeyHint.textContent = `保存失败：${error.message}`;
@@ -1596,6 +1649,10 @@ function cacheDom() {
   dom.apiKeyConfirm = $("api-key-confirm");
   dom.keyInput = $("key-input");
   dom.apiKeyHint = $("api-key-hint");
+  dom.customFields = $("custom-fields");
+  dom.providerNameInput = $("provider-name-input");
+  dom.baseUrlInput = $("base-url-input");
+  dom.customHint = $("custom-hint");
   dom.workspaceDescription = $("workspace-description");
   dom.changeWorkspace = $("change-workspace");
   dom.settingsPath = $("settings-path");

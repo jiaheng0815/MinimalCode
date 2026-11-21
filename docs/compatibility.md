@@ -1,9 +1,9 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.8.1. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.10.0. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-1.8.0, and 1.8.1 added no further breaking import changes
+1.8.0, 1.8.1, 1.9.0, and 1.10.0 added no further breaking import changes
 (`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
 `minimalcode.media`, and `minimalcode.webui` are new modules, not renamed ones).
 
@@ -11,12 +11,134 @@ The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.7.0, 1.8.0 or 1.8.1. Every change is
-additive: new tools join `tools.allow` and the read-only set, every new settings
-block is optional, and a `settings.json` written for 1.6.0 keeps working
+format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0 or 1.10.0. Every
+change is additive: new tools join `tools.allow` and the read-only set, every new
+settings block is optional, and a `settings.json` written for 1.6.0 keeps working
 unchanged. The 1.8.0 web UI drives the same agent and the same JSONL files, so a
 conversation started in the browser is the file `--continue` resumes in the
 terminal.
+
+1.9.0 has **behavioural** changes behind unchanged keys. The bundled DeepSeek
+presets now default `server_tools.enabled` to `true` and `web_tools.enabled` to
+`false`, so web search runs on DeepSeek's servers instead of this process
+POSTing the per-call Search/Fetch API. A `settings.json` that never mentioned
+either block picks up the new default; one that explicitly wrote
+`web_tools.enabled: true` keeps its old path (and keeps paying per call) until
+the key is changed. Nothing is rewritten on the user's behalf — see
+`## What 1.9.0 changed`.
+
+1.10.0 adds two visible behaviours without touching the file: DeepSeek's
+HTTP-call features can come from another configured DeepSeek block, and a Chat
+tool-call message now replays its `reasoning_content`. See
+`## What 1.10.0 changed`.
+
+## What 1.10.0 added
+
+- `minimalcode.deepseek.feature_source(settings, active)`: the provider that
+  supplies OCR, speech, and the standalone Search/Fetch API when the chat
+  provider is not the DeepSeek API. `deepseek.features()` grew `active`,
+  `provider`, and `active_reason` beside `available`, so the two questions are
+  answered separately.
+- `ProviderReply.reasoning`, and an `as_message()` that writes it as
+  `reasoning_content` on a tool-call assistant message.
+- `minimalcode config add-provider <name> --base-url URL [--protocol P]
+  [--model M] [--api-key-env VAR|--api-key KEY]`, and
+  `config.valid_provider_name()`.
+- `POST /api/settings` accepts `custom`, `name`, and `base_url`, which define a
+  new provider block from the page; `WebRuntime.describe()` reports a per
+  provider `deepseek` flag and the new capability fields.
+- A "自定义 API…" entry and two extra inputs in the web settings dialog.
+- Optional `reasoning_content` on a Chat tool-call assistant message in the
+  JSONL session; readers that ignore unknown keys can skip it.
+
+## What 1.10.0 changed
+
+- DeepSeek's HTTP-call features (OCR, speech, the standalone Search/Fetch API)
+  are resolved independently of the chat provider, so a session on another
+  vendor keeps them while a credentialled DeepSeek block is configured. Server
+  tools, documents, safety, and titles still require the chat provider itself to
+  be the DeepSeek API.
+- A Chat tool-call assistant message now keeps the turn's `reasoning_content`
+  and sends it back on the next request, which is what DeepSeek requires when a
+  tool result follows. A finished answer's reasoning is still dropped, both from
+  the transcript and from a replayed request.
+- A document upload is refused when the chat provider cannot carry its
+  `file_id`, instead of attaching it to a request that would reject it.
+- The 内容安全 switch no longer follows a provider switch: it is cleared when the
+  new chat provider is not the DeepSeek API.
+
+## What 1.10.0 fixed
+
+- `WebRuntime._apply_switches()` called `set_server_tools` / `set_safety_level`
+  twice, so each switch ran twice; it also refreshed the old agent's tool list
+  while `_build()` was preparing a new provider, so a rejected switch could leave
+  the running agent with the new server tools.
+- The 联网 switch only recognised the server-tool path: with
+  `server_tools.enabled: false` and `web_tools.enabled: true` the button was
+  hidden and `POST /api/web-search` answered `web search is not available here`,
+  even though the standalone Search API could search perfectly well. Both paths
+  now count, and `web_search_mode` reports which one a turn would take.
+- `/model` (including a provider change) and `/new` pass the running provider's
+  `server_tools` to the rebuilt `ToolRuntime`, so the dispatcher's refusal
+  survives a switch instead of silently disappearing.
+- `defaults.json` declared `deepseek-anthropic.web_tools.base_url` twice; JSON
+  keeps the last value, so a static reader could not see it. The duplicate is
+  gone.
+- The README still said 1.8.1 and had no 1.9.0 upgrade section at the 1.9.0 tag;
+  the documentation now matches the released code.
+
+## What 1.9.0 added
+
+- `minimalcode.deepseek` with `API_HOSTS`, `READ_URL_TOOL`, `SERVER_TOOL_NAMES`,
+  `WEB_SEARCH_TOOL`, `api_host`, `declarations`, `features`, `is_deepseek_api`,
+  `migration_notice`, `server_tools`, `unavailable_reason`, and
+  `web_tools_enabled` in `__all__`; the module is the single predicate that gates
+  every DeepSeek-only capability.
+- `minimalcode.provider.server_tools`: one normalized block shape
+  (`kind`, `action`, `sources`, `page`, `error`, `signature`) across Chat,
+  Responses, and Messages, plus the per-protocol replay of `read_link`.
+- `ProviderReply.server_tools` and `ProviderReply.citations`, and a
+  `ProviderReply.as_message()` that carries them into the transcript.
+- `providers.<name>.server_tools` (`enabled`, `web_search`, `read_url`), and
+  `available_tool_schemas(..., server_tools=...)`.
+- `ToolRuntime(..., server_tools=...)`, and a `ToolRuntime.server_tools`
+  attribute the owner refreshes when a switch changes.
+- `WebRuntime.describe()` fields `web_search_mode` and `web_search_available`.
+- HTTP surface: `POST /api/attach?name=`, `/api/detach`, `/api/ocr`,
+  `/api/transcribe`, `/api/speech` for documents, OCR, and speech, plus the
+  switch routes `/api/web-search` and `/api/safety`.
+- Web page controls: 联网搜索, 内容安全, document attachments, OCR, recording, and
+  answer playback.
+
+## What 1.9.0 changed
+
+- Web search defaults to the server-side tools. `deepseek` and
+  `deepseek-anthropic` ship `server_tools.enabled: true` with `web_search` and
+  `read_url` both on, and `web_tools.enabled: false`. While a server tool covers
+  the same ground, the local `web_search` / `web_fetch` function schemas are not
+  advertised; both names stay valid in `tools.allow` and in the read-only set, so
+  an allowlist written for 1.8.x does not become a configuration error.
+- A replayed local `web_search` / `web_fetch` call is refused by
+  `ToolRuntime.dispatch` with a message naming the server-side tool and the two
+  keys, so a restored session or an ignoring provider cannot bill both paths in
+  one turn.
+- An old `web_tools.enabled: true` configuration keeps working and is reported
+  once at startup (`deepseek.migration_notice()`), pointing at the per-call price
+  and `server_tools.enabled`; `--quiet` and `--json` stay silent.
+- The composer's 联网 switch now drives `server_tools`, and the tool list is
+  rebuilt when it changes. `set_server_tools()` still refuses to switch on for an
+  endpoint that is not the DeepSeek API.
+- Web upload bodies no longer share the 1 MiB JSON cap: documents are allowed
+  100 MiB and audio 8 MiB, and an over-limit body closes the connection.
+
+## What 1.9.0 fixed
+
+- `GET /api/history` keeps server-tool blocks and citations after a reload, and
+  they are filtered out of the replayed request body (Chat does it in
+  `_chat_messages`).
+- `_read_json` allowed only 1 MiB, so a document or a recording could not be
+  uploaded at all; the upload routes use `_read_upload()` with their own limits
+  and close the connection when one is exceeded.
 
 ## What 1.8.1 fixed
 
@@ -36,7 +158,6 @@ terminal.
 - A compaction rewrite keeps the session's `title` event, a failed title write
   keeps the previous title, queued attachments survive a failed message append,
   and a compaction cut never makes the history longer.
-started in the browser is the file `--continue` resumes in the terminal.
 
 ## What 1.8.0 added
 
@@ -58,7 +179,9 @@ started in the browser is the file `--continue` resumes in the terminal.
 - Sidebar and reasoning state live beside the transcript, not in it:
   `<home>/webui/folders.json` holds the folder index and
   `<home>/webui/thinking.json` holds display-only reasoning, so the JSONL a
-  session writes keeps its 1.7.0 format.
+  session writes keeps its 1.7.0 format. (1.9.0 adds one optional field: a Chat
+  assistant message that carried tool calls keeps its `reasoning_content`, which
+  readers that ignore unknown keys can skip.)
 
 ## What 1.8.0 changed
 

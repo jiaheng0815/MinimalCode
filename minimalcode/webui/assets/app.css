@@ -1368,27 +1368,34 @@ button {
 
 .function-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  align-content: flex-start;
   gap: 8px;
   margin-top: 4px;
   padding: 12px;
 }
 
+/* 窄窗口下四个开关和右侧的图标按钮抢同一行，开关原本 flex-shrink:0 又不换行，
+   于是撑破 .toggles 的盒子盖到发送键上。允许换行、允许收缩，溢出就不存在了。 */
 .toggles {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  align-content: flex-start;
+  gap: 8px 10px;
   min-width: 0;
 }
 
 .toggle {
   display: inline-flex;
-  flex-shrink: 0;
+  flex-shrink: 1;
   align-items: center;
   justify-content: center;
   gap: 4px;
   max-width: 50%;
+  min-width: 0;
   height: 34px;
   padding: 0 12px;
   border-radius: 18px;
@@ -1434,9 +1441,26 @@ button {
   text-overflow: ellipsis;
 }
 
+/* 一条 1024px 的线把两种排法分开：再窄就只留图标，让四个开关和右侧按钮
+   都待得下；更宽时文字和图标一起出现。title / aria-label 说明用途。 */
+@media not all and (min-width: 1024px) {
+  .toggle {
+    flex: 0 0 34px;
+    max-width: none;
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .toggle-label {
+    display: none;
+  }
+}
+
 .right {
   display: flex;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 4px;
   margin-left: auto;
@@ -1738,8 +1762,16 @@ button {
 }
 
 .api-key-saved[hidden],
-.api-key-input[hidden] {
+.api-key-input[hidden],
+.custom-fields[hidden] {
   display: none;
+}
+
+/* The stack lays its children out in a column, so a text input's `flex: 1 0 0`
+   would collapse its height; keep the control at its natural size. */
+.custom-fields .text-input {
+  flex: 0 0 auto;
+  width: 100%;
 }
 
 .api-key-saved {
@@ -2037,6 +2069,7 @@ button {
 /* DeepSeek-only composer switches, attachments, and server-tool cards. */
 .composer-button {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 32px;

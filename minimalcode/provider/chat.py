@@ -59,6 +59,11 @@ class ChatProtocolMixin:
                 replayed = chat_replay(message.get("server_tools"))
                 if replayed:
                     clean["server_tool_calls"] = replayed
+                if not isinstance(clean.get("tool_calls"), list):
+                    # Reasoning belongs to the tool step that produced it. A
+                    # finished answer's `reasoning_content` is ignored by the
+                    # next request, and some servers reject it outright.
+                    clean.pop("reasoning_content", None)
             converted.append(clean)
         return converted
 
@@ -145,8 +150,11 @@ class ChatProtocolMixin:
         usage: dict[str, int] = {}
         # The conversation title arrives once, in the final chunk's delta. It is
         # kept on the instance because this method returns the reply, not the
-        # title, and the caller reads it after the stream ends.
+        # title, and the caller reads it after the stream ends. Reasoning is
+        # accumulated beside it: a tool-call step has to send it back, and the
+        # deltas are already being handed to the display callback.
         self._reply_title = None
+        self._reply_reasoning = ""
 
         try:
             for data in self._sse_events(lines):
@@ -218,14 +226,15 @@ class ChatProtocolMixin:
                 if isinstance(raw_annotations, list):
                     self._server_citations = chat_annotations(raw_annotations)
 
-                if on_thinking is not None:
-                    # DeepSeek/Qwen stream `reasoning_content`; OpenRouter uses
-                    # `reasoning`. Neither belongs in `content`: reasoning is
-                    # display-only and must never enter the assistant message.
-                    reasoning = content_text(
-                        delta.get("reasoning_content")
-                    ) or content_text(delta.get("reasoning"))
-                    if reasoning:
+                # DeepSeek/Qwen stream `reasoning_content`; OpenRouter uses
+                # `reasoning`. Neither belongs in `content`: reasoning is kept
+                # out of the answer text and only replays with a tool call.
+                reasoning = content_text(
+                    delta.get("reasoning_content")
+                ) or content_text(delta.get("reasoning"))
+                if reasoning:
+                    self._reply_reasoning += reasoning
+                    if on_thinking is not None:
                         on_thinking(reasoning)
 
                 raw_calls = delta.get("tool_calls")
@@ -362,6 +371,7 @@ class ChatProtocolMixin:
             finish_reason=finish_reason,
             usage=usage,
             title=self._reply_title,
+            reasoning=self._reply_reasoning,
             server_tools=self._server_steps,
             citations=self._server_citations,
         )
@@ -392,12 +402,11 @@ class ChatProtocolMixin:
         )
         if content and on_text is not None:
             on_text(content)
-        if on_thinking is not None:
-            reasoning = content_text(message.get("reasoning_content")) or content_text(
-                message.get("reasoning")
-            )
-            if reasoning:
-                on_thinking(reasoning)
+        reasoning = content_text(message.get("reasoning_content")) or content_text(
+            message.get("reasoning")
+        )
+        if reasoning and on_thinking is not None:
+            on_thinking(reasoning)
         calls: list[ToolCall] = []
         raw_calls = message.get("tool_calls")
         if isinstance(raw_calls, list):
@@ -440,6 +449,7 @@ class ChatProtocolMixin:
                 if isinstance(raw_title, str) and raw_title.strip()
                 else None
             ),
+            reasoning=reasoning,
             server_tools=server_blocks,
             citations=chat_annotations(message.get("annotations")),
         )

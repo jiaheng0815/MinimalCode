@@ -71,6 +71,21 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def valid_provider_name(name: str) -> bool:
+    """True when a new provider name is safe to use as a settings key.
+
+    The name becomes part of the settings document and of every error message,
+    so it stays an identifier instead of being escaped later. Existing blocks are
+    not re-validated: a name an older file already uses keeps working.
+    """
+    if not 1 <= len(name) <= 32:
+        return False
+    first = name[0]
+    if not (first.isascii() and first.isalnum()):
+        return False
+    return all(char.isascii() and (char.isalnum() or char in "._-") for char in name)
+
+
 def expand_env(value: Any) -> Any:
     if isinstance(value, str):
         return _ENV_PATTERN.sub(

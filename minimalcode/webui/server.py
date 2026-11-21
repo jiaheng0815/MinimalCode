@@ -207,6 +207,8 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, self.runtime.detach_document(body.get("file_id")))
             return
         if path == "/api/web-search":
+            # Drives the model-side 联网 tools (deepseek_web_search /
+            # deepseek_read_url); the standalone Search API stays opt-in.
             self._json(HTTPStatus.OK, self.runtime.set_web_search(body.get("enabled")))
             return
         if path == "/api/safety":
