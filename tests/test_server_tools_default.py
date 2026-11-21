@@ -144,9 +144,10 @@ class AllowListTests(unittest.TestCase):
 
 class DefaultConfigTests(unittest.TestCase):
     def test_deepseek_defaults_prefer_the_server_tools(self) -> None:
-        web = _DEEPSEEK["web_tools"]
+        # No preset ships the paid Search/Fetch block: the free path is the
+        # model-side tool set, and the per-request API has to be added by hand.
+        self.assertNotIn("web_tools", _DEEPSEEK)
         server = _DEEPSEEK["server_tools"]
-        self.assertFalse(web["enabled"])
         self.assertTrue(server["enabled"])
         self.assertTrue(server["web_search"])
         self.assertTrue(server["read_url"])

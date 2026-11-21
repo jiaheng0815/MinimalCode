@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.10.0`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.10.1`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 目录
 
@@ -244,7 +244,7 @@ JSON 输出字段：
 | `read_image` | 读取本地图片并交给配置的 OpenAI 兼容视觉端点，返回描述或对 `prompt` 的回答 | `path`、`prompt` |
 | `subagent` | 在子 shell 中启动一个新的 `minimalcode`，只返回它的最终答复 | `task`、`cwd`、`timeout`、`max_turns` |
 
-联网默认走 provider 的 server-side tools：`server_tools.enabled`（DeepSeek 预设默认开启）声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在服务端完成，只计模型 token，本地 `web_search` / `web_fetch` 不再出现在工具列表里。独立 Search/Fetch API 仍保留为可选 fallback：`web_tools.enabled: true` 会重新声明这两个本地工具，但按成功请求计费（5 元/千次）。
+联网默认走 provider 的 server-side tools：`server_tools.enabled`（DeepSeek 预设默认开启）声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在服务端完成，只计模型 token，本地 `web_search` / `web_fetch` 不再出现在工具列表里。这是唯一免费的联网路径，预设里不含任何付费端点。独立 Search/Fetch API 仍可用，但需要你手动加一个完整的 `web_tools` 块并设 `enabled: true`（按成功请求计费，5 元/千次），此时才会重新声明这两个本地工具。
 
 `web_search`、`web_fetch` 由供应商的 `web_tools` 配置启用；`read_image` 由供应商的 `vision` 配置启用；`ocr`、`transcribe`、`speech` 由 DeepSeek 接入点的 `media` 配置启用（当前供应商没有 `media` 时，会用配置里另一个可用的 DeepSeek 接入点），写哪个 `*_path` 就开哪项能力。未启用的供应商既收不到对应的工具定义，直接调用也会被拒绝。
 
@@ -360,16 +360,14 @@ MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一
         "enabled": true,
         "web_search": true,
         "read_url": true
-      },
-      "web_tools": {
-        "enabled": false
       }
     }
   }
 }
 ```
 
-- `server_tools` 是默认的联网路径（仅 `api.deepseek.com`）：`enabled` 打开服务端工具，`web_search` / `read_url` 分别控制 `deepseek_web_search` 与 `deepseek_read_url`。`web_tools.enabled` 默认 `false`；把它打开会让本进程去调用独立的 Search/Fetch API（5 元/千次），并把 `server_tools.enabled` 设成 `false` 才能两不相争。详见 [docs/configuration.md](docs/configuration.md#web-tools)。
+- `server_tools` 是唯一的默认联网路径（仅 `api.deepseek.com`）：`enabled` 打开服务端工具，`web_search` / `read_url` 分别控制 `deepseek_web_search` 与 `deepseek_read_url`。搜索与抓取都在 DeepSeek 服务端完成，只计模型 token，没有按次费用。
+- 预设里**不含** `web_tools`：那是本进程直连的独立 Search/Fetch API（5 元/千次成功请求），只在你手动写入整块并设 `enabled: true` 时才会生效，届时把 `server_tools.enabled` 设成 `false` 才能两不相争。详见 [docs/configuration.md](docs/configuration.md#web-tools)。
 - `protocol` 取 `openai_chat`、`openai_responses`、`anthropic_messages` 或 `deepseek_web`（网页版对话接口，见 [docs/configuration.md](docs/configuration.md#built-in-provider-presets)）。
 - 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
@@ -403,7 +401,7 @@ $env:OPENAI_API_KEY = "your-openai-key"
 minimalcode --provider openai -m <model-id>     # 或交互里 /model openai/<model-id>
 ```
 
-切过去之后 `ocr`、`transcribe`、`speech` 仍在工具列表里，附件与「内容安全」开关会隐藏并说明原因。想让非 DeepSeek 的聊天接入点也能联网搜索，就把那个 DeepSeek 块的 `web_tools.enabled` 设成 `true`（按成功请求计费），此时由本进程直连 DeepSeek 的 Search API，与聊天走哪家无关。
+切过去之后 `ocr`、`transcribe`、`speech` 仍在工具列表里，附件与「内容安全」开关会隐藏并说明原因。想让非 DeepSeek 的聊天接入点也能联网搜索，只有一条路：给那个 DeepSeek 块手动加完整的 `web_tools` 块并设 `enabled: true`（按成功请求计费），此时由本进程直连 DeepSeek 的 Search API，与聊天走哪家无关。预设里没有这块，默认不会产生任何按次费用。
 
 怎么确认生效：CLI 里 `/status` 的 `tools` 列出 `ocr` / `transcribe` / `speech` 就说明借到了；网页端 `GET /api/state` 的 `deepseek` 字段中，`available` 表示存在可用的 DeepSeek 接入点，`active` 表示当前聊天就在它上面，`provider` 指出实际执行的是哪个块。
 
@@ -733,6 +731,16 @@ minimalcode/
 ## 升级指南
 
 每个版本都保持向后兼容：1.x 内没有删除公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。下面按从新到旧排列，只列升级时需要留意的行为变化；逐条明细见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 从 1.10.0 升级到 1.10.1
+
+1.10.1 把默认配置里最后的按次计费端点清掉了，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema。
+
+- 预设不再带 `web_tools`：`deepseek` 与 `deepseek-anthropic` 里那块独立 Search/Fetch API（5 元/千次成功请求，`base_url` 指向 `/v1/tools`）已整块移除。`minimalcode init` 生成的 `settings.json` 与 `config show` 都不会再出现付费端口。
+- 联网只剩一条默认路径：`server_tools.enabled: true` 声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在 DeepSeek 服务端完成，只计模型 token，没有按次费用。网页端「联网搜索」开关照旧可用。
+- 你现有的 `settings.json` 如果还留着那段（早期 `init` 写入了完整模板），把整个 `web_tools` 块删掉即可。留着也安全：`enabled: false` 的块不会发出任何请求、不产生费用，也不会在启动时提示。
+- 真想用独立 Search/Fetch API 时仍然可以，但要自己写完整块并设 `enabled: true`，同时把 `server_tools.enabled` 设成 `false`。少写任何一个路径键都会被明确拒绝，不会半启用后偷偷计费。
+- 顺带修掉 1.10.0 的一处预设残缺：`deepseek-anthropic.web_tools` 在删重复 `base_url` 时丢了 `search_path`，若打开该块会因缺路径报错；这块现在已随付费端点一起移除。
 
 ### 从 1.9.0 升级到 1.10.0
 

@@ -1,5 +1,20 @@
 # 更新日志
 
+## 1.10.1 - 2026-12-05
+
+默认配置里不再出现任何按次计费的联网端点：`deepseek` 与 `deepseek-anthropic` 预设的 `web_tools`（独立 Search/Fetch API，5 元/千次成功请求）整块移除，免费的服务端工具 `server_tools` 保持开启。
+
+### 变更
+
+- `defaults.json` 删除两个 DeepSeek 预设的 `web_tools` 块（`base_url`、`search_path`、`fetch_path`、`timeout_seconds`、`default_count`、`max_count`、`max_content_chars`、`default_need_content`、`min_rerank_score`、`headers` 一并移除）。`minimalcode init` 与 `config show` 因此不再写出或显示 `https://api.deepseek.com/v1/tools`、`search`、`fetch` 这些付费端口。
+- 联网只有一条默认路径：`server_tools.enabled: true` 声明 `deepseek_web_search` / `deepseek_read_url`，搜索与抓取都在 DeepSeek 服务端完成，只计模型 token，没有按次费用。
+- `web_tools` 配置键本身保留（没有删除公开配置键），只是不再有任何预设提供它。确实需要独立 Search/Fetch API 时，手动写完整块并设 `enabled: true`，同时把 `server_tools.enabled` 设成 `false`；缺任何一个键都会被 `ProviderWebClient` 明确拒绝，不会静默半启用。
+- 已有的 `settings.json` 里如果还留着这段（`minimalcode init` 曾经写入完整模板），删掉整个 `web_tools` 块即可。`enabled: false` 的残留块不会发出任何请求、不产生费用，只是让文件看起来还有付费端点；启动提示（`migration_notice`）只在 `enabled: true` 且 `server_tools` 未开启时出现。
+- 修复 1.10.0 引入的一处预设残缺：`deepseek-anthropic.web_tools` 在删除重复 `base_url` 时连带丢掉了 `search_path`，若把该块打开会因缺少路径被拒绝。该块现已随付费端点一起移除。
+- 版本号升级到 1.10.1。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema；对已存在的配置文件行为不变（`enabled` 本来就是 `false`）。
+- 文档：`README.md` 的配置示例去掉 `web_tools`，联网与工具两处改成「唯一免费路径 + 手动可选付费 fallback」；`docs/configuration.md` 同步 Web tools 与 provider 表说明；`docs/compatibility.md` 记录默认模板不再包含付费端点。
+
+## 1.10.0 - 2026-12-04
 ## 1.10.0 - 2026-12-04
 
 一个会话只用一个聊天接入点，但配置里其余的接入点不再闲着：OCR、语音识别、朗读与独立的 Search/Fetch API 可以由另一个 DeepSeek 接入点执行。同时新增自定义接入点，并让 Chat 协议把工具循环里的思考带进下一轮请求。

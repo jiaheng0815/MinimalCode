@@ -446,13 +446,10 @@ class WebToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             settings = load_settings(Path(temp) / ".MinimalCode")
         _, provider = settings.provider_config("deepseek")
-        web = provider["web_tools"]
-        # The default path is the model-side tool set, so the per-request
-        # Search/Fetch API stays off until someone opts in.
-        self.assertFalse(web["enabled"])
-        self.assertEqual(web["base_url"], "https://api.deepseek.com/v1/tools")
-        self.assertEqual(web["search_path"], "search")
-        self.assertEqual(web["fetch_path"], "fetch")
+        # The default path is the model-side tool set. The paid per-request
+        # Search/Fetch API is not in the preset at all: a settings file that
+        # wants it adds the whole block, and nothing else pays per call.
+        self.assertNotIn("web_tools", provider)
         server = provider["server_tools"]
         self.assertTrue(server["enabled"])
         self.assertTrue(server["web_search"])

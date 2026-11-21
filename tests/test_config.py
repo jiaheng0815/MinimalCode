@@ -191,13 +191,15 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings(home, require_file=True)
             provider = settings.data["providers"]["deepseek"]
             provider["trust_env"] = "${TEST_TRUST_ENV}"
-            provider["web_tools"]["trust_env"] = "${TEST_WEB_TRUST_ENV}"
+            # No preset ships `web_tools` any more (it is the paid fallback), so
+            # the block is written here the way a user who wants it would.
+            provider["web_tools"] = {"enabled": True, "trust_env": "${TEST_WEB}"}
             provider["vision"]["trust_env"] = "${TEST_VISION_TRUST_ENV}"
             with patch.dict(
                 os.environ,
                 {
                     "TEST_TRUST_ENV": "true",
-                    "TEST_WEB_TRUST_ENV": "false",
+                    "TEST_WEB": "false",
                     "TEST_VISION_TRUST_ENV": "0",
                 },
             ):

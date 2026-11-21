@@ -1,9 +1,9 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.10.0. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.10.1. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-1.8.0, 1.8.1, 1.9.0, and 1.10.0 added no further breaking import changes
+1.8.0, 1.8.1, 1.9.0, 1.10.0 and 1.10.1 added no further breaking import changes
 (`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
 `minimalcode.media`, and `minimalcode.webui` are new modules, not renamed ones).
 
@@ -11,12 +11,12 @@ The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0 or 1.10.0. Every
-change is additive: new tools join `tools.allow` and the read-only set, every new
-settings block is optional, and a `settings.json` written for 1.6.0 keeps working
-unchanged. The 1.8.0 web UI drives the same agent and the same JSONL files, so a
-conversation started in the browser is the file `--continue` resumes in the
-terminal.
+format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0 or
+1.10.1. Every change is additive: new tools join `tools.allow` and the read-only
+set, every new settings block is optional, and a `settings.json` written for
+1.6.0 keeps working unchanged. The 1.8.0 web UI drives the same agent and the same
+JSONL files, so a conversation started in the browser is the file `--continue`
+resumes in the terminal.
 
 1.9.0 has **behavioural** changes behind unchanged keys. The bundled DeepSeek
 presets now default `server_tools.enabled` to `true` and `web_tools.enabled` to
@@ -31,6 +31,29 @@ the key is changed. Nothing is rewritten on the user's behalf — see
 HTTP-call features can come from another configured DeepSeek block, and a Chat
 tool-call message now replays its `reasoning_content`. See
 `## What 1.10.0 changed`.
+
+1.10.1 removes the paid Search/Fetch block from the bundled presets, so a
+freshly initialised `settings.json` contains no per-request endpoint. The
+`web_tools` key itself is still accepted, and an existing block keeps its old
+behaviour; see `## What 1.10.1 changed`.
+
+## What 1.10.1 changed
+
+- The bundled `deepseek` and `deepseek-anthropic` presets no longer contain a
+  `web_tools` block. `minimalcode init` and `config show` therefore never emit
+  `https://api.deepseek.com/v1/tools`, `search`, or `fetch`: the only default web
+  path is `server_tools`, which bills model tokens only.
+- `web_tools` is still a supported configuration key with the same schema. A
+  settings file that writes the complete block and sets `enabled: true` behaves
+  exactly as before (5 CNY per 1,000 successful requests). `ProviderWebClient`
+  still rejects a partial block, so a half-written one cannot silently bill.
+- A leftover block with `enabled: false` stays inert: no request, no cost, no
+  startup notice. Delete the block to remove it from the file.
+- The `deepseek-anthropic` preset had lost `search_path` in 1.10.0 while removing
+  a duplicated `base_url`; enabling that block would have failed validation.
+  The block is now gone with the rest of the paid endpoint.
+
+## What 1.10.0 added
 
 ## What 1.10.0 added
 
