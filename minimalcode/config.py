@@ -725,6 +725,17 @@ def _validate_provider(name: str, provider: dict[str, Any], path: Path) -> None:
         _validate_session_title(
             provider["session_title"], path, f"providers.{name}.session_title"
         )
+    if "thinking" in provider and not _has_env_placeholder(provider["thinking"]):
+        # A provider may pin its own effort (a local model that only answers
+        # well at `xhigh`, say). `--thinking` and `/effort` still win at runtime.
+        thinking = provider["thinking"]
+        if isinstance(thinking, str):
+            provider["thinking"] = thinking = thinking.strip().lower()
+        if not isinstance(thinking, str) or thinking not in EFFORT_LEVELS:
+            raise ConfigError(
+                f"{path}: provider {name!r} thinking must be one of "
+                f"{', '.join(EFFORT_LEVELS)}"
+            )
 
 
 def _validate_string_list(value: Any, path: Path, key: str) -> None:

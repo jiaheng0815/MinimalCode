@@ -555,6 +555,18 @@
       "include_usage": false,
       "headers": {},
       "extra_body": {}
+    },
+    "ninfer": {
+      "protocol": "openai_chat",
+      "base_url": "http://localhost:8080/v1",
+      "require_api_key": false,
+      "context_window": 262144,
+      "thinking": "xhigh",
+      "timeout_seconds": 120,
+      "stream": true,
+      "include_usage": false,
+      "headers": {},
+      "extra_body": {}
     }
   }
 }

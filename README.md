@@ -4,7 +4,7 @@
 
 MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少启动开销、交互层级和上下文浪费，不提供炫技式 TUI。
 
-当前版本：`1.10.1`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
+当前版本：`1.11.0`。运行时依赖只有 `httpx2`（`deepseek_web` 协议额外需要可选的 `wasmtime`），Python 3.11–3.13。
 
 ## 目录
 
@@ -33,7 +33,7 @@ MinimalCode 是一个面向终端编码任务的轻量 Agent。它优先减少�
 ### 接入与协议
 
 - **协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 DeepSeek 网页版（`deepseek_web`），其他兼容供应商只需配置。Anthropic 供应商可加 `"prompt_cache": true`，把 system 提示与工具定义标记为一个缓存前缀，工具循环里每轮重发的大段静态内容按缓存读取计费；默认关闭，因为并非所有 Messages 兼容端点都接受 `cache_control`。
-- **多供应商切换**：内置 37 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm`），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
+- **多供应商切换**：内置 38 个供应商预设（34 家托管服务 + `ollama` / `lmstudio` / `vllm` / `ninfer` 四个本地服务），各自的 API key 走对应厂商的环境变量；交互中用 `/model 供应商/模型` 随时切换，会话历史保留。
 - **同时使用多家 API**：一个会话只用一个聊天接入点，但其它已配置的接入点仍可各司其职。只要配置里有一个 DeepSeek API 接入点（当前对话不在它上面也行），OCR、语音识别、语音朗读和独立的 Search/Fetch API 就由那个接入点提供；服务端联网工具、文档解析、内容安全和会话标题这类「写在请求里」的能力，仍然要求当前聊天接入点就是 `api.deepseek.com`。详见[同时使用多家 API](#同时使用多家-api)。
 - **自定义 API**：`minimalcode config add-provider` 或网页端的「自定义 API…」，写入任意 OpenAI 兼容、Anthropic 兼容或 DeepSeek 接入点。只新增 `providers.<name>`，内置预设保持不变。详见[自定义接入点](#自定义接入点)。
 
@@ -372,6 +372,7 @@ MinimalCode 可以作为 MCP 客户端，把外部服务器的工具并入同一
 - 密钥优先用 `api_key_env` 指向环境变量；直接写 `api_key` 也支持，但要注意文件权限。密钥不会由 `init` 写入配置。
 - 任意字符串值支持 `${VAR}` 环境变量占位符，未解析时会明确报出变量名，而不是把占位符发给供应商。
 - `include_usage` 仅在服务端接受 `stream_options` 时开启（仅 Chat 使用）；`send_reasoning_effort` 仅在供应商支持时开启。Responses 模式下的 `thinking` 只有配合 `send_reasoning_effort: true` 才会作为 `reasoning.effort` 发送；`none` 会发送 `reasoning.effort: "none"`，Chat 模式则发送 `thinking: {"type": "disabled"}` 关闭思考。Anthropic 模式同样由 `send_reasoning_effort` 控制是否发送 `thinking`。
+- 供应商可以自带默认推理强度：`providers.<名称>.thinking` 取 `EFFORT_LEVELS` 之一（`ninfer` 预设为 `xhigh`）。优先级是 `--thinking` / `/effort` → `providers.<名称>.thinking` → 顶层 `thinking`，所以显式参数永远优先，没写这个键的供应商继续用全局值。
 - `max_tokens` 仅 Anthropic Messages 使用，默认 `8192`。官方 Anthropic API 要求该字段；`thinking` 的 `budget_tokens` 会按 `thinking` 等级映射，并保证小于 `max_tokens`。
 - `prompt_cache: true` 只对 Anthropic Messages 生效：给 system 提示与工具定义打一个 `cache_control` 缓存断点，长工具循环里这段静态前缀按缓存读取计费。默认关闭，因为部分兼容端点不接受该字段。
 - 其他兼容供应商沿用同一结构，替换 `base_url`、模型和密钥环境变量即可；不想手写 JSON 时用[自定义接入点](#自定义接入点)。
@@ -446,6 +447,7 @@ minimalcode config add-provider my-gateway `
 /model openai/<model-id>
 /model anthropic/<model-id>
 /model moonshot/<model-id>
+/model ninfer/<本机加载的模型>
 ```
 
 | 供应商 | API key 环境变量 | 端点 |
@@ -486,8 +488,11 @@ minimalcode config add-provider my-gateway `
 | `ollama` | 无需密钥 | `http://localhost:11434/v1` |
 | `lmstudio` | 无需密钥 | `http://localhost:1234/v1` |
 | `vllm` | 无需密钥 | `http://localhost:8000/v1` |
+| `ninfer` | 无需密钥 | `http://localhost:8080/v1`（默认窗口 262144，`thinking: xhigh`） |
 
-预设只固定端点和密钥变量名，`context_window` 保持一个保守值（本地三家为 `32768`，其余按各家公开的主推窗口填写），换到更大或更小的模型时按需在 `settings.json` 里调整。区域或套餐端点不同时（例如 MiniMax 国内站 `https://api.minimax.cn/v1`、StepFun 国际站 `https://api.stepfun.ai/v1`、火山方舟 `step_plan` 端点），覆盖 `base_url` 即可；Cohere 的兼容端点不接受 `stream_options`，所以预设里 `include_usage` 为 `false`。
+本地服务默认免密钥（`require_api_key: false`），`base_url` 指向环回地址时自动忽略系统代理。`ninfer` 预设还固定了 `context_window: 262144` 与 `thinking: xhigh`：这是该接入点的默认推理强度，`--thinking` 和交互里的 `/effort` 仍然优先，其它供应商继续用全局 `thinking`（默认 `high`）。
+
+预设只固定端点和密钥变量名，`context_window` 保持一个保守值（`ollama` / `lmstudio` / `vllm` 为 `32768`，`ninfer` 按 262144，其余按各家公开的主推窗口填写），换到更大或更小的模型时按需在 `settings.json` 里调整。区域或套餐端点不同时（例如 MiniMax 国内站 `https://api.minimax.cn/v1`、StepFun 国际站 `https://api.stepfun.ai/v1`、火山方舟 `step_plan` 端点），覆盖 `base_url` 即可；Cohere 的兼容端点不接受 `stream_options`，所以预设里 `include_usage` 为 `false`。
 
 `/model` 切换的是当前会话，不会修改 `settings.json`；要改默认值仍用 `minimalcode config set-provider` / `set-model`。切换后子代理也会继承新的供应商和模型。新供应商如果没有配置 `web_tools` / `vision`，对应的 `web_search`、`web_fetch`、`read_image` 工具会从工具列表中移除，切回带这些配置的供应商后恢复；OCR、`transcribe`、`speech` 不同，它们由任一可用的 DeepSeek 接入点提供，切换聊天供应商时不会消失。
 
@@ -731,6 +736,14 @@ minimalcode/
 ## 升级指南
 
 每个版本都保持向后兼容：1.x 内没有删除公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。下面按从新到旧排列，只列升级时需要留意的行为变化；逐条明细见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 从 1.10.1 升级到 1.11.0
+
+1.11.0 只新增能力，没有删除任何公开名字、CLI 参数、配置键、JSON 字段、会话格式或工具 schema，已有的 `settings.json` 不需要改动。
+
+- 新增本地预设 `ninfer`：免密钥、`http://localhost:8080/v1`、262144 上下文、默认 `thinking: xhigh`。用法和其它本地服务一样，需要显式给出模型：`minimalcode --provider ninfer -m <模型>`，或在交互里 `/model ninfer/<模型>`。`/model` 不带参数时会把它列进「无需密钥」的可用供应商。
+- 新增配置键 `providers.<name>.thinking`：让单个接入点固定默认推理强度。`ninfer` 用它把默认值设成 `xhigh`；你现有的供应商都没写这个键，所以仍按顶层 `thinking`（默认 `high`）运行。`--thinking` 与 `/effort` 的优先级更高，随时可以覆盖。
+- 端口 8080 与网页界面的默认端口 8090 不冲突；真要同时跑，`--web-port` 换个端口即可。
 
 ### 从 1.10.0 升级到 1.10.1
 

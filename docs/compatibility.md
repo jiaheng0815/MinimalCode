@@ -1,22 +1,22 @@
 # Compatibility and migration
 
-Applies to MinimalCode 1.10.1. The 0.6 → 0.7 migration below still
+Applies to MinimalCode 1.11.0. The 0.6 → 0.7 migration below still
 describes the current public surface; 0.8, 1.0, 1.1, 1.2, 1.3, 1.3.1, 1.3.2,
 1.4.0, 1.4.1, 1.4.2, 1.4.3, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.6.0, 1.7.0,
-1.8.0, 1.8.1, 1.9.0, 1.10.0 and 1.10.1 added no further breaking import changes
-(`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
+1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1 and 1.11.0 added no further breaking import
+changes (`minimalcode.httpclient`, `minimalcode.clipboard`, `minimalcode.mcp`,
 `minimalcode.media`, and `minimalcode.webui` are new modules, not renamed ones).
 
 The public API of a package is the set of names in its `__all__`. Everything
 else is internal and may move between releases.
 
 No `__all__` name, CLI flag, configuration key, JSON output field, session
-format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0 or
-1.10.1. Every change is additive: new tools join `tools.allow` and the read-only
-set, every new settings block is optional, and a `settings.json` written for
-1.6.0 keeps working unchanged. The 1.8.0 web UI drives the same agent and the same
-JSONL files, so a conversation started in the browser is the file `--continue`
-resumes in the terminal.
+format, or import path was removed in 1.7.0, 1.8.0, 1.8.1, 1.9.0, 1.10.0, 1.10.1
+or 1.11.0. Every change is additive: new tools join `tools.allow` and the
+read-only set, every new settings block is optional, and a `settings.json`
+written for 1.6.0 keeps working unchanged. The 1.8.0 web UI drives the same agent
+and the same JSONL files, so a conversation started in the browser is the file
+`--continue` resumes in the terminal.
 
 1.9.0 has **behavioural** changes behind unchanged keys. The bundled DeepSeek
 presets now default `server_tools.enabled` to `true` and `web_tools.enabled` to
@@ -36,6 +36,26 @@ tool-call message now replays its `reasoning_content`. See
 freshly initialised `settings.json` contains no per-request endpoint. The
 `web_tools` key itself is still accepted, and an existing block keeps its old
 behaviour; see `## What 1.10.1 changed`.
+
+1.11.0 adds a `providers.<name>.thinking` key and a keyless `ninfer` preset. A
+provider that pins an effort now starts at that level unless `--thinking` or
+`/effort` says otherwise; providers without the key are unaffected. See
+`## What 1.11.0 added`.
+
+## What 1.11.0 added
+
+- `providers.<name>.thinking`: a default reasoning effort for one endpoint, one
+  of `EFFORT_LEVELS`. The precedence is `--thinking` / `/effort` → the provider
+  value → the top-level `thinking`, so an explicit flag always wins and every
+  provider without the key is unchanged. An invalid value is rejected when the
+  provider resolves, naming the file and the key.
+- The `ninfer` preset: `openai_chat`, `http://localhost:8080/v1`,
+  `require_api_key: false`, `context_window: 262144`, `thinking: xhigh`. It is a
+  local endpoint, so a loopback `base_url` also makes it ignore the proxy
+  environment. Like the other local presets it does not guess a model ID; pick
+  one with `/model ninfer/<model>` or `-m`.
+
+## What 1.10.1 changed
 
 ## What 1.10.1 changed
 

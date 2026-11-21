@@ -668,10 +668,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             output = stdout.getvalue()
-            # One hosted provider with a key plus the three keyless local presets.
-            self.assertIn("providers with detected credentials (4):", output)
+            # One hosted provider with a key plus the four keyless local presets.
+            self.assertIn("providers with detected credentials (5):", output)
             self.assertIn("openai  -  OPENAI_API_KEY (set)", output)
-            self.assertEqual(output.count("no key required"), 3)
+            self.assertEqual(output.count("no key required"), 4)
             self.assertNotIn("deepseek", output)
             self.assertNotIn("ANTHROPIC_API_KEY", output)
             self.assertEqual(stderr.getvalue(), "")

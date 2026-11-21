@@ -1,6 +1,6 @@
 # Configuration reference
 
-Applies to MinimalCode 1.10.1.
+Applies to MinimalCode 1.11.0.
 
 The default configuration root is `~/.MinimalCode`. Override it with `MINIMALCODE_HOME` or `--home`.
 
@@ -372,6 +372,7 @@ neither: the next user turn does not need them, and some servers reject a stale
 | `api_key_env` | no | Environment variable containing the API key |
 | `api_key` | no | Inline API key; prefer an environment variable |
 | `require_api_key` | no | Defaults to true when `api_key_env` is set; a loopback endpoint added from the page is written with `false` when no key is given |
+| `thinking` | no | Default reasoning effort for this provider (`EFFORT_LEVELS`); `--thinking` and `/effort` still win |
 
 Reserved request fields (`model`, `messages`, `stream`, `tools`, `tool_choice`) cannot be overridden through `extra_body`. The Anthropic payload also reserves `max_tokens`, `system`, and `thinking`.
 
@@ -553,8 +554,11 @@ provider's `vision` endpoint.
 | `ollama` | none (`require_api_key: false`) | `openai_chat` |
 | `lmstudio` | none (`require_api_key: false`) | `openai_chat` |
 | `vllm` | none (`require_api_key: false`) | `openai_chat` |
+| `ninfer` | none (`require_api_key: false`) | `openai_chat` |
 
-Presets pin the endpoint and the credential variable only. `context_window` is a conservative `32768` for the three local servers and the vendor's headline window for the rest; override it in `settings.json` when a different model needs more or less. Regional or plan-specific endpoints (MiniMax's `https://api.minimax.cn/v1`, StepFun's `https://api.stepfun.ai/v1`, Volcengine's `step_plan` endpoint) are a `base_url` override away. Cohere's compatibility API rejects `stream_options`, so its preset sets `include_usage: false`. Providers that need a signature or a query string per request (Azure OpenAI's `api-version`, Bedrock, Vertex) are not presets: configure them manually with `headers` and a full endpoint `base_url`.
+Presets pin the endpoint and the credential variable only. `context_window` is a conservative `32768` for `ollama`, `lmstudio`, and `vllm`, `262144` for `ninfer` (a local server started for a large model), and the vendor's headline window for the rest; override it in `settings.json` when a different model needs more or less. Regional or plan-specific endpoints (MiniMax's `https://api.minimax.cn/v1`, StepFun's `https://api.stepfun.ai/v1`, Volcengine's `step_plan` endpoint) are a `base_url` override away. Cohere's compatibility API rejects `stream_options`, so its preset sets `include_usage: false`. Providers that need a signature or a query string per request (Azure OpenAI's `api-version`, Bedrock, Vertex) are not presets: configure them manually with `headers` and a full endpoint `base_url`.
+
+A preset may also pin the reasoning effort with `thinking`. `ninfer` ships `thinking: xhigh`, so a session that selects it starts at that level without touching the global setting. The precedence is `--thinking` / `/effort` → `providers.<name>.thinking` → the top-level `thinking`, so an explicit flag or the interactive command always wins, and every provider without the key keeps the global value. A value outside `EFFORT_LEVELS` is rejected when the provider is resolved, with the file name and key in the message.
 
 `/model provider/model` switches the provider and model for the current session only; it does not rewrite `settings.json`. The switch rebuilds the web and vision clients, so a provider without those blocks stops advertising the corresponding tools, and it rebuilds the tool runtime so subagents inherit the new provider and model. Media tools follow the DeepSeek feature source instead: a provider without a `media` block keeps them while another DeepSeek block is configured. Use `/model` without arguments to list the active model and only the providers whose credentials are available: an inline `api_key`, an auth header, a set `api_key_env`, or `require_api_key: false`. Providers with a missing key are omitted instead of listed as unavailable.
 

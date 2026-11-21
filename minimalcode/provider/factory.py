@@ -46,7 +46,14 @@ def create_provider(
         or (str(provider_default_model) if provider_default_model else None)
         or settings.effective_model()
     )
-    effective_thinking = thinking or str(settings.get("thinking", "high"))
+    # An explicit argument (CLI or `/effort`) wins over the provider default,
+    # which wins over the global `thinking` setting.
+    provider_thinking = config.get("thinking")
+    effective_thinking = (
+        thinking
+        or (str(provider_thinking) if provider_thinking else None)
+        or str(settings.get("thinking", "high"))
+    )
     effective_model, suffix_window = _strip_context_suffix(effective_model, config)
     if suffix_window is not None:
         # The suffix is a client-side window selector; it must never reach the

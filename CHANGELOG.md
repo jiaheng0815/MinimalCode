@@ -1,5 +1,22 @@
 # 更新日志
 
+## 1.11.0 - 2026-12-06
+
+新增本地服务预设 `ninfer`（免密钥、`localhost:8080`、262k 上下文、默认 `xhigh` 推理强度），并让任意供应商都能固定自己的默认推理强度。
+
+### 新增
+
+- 供应商预设 `ninfer`：`protocol: openai_chat`、`base_url: http://localhost:8080/v1`、`require_api_key: false`、`context_window: 262144`、`thinking: xhigh`。和其它本地预设一样不猜模型 ID，用 `/model ninfer/<模型>` 或 `-m` 指定；`base_url` 指向环回地址，因此自动忽略系统代理。
+- 配置键 `providers.<name>.thinking`：为单个接入点固定默认推理强度，取 `EFFORT_LEVELS` 之一，大小写不敏感。优先级为 `--thinking` / `/effort` → `providers.<name>.thinking` → 顶层 `thinking`，显式参数永远优先；没写这个键的供应商行为不变。
+- 校验：`providers.<name>.thinking` 取值非法时在解析该供应商时报错，消息里带文件名与键名，而不是发出一个供应商不认识的强度。
+
+### 变更
+
+- `create_provider()` 的推理强度解析多了一层：显式参数 → 供应商配置 → 全局设置。
+- 版本号升级到 1.11.0。新增配置键 `providers.<name>.thinking`，内置预设数从 37 增至 38（本地服务 4 个）。没有删除任何公开 `__all__` 名字、CLI 参数、配置键、JSON 输出字段、会话格式或工具 schema。
+- 文档：`README.md` 更新当前版本、预设表与本地服务说明、`/model` 示例与 1.10.1 → 1.11.0 升级说明；`docs/configuration.md` 的 provider 字段表补 `thinking`，预设表补 `ninfer` 与优先级说明；`docs/compatibility.md` 记录新增键与预设。
+
+## 1.10.1 - 2026-12-05
 ## 1.10.1 - 2026-12-05
 
 默认配置里不再出现任何按次计费的联网端点：`deepseek` 与 `deepseek-anthropic` 预设的 `web_tools`（独立 Search/Fetch API，5 元/千次成功请求）整块移除，免费的服务端工具 `server_tools` 保持开启。
